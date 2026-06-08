@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { startDaemon } from './start';
 import { stopDaemon } from './stop';
+import { runStatus } from './status';
 
 const [, , command, ...args] = process.argv;
 
@@ -27,9 +28,18 @@ switch (command) {
     break;
   }
 
+  case 'status': {
+    const all = args.includes('--all');
+    runStatus({ all, cwd: process.cwd() }).catch((err: unknown) => {
+      console.error((err as Error).message);
+      process.exit(1);
+    });
+    break;
+  }
+
   default:
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: shreni <start|stop>');
+    console.error('Usage: shreni <start|stop|status [--all]>');
     process.exit(1);
 }
 
