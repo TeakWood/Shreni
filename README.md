@@ -67,7 +67,16 @@ shreni --version
 
 ## Kickstarting a Project (Kshetra)
 
-Run `shreni init-kshetra` to register a new project. This is a one-time setup per project.
+Before running `shreni init-kshetra`, the project git repo must already exist and have a GitHub remote configured. `init-kshetra` reads the remote URL from the repo (`git remote get-url origin`) to populate `kshetra.yaml` — it does not create the project repo for you.
+
+```bash
+# Create and push the project repo first (if it doesn't exist yet)
+gh repo create TeakWood/sishya --private --clone
+cd sishya
+git remote -v   # confirm origin is set
+```
+
+Then run `shreni init-kshetra` to register a new project. This is a one-time setup per project.
 
 ```bash
 shreni init-kshetra --slug sishya --path /projects/sishya
