@@ -1,6 +1,10 @@
 import { spawn } from 'child_process';
-import { resolve } from 'path';
+import { resolve, dirname } from 'path';
+import { openSync, mkdirSync } from 'fs';
+import { homedir } from 'os';
 import { readPid, writePid, isAlive } from './pid';
+
+export const DAEMON_LOG_PATH = resolve(homedir(), '.shreni', 'daemon.log');
 
 export type StartResult =
   | { status: 'started'; pid: number }
@@ -14,9 +18,11 @@ export function startDaemon(
     return { status: 'already_running', pid: existing };
   }
 
+  mkdirSync(dirname(DAEMON_LOG_PATH), { recursive: true });
+  const logFd = openSync(DAEMON_LOG_PATH, 'a');
   const child = spawn(process.execPath, [daemonScript], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', logFd, logFd],
   });
 
   if (child.pid === undefined) {

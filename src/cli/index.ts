@@ -3,6 +3,8 @@ import { startDaemon } from './start';
 import { stopDaemon } from './stop';
 import { runStatus } from './status';
 import { pauseKshetraById, resumeKshetraById } from './pause';
+import { runAgents } from './agents';
+import { runLogs } from './logs';
 
 function parseFlag(argv: string[], flag: string): string | undefined {
   const idx = argv.indexOf(flag);
@@ -71,8 +73,27 @@ switch (command) {
     break;
   }
 
+  case 'agents': {
+    runAgents().catch((err: unknown) => {
+      console.error((err as Error).message);
+      process.exit(1);
+    });
+    break;
+  }
+
+  case 'logs': {
+    const kshetraId = parseFlag(args, '--kshetra');
+    const beadId = parseFlag(args, '--bead');
+    const all = args.includes('--all');
+    runLogs({ kshetraId, beadId, all }).catch((err: unknown) => {
+      console.error((err as Error).message);
+      process.exit(1);
+    });
+    break;
+  }
+
   default:
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: shreni <start|stop|status [--all]|pause --kshetra <id>|resume --kshetra <id>>');
+    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume>');
     process.exit(1);
 }

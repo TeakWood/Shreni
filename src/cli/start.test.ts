@@ -15,6 +15,10 @@ vi.mock('./pid', () => ({
 const mockSpawn = vi.fn();
 vi.mock('child_process', () => ({ spawn: mockSpawn }));
 
+const mockOpenSync = vi.fn().mockReturnValue(3);
+const mockMkdirSync = vi.fn();
+vi.mock('fs', () => ({ openSync: mockOpenSync, mkdirSync: mockMkdirSync }));
+
 const { startDaemon } = await import('./start');
 
 function makeChild(pid: number) {
@@ -60,16 +64,16 @@ describe('startDaemon', () => {
     expect(result).toEqual({ status: 'started', pid: 1001 });
   });
 
-  it('spawns with detached:true and stdio:ignore', () => {
+  it('spawns with detached:true and log file stdio', () => {
     mockReadPid.mockReturnValue(null);
     mockSpawn.mockReturnValue(makeChild(42));
 
     startDaemon('/path/to/daemon.js');
 
     expect(mockSpawn).toHaveBeenCalledWith(
-      process.execPath,
+      expect.any(String),
       ['/path/to/daemon.js'],
-      { detached: true, stdio: 'ignore' },
+      expect.objectContaining({ detached: true, stdio: ['ignore', 3, 3] }),
     );
   });
 
