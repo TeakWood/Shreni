@@ -5,6 +5,8 @@ import { runStatus } from './status';
 import { pauseKshetraById, resumeKshetraById } from './pause';
 import { runAgents } from './agents';
 import { runLogs } from './logs';
+import { runRun } from './run';
+import { runSync } from './sync';
 
 function parseFlag(argv: string[], flag: string): string | undefined {
   const idx = argv.indexOf(flag);
@@ -92,8 +94,30 @@ switch (command) {
     break;
   }
 
+  case 'run': {
+    const id = parseFlag(args, '--kshetra');
+    if (!id) { console.error('Usage: shreni run --kshetra <id>'); process.exit(1); }
+    else {
+      runRun(id).catch((err: unknown) => {
+        console.error((err as Error).message);
+        process.exit(1);
+      });
+    }
+    break;
+  }
+
+  case 'sync': {
+    const kshetraId = parseFlag(args, '--kshetra');
+    const all = args.includes('--all');
+    runSync({ kshetraId, all }).catch((err: unknown) => {
+      console.error((err as Error).message);
+      process.exit(1);
+    });
+    break;
+  }
+
   default:
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume>');
+    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume|run|sync>');
     process.exit(1);
 }
