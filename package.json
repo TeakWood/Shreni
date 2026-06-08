@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Automated coding agent harness for your services",
   "main": "dist/index.js",
+  "bin": {
+    "shreni": "dist/cli/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
