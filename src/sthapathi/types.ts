@@ -1,5 +1,20 @@
 // Shared types used across sthapathi modules
 
+import type { KshetraConfig } from '../kshetra/config.js';
+
+export interface AgentContext {
+  kshetra: KshetraConfig;
+  task: Task;
+  projectMemory: string;
+  taskDetails: string;
+  universalSkills: string;
+  projectSkills: string;
+  scopedSkills: string;
+  conventions: string;
+  architecture: string;
+  ragChunks: string;
+}
+
 export interface Task {
   id: string;
   slug: string;

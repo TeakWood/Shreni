@@ -1,0 +1,119 @@
+import { readFile } from 'fs/promises';
+import { join, dirname } from 'path';
+import { homedir } from 'os';
+import type { KshetraConfig } from '../kshetra/config.js';
+import type { AgentContext, Task, ViharapalaOutput } from './types.js';
+import { bd } from './beads.js';
+import { runSilpi } from '../agents/silpi.js';
+import { runViharapala } from '../agents/viharapala.js';
+
+async function readFileOptional(filePath: string): Promise<string> {
+  try {
+    return await readFile(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+async function loadUniversalSkills(): Promise<string> {
+  return readFileOptional(join(homedir(), '.shreni', 'skills', 'SKILLS.md'));
+}
+
+async function loadScopedSkills(kshetra: KshetraConfig, relatedFiles?: string[]): Promise<string> {
+  if (!relatedFiles?.length) return '';
+  const seenDirs = new Set<string>();
+  const parts: string[] = [];
+  for (const file of relatedFiles) {
+    const dir = dirname(join(kshetra.repo.path, file));
+    if (seenDirs.has(dir)) continue;
+    seenDirs.add(dir);
+    const content = await readFileOptional(join(dir, 'CLAUDE.md'));
+    if (content) parts.push(content);
+  }
+  return parts.join('\n');
+}
+
+export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Promise<AgentContext> {
+  const bdClient = bd(kshetra);
+
+  const conventionsPath = kshetra.conventions?.styleGuide
+    ? join(kshetra.repo.path, kshetra.conventions.styleGuide)
+    : null;
+  const architecturePath = kshetra.conventions?.architecture
+    ? join(kshetra.repo.path, kshetra.conventions.architecture)
+    : null;
+
+  const [projectMemory, taskDetails, projectSkills, universalSkills, scopedSkills, conventions, architecture] =
+    await Promise.all([
+      bdClient.prime(),
+      bdClient.show(task.id),
+      readFileOptional(join(kshetra.repo.path, 'CLAUDE.md')),
+      loadUniversalSkills(),
+      loadScopedSkills(kshetra, task.context?.relatedFiles),
+      conventionsPath ? readFileOptional(conventionsPath) : Promise.resolve(''),
+      architecturePath ? readFileOptional(architecturePath) : Promise.resolve(''),
+    ]);
+
+  return {
+    kshetra,
+    task,
+    projectMemory,
+    taskDetails,
+    universalSkills,
+    projectSkills,
+    scopedSkills,
+    conventions,
+    architecture,
+    ragChunks: '',
+  };
+}
+
+export async function runSilpiViharapalaLoop(
+  kshetra: KshetraConfig,
+  task: Task,
+  _branch: string,
+): Promise<{ approved: boolean; note: string }> {
+  const bdClient = bd(kshetra);
+  let round = 0;
+  let feedback: ViharapalaOutput | null = null;
+
+  while (round < kshetra.agents.maxRoundsPerBead) {
+    round++;
+
+    const context = await buildAgentContext(kshetra, task);
+    const silpiOut = await runSilpi(context, round, feedback);
+
+    for (const insight of silpiOut.insights) {
+      await bdClient.remember(insight);
+    }
+
+    if (!silpiOut.testsPassed || !silpiOut.lintPassed) {
+      await bdClient.addNote(task.id, `Round ${round}: lint/tests failed`);
+      feedback = {
+        verdict: 'REJECT',
+        mustFix: ['Tests or lint failed — fix before resubmitting'],
+        overallScore: 0,
+        suggestions: [],
+        issues: [],
+        insights: [],
+      };
+      continue;
+    }
+
+    await bdClient.addNote(task.id, `Round ${round}: submitted for review`);
+
+    feedback = await runViharapala(context, silpiOut, round, context.taskDetails);
+
+    for (const insight of feedback.insights) {
+      await bdClient.remember(insight);
+    }
+
+    await bdClient.addNote(task.id, `Round ${round}: ${feedback.verdict}`);
+
+    if (feedback.verdict === 'APPROVE') {
+      return { approved: true, note: `Approved round ${round}` };
+    }
+  }
+
+  return { approved: false, note: `Blocked after ${round} rounds` };
+}
