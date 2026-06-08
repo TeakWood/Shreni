@@ -2,6 +2,12 @@
 import { startDaemon } from './start';
 import { stopDaemon } from './stop';
 import { runStatus } from './status';
+import { pauseKshetraById, resumeKshetraById } from './pause';
+
+function parseFlag(argv: string[], flag: string): string | undefined {
+  const idx = argv.indexOf(flag);
+  return idx >= 0 ? argv[idx + 1] : undefined;
+}
 
 const [, , command, ...args] = process.argv;
 
@@ -37,10 +43,36 @@ switch (command) {
     break;
   }
 
+  case 'pause': {
+    const id = parseFlag(args, '--kshetra');
+    if (!id) { console.error('Usage: shreni pause --kshetra <id>'); process.exit(1); }
+    else {
+      const result = pauseKshetraById(id);
+      if (result.status === 'not_found') {
+        console.error(`Kshetra not found: ${id}`); process.exit(1);
+      } else {
+        console.log(`Kshetra "${id}" paused — daemon will stop picking tasks on next cycle`);
+      }
+    }
+    break;
+  }
+
+  case 'resume': {
+    const id = parseFlag(args, '--kshetra');
+    if (!id) { console.error('Usage: shreni resume --kshetra <id>'); process.exit(1); }
+    else {
+      const result = resumeKshetraById(id);
+      if (result.status === 'not_found') {
+        console.error(`Kshetra not found: ${id}`); process.exit(1);
+      } else {
+        console.log(`Kshetra "${id}" resumed — daemon will pick tasks on next cycle`);
+      }
+    }
+    break;
+  }
+
   default:
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: shreni <start|stop|status [--all]>');
+    console.error('Usage: shreni <start|stop|status [--all]|pause --kshetra <id>|resume --kshetra <id>>');
     process.exit(1);
 }
-
-void args;

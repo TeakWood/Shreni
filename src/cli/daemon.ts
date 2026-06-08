@@ -4,6 +4,7 @@ import { pickup } from '../sthapathi/pickup';
 import { runSilpiViharapalaLoop } from '../sthapathi/dispatch';
 import { handleCycleError } from '../sthapathi/errors';
 import { branchName } from '../sthapathi/branch';
+import { isKshetraManuallyPaused } from '../kshetra/state';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -18,6 +19,7 @@ const scheduler = createScheduler();
 
 const hooks = {
   async pickNext(kshetra: KshetraConfig): Promise<Task | null> {
+    if (isKshetraManuallyPaused(kshetra)) return null;
     return pickup(kshetra);
   },
   async runTask(task: Task, kshetra: KshetraConfig): Promise<void> {
