@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
-import type { Task, E2EOutput } from '../sthapathi/types.js';
+import type { Task, ParikshakaOutput } from '../sthapathi/types.js';
 
 // ── module mocks ──────────────────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ vi.mock('../sthapathi/errors.js', () => ({
 
 // ── import after mocks ────────────────────────────────────────────────────────
 
-const { runE2E, buildE2ESystemPrompt } = await import('./e2e.js');
+const { runParikshaka, buildParikshakaSystemPrompt } = await import('./parikshaka.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ const TASK: Task = {
   priority: 2,
 };
 
-const VALID_OUTPUT: E2EOutput = {
+const VALID_OUTPUT: ParikshakaOutput = {
   testFilesAdded: ['src/auth.e2e.ts'],
   coverageGaps: [{ feature: 'refresh', description: 'Test token refresh flow', priority: 2 }],
 };
@@ -66,65 +66,65 @@ function apiResponse(output: unknown) {
 
 beforeEach(() => vi.clearAllMocks());
 
-// ── buildE2ESystemPrompt ──────────────────────────────────────────────────────
+// ── buildParikshakaSystemPrompt ───────────────────────────────────────────────
 
-describe('buildE2ESystemPrompt', () => {
+describe('buildParikshakaSystemPrompt', () => {
   it('includes the kshetra name', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx());
+    const prompt = buildParikshakaSystemPrompt(makeCtx());
     expect(prompt).toContain('Sishya');
   });
 
   it('includes existing test files', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx());
+    const prompt = buildParikshakaSystemPrompt(makeCtx());
     expect(prompt).toContain('src/login.test.ts');
   });
 
   it('shows (none) when no test files exist', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx({ existingTestFiles: [] }));
+    const prompt = buildParikshakaSystemPrompt(makeCtx({ existingTestFiles: [] }));
     expect(prompt).toContain('(none)');
   });
 
   it('includes the merged diff', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx());
+    const prompt = buildParikshakaSystemPrompt(makeCtx());
     expect(prompt).toContain('--- src/auth.ts');
   });
 
   it('includes the task id and title', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx());
+    const prompt = buildParikshakaSystemPrompt(makeCtx());
     expect(prompt).toContain('proj-42');
     expect(prompt).toContain('Fix auth');
   });
 
   it('includes personas when provided', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx({ personas: 'admin: can do everything' }));
+    const prompt = buildParikshakaSystemPrompt(makeCtx({ personas: 'admin: can do everything' }));
     expect(prompt).toContain('admin: can do everything');
   });
 
   it('omits PERSONAS section when not provided', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx({ personas: undefined }));
+    const prompt = buildParikshakaSystemPrompt(makeCtx({ personas: undefined }));
     expect(prompt).not.toContain('== PERSONAS ==');
   });
 
   it('contains the role boundary prohibiting bd calls', () => {
-    const prompt = buildE2ESystemPrompt(makeCtx());
+    const prompt = buildParikshakaSystemPrompt(makeCtx());
     expect(prompt).toContain('Do NOT call bd');
   });
 });
 
-// ── runE2E ────────────────────────────────────────────────────────────────────
+// ── runParikshaka ─────────────────────────────────────────────────────────────
 
-describe('runE2E', () => {
+describe('runParikshaka', () => {
   it('calls Claude with the kshetra model', async () => {
     apiResponse(VALID_OUTPUT);
-    await runE2E(makeCtx());
+    await runParikshaka(makeCtx());
     expect(mockCreate).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'claude-sonnet-4-6' }),
     );
   });
 
-  it('returns parsed E2EOutput on success', async () => {
+  it('returns parsed ParikshakaOutput on success', async () => {
     apiResponse(VALID_OUTPUT);
-    const result = await runE2E(makeCtx());
+    const result = await runParikshaka(makeCtx());
     expect(result.testFilesAdded).toEqual(['src/auth.e2e.ts']);
     expect(result.coverageGaps).toHaveLength(1);
     expect(result.coverageGaps[0].priority).toBe(2);
@@ -134,11 +134,11 @@ describe('runE2E', () => {
     mockCreate.mockResolvedValue({
       content: [{ type: 'text', text: 'not json' }],
     });
-    await expect(runE2E(makeCtx())).rejects.toThrow('E2E agent: invalid JSON');
+    await expect(runParikshaka(makeCtx())).rejects.toThrow('Parikshaka: invalid JSON');
   });
 
   it('throws when Claude response has no text block', async () => {
     mockCreate.mockResolvedValue({ content: [] });
-    await expect(runE2E(makeCtx())).rejects.toThrow('no text block');
+    await expect(runParikshaka(makeCtx())).rejects.toThrow('no text block');
   });
 });

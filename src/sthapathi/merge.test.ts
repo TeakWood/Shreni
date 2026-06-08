@@ -27,8 +27,8 @@ vi.mock('./beads.js', () => ({
   syncBeads: mockSyncBeads,
 }));
 
-const mockDispatchE2EAsync = vi.fn();
-vi.mock('./e2e-dispatch.js', () => ({ dispatchE2EAsync: mockDispatchE2EAsync }));
+const mockDispatchParikshakaAsync = vi.fn();
+vi.mock('./parikshaka-dispatch.js', () => ({ dispatchParikshakaAsync: mockDispatchParikshakaAsync }));
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ beforeEach(() => {
   mockDeleteBranch.mockResolvedValue(undefined);
   mockClose.mockResolvedValue('');
   mockSyncBeads.mockResolvedValue(undefined);
-  mockDispatchE2EAsync.mockImplementation(() => {});
+  mockDispatchParikshakaAsync.mockImplementation(() => {});
 });
 
 // ── squashMergeAndClose ───────────────────────────────────────────────────────
@@ -200,14 +200,14 @@ describe('squashMergeAndClose', () => {
     expect(mockDeleteBranch).not.toHaveBeenCalled();
   });
 
-  it('dispatches E2E asynchronously after push succeeds', async () => {
+  it('dispatches Parikshaka asynchronously after push succeeds', async () => {
     await squashMergeAndClose(TASK, KSHETRA, OUTPUT);
-    expect(mockDispatchE2EAsync).toHaveBeenCalledWith(KSHETRA, TASK, OUTPUT);
+    expect(mockDispatchParikshakaAsync).toHaveBeenCalledWith(KSHETRA, TASK, OUTPUT);
   });
 
-  it('does not dispatch E2E when push fails', async () => {
+  it('does not dispatch Parikshaka when push fails', async () => {
     mockPush.mockRejectedValue(new Error('remote rejected'));
     await squashMergeAndClose(TASK, KSHETRA, OUTPUT).catch(() => {});
-    expect(mockDispatchE2EAsync).not.toHaveBeenCalled();
+    expect(mockDispatchParikshakaAsync).not.toHaveBeenCalled();
   });
 });

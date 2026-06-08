@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
-import type { Task, SilpiOutput, E2EOutput } from './types.js';
+import type { Task, SilpiOutput, ParikshakaOutput } from './types.js';
 
 // ── module mocks ──────────────────────────────────────────────────────────────
 
@@ -13,8 +13,8 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: () => '/home/test' };
 });
 
-const mockRunE2E = vi.fn<() => Promise<E2EOutput>>();
-vi.mock('../agents/e2e.js', () => ({ runE2E: mockRunE2E }));
+const mockRunParikshaka = vi.fn<() => Promise<ParikshakaOutput>>();
+vi.mock('../agents/parikshaka.js', () => ({ runParikshaka: mockRunParikshaka }));
 
 const mockCommitFile = vi.fn<() => Promise<void>>();
 const mockPush = vi.fn<() => Promise<void>>();
@@ -34,11 +34,11 @@ vi.mock('./beads.js', () => ({
 const {
   collectTestFiles,
   buildMergedDiff,
-  commitE2ETestFiles,
+  commitParikshakaTestFiles,
   fileCoverageGaps,
-  runE2EDispatch,
-  dispatchE2EAsync,
-} = await import('./e2e-dispatch.js');
+  runParikshakaDispatch,
+  dispatchParikshakaAsync,
+} = await import('./parikshaka-dispatch.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -75,7 +75,7 @@ const SILPI_OUTPUT: SilpiOutput = {
   insights: [],
 };
 
-const E2E_OUTPUT: E2EOutput = {
+const PARIKSHAKA_OUTPUT: ParikshakaOutput = {
   testFilesAdded: ['src/auth.e2e.ts', 'src/session.e2e.ts'],
   coverageGaps: [
     { feature: 'refresh', description: 'Test token refresh under load', priority: 2 },
@@ -87,7 +87,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
   mockReaddir.mockResolvedValue([]);
-  mockRunE2E.mockResolvedValue(E2E_OUTPUT);
+  mockRunParikshaka.mockResolvedValue(PARIKSHAKA_OUTPUT);
   mockCommitFile.mockResolvedValue(undefined);
   mockPush.mockResolvedValue(undefined);
   mockBdCreate.mockResolvedValue('');
@@ -148,23 +148,23 @@ describe('collectTestFiles', () => {
   });
 });
 
-// ── commitE2ETestFiles ────────────────────────────────────────────────────────
+// ── commitParikshakaTestFiles ─────────────────────────────────────────────────
 
-describe('commitE2ETestFiles', () => {
+describe('commitParikshakaTestFiles', () => {
   it('calls commitFile for each test file with correct message', async () => {
-    await commitE2ETestFiles(KSHETRA, TASK, ['src/auth.e2e.ts', 'src/session.e2e.ts']);
+    await commitParikshakaTestFiles(KSHETRA, TASK, ['src/auth.e2e.ts', 'src/session.e2e.ts']);
     expect(mockCommitFile).toHaveBeenCalledTimes(2);
-    expect(mockCommitFile).toHaveBeenCalledWith('src/auth.e2e.ts', 'e2e: add tests for proj-42');
-    expect(mockCommitFile).toHaveBeenCalledWith('src/session.e2e.ts', 'e2e: add tests for proj-42');
+    expect(mockCommitFile).toHaveBeenCalledWith('src/auth.e2e.ts', 'parikshaka: add tests for proj-42');
+    expect(mockCommitFile).toHaveBeenCalledWith('src/session.e2e.ts', 'parikshaka: add tests for proj-42');
   });
 
   it('pushes to origin/<mainBranch> after committing', async () => {
-    await commitE2ETestFiles(KSHETRA, TASK, ['src/auth.e2e.ts']);
+    await commitParikshakaTestFiles(KSHETRA, TASK, ['src/auth.e2e.ts']);
     expect(mockPush).toHaveBeenCalledWith('origin', 'main');
   });
 
   it('does not push when no test files added', async () => {
-    await commitE2ETestFiles(KSHETRA, TASK, []);
+    await commitParikshakaTestFiles(KSHETRA, TASK, []);
     expect(mockCommitFile).not.toHaveBeenCalled();
     expect(mockPush).not.toHaveBeenCalled();
   });
@@ -173,32 +173,32 @@ describe('commitE2ETestFiles', () => {
 // ── fileCoverageGaps ──────────────────────────────────────────────────────────
 
 describe('fileCoverageGaps', () => {
-  it('calls bd.create for each coverage gap with type "e2e"', async () => {
-    await fileCoverageGaps(KSHETRA, E2E_OUTPUT);
+  it('calls bd.create for each coverage gap with type "parikshaka"', async () => {
+    await fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT);
     expect(mockBdCreate).toHaveBeenCalledTimes(2);
-    expect(mockBdCreate).toHaveBeenCalledWith('Test token refresh under load', 2, 'e2e');
-    expect(mockBdCreate).toHaveBeenCalledWith('Test session expiry edge case', 3, 'e2e');
+    expect(mockBdCreate).toHaveBeenCalledWith('Test token refresh under load', 2, 'parikshaka');
+    expect(mockBdCreate).toHaveBeenCalledWith('Test session expiry edge case', 3, 'parikshaka');
   });
 
   it('calls syncBeads after filing all gaps', async () => {
-    await fileCoverageGaps(KSHETRA, E2E_OUTPUT);
+    await fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT);
     expect(mockSyncBeads).toHaveBeenCalledOnce();
   });
 
   it('does not call bd.create or syncBeads when no gaps', async () => {
-    await fileCoverageGaps(KSHETRA, { ...E2E_OUTPUT, coverageGaps: [] });
+    await fileCoverageGaps(KSHETRA, { ...PARIKSHAKA_OUTPUT, coverageGaps: [] });
     expect(mockBdCreate).not.toHaveBeenCalled();
     expect(mockSyncBeads).not.toHaveBeenCalled();
   });
 });
 
-// ── runE2EDispatch ────────────────────────────────────────────────────────────
+// ── runParikshakaDispatch ─────────────────────────────────────────────────────
 
-describe('runE2EDispatch', () => {
-  it('calls runE2E with kshetra, task, merged diff, and test files', async () => {
+describe('runParikshakaDispatch', () => {
+  it('calls runParikshaka with kshetra, task, merged diff, and test files', async () => {
     mockReaddir.mockResolvedValue([]);
-    await runE2EDispatch(KSHETRA, TASK, SILPI_OUTPUT);
-    expect(mockRunE2E).toHaveBeenCalledWith(
+    await runParikshakaDispatch(KSHETRA, TASK, SILPI_OUTPUT);
+    expect(mockRunParikshaka).toHaveBeenCalledWith(
       expect.objectContaining({
         kshetra: KSHETRA,
         task: TASK,
@@ -209,51 +209,51 @@ describe('runE2EDispatch', () => {
 
   it('passes personas when ~/.shreni/personas.yaml exists', async () => {
     mockReadFile.mockResolvedValueOnce('admin: can do everything');
-    await runE2EDispatch(KSHETRA, TASK, SILPI_OUTPUT);
-    expect(mockRunE2E).toHaveBeenCalledWith(
+    await runParikshakaDispatch(KSHETRA, TASK, SILPI_OUTPUT);
+    expect(mockRunParikshaka).toHaveBeenCalledWith(
       expect.objectContaining({ personas: 'admin: can do everything' }),
     );
   });
 
   it('omits personas when file is missing', async () => {
-    await runE2EDispatch(KSHETRA, TASK, SILPI_OUTPUT);
-    const ctx = mockRunE2E.mock.calls[0][0] as { personas?: string };
+    await runParikshakaDispatch(KSHETRA, TASK, SILPI_OUTPUT);
+    const ctx = mockRunParikshaka.mock.calls[0][0] as { personas?: string };
     expect(ctx.personas).toBeUndefined();
   });
 
-  it('commits test files and files gaps after E2E runs', async () => {
-    await runE2EDispatch(KSHETRA, TASK, SILPI_OUTPUT);
+  it('commits test files and files gaps after Parikshaka runs', async () => {
+    await runParikshakaDispatch(KSHETRA, TASK, SILPI_OUTPUT);
     expect(mockCommitFile).toHaveBeenCalledTimes(2);
     expect(mockBdCreate).toHaveBeenCalledTimes(2);
   });
 });
 
-// ── dispatchE2EAsync ──────────────────────────────────────────────────────────
+// ── dispatchParikshakaAsync ───────────────────────────────────────────────────
 
-describe('dispatchE2EAsync', () => {
-  it('returns immediately without awaiting the E2E run', () => {
+describe('dispatchParikshakaAsync', () => {
+  it('returns immediately without awaiting the Parikshaka run', () => {
     let resolved = false;
-    mockRunE2E.mockImplementation(() =>
-      new Promise(r => setTimeout(() => { resolved = true; r(E2E_OUTPUT); }, 100)),
+    mockRunParikshaka.mockImplementation(() =>
+      new Promise(r => setTimeout(() => { resolved = true; r(PARIKSHAKA_OUTPUT); }, 100)),
     );
-    dispatchE2EAsync(KSHETRA, TASK, SILPI_OUTPUT);
+    dispatchParikshakaAsync(KSHETRA, TASK, SILPI_OUTPUT);
     expect(resolved).toBe(false);
   });
 
   it('does not propagate errors to the caller', async () => {
-    mockRunE2E.mockRejectedValue(new Error('E2E exploded'));
+    mockRunParikshaka.mockRejectedValue(new Error('Parikshaka exploded'));
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => dispatchE2EAsync(KSHETRA, TASK, SILPI_OUTPUT)).not.toThrow();
+    expect(() => dispatchParikshakaAsync(KSHETRA, TASK, SILPI_OUTPUT)).not.toThrow();
     await new Promise(r => setTimeout(r, 0));
     consoleSpy.mockRestore();
   });
 
   it('logs errors to console.error on failure', async () => {
-    mockRunE2E.mockRejectedValue(new Error('E2E exploded'));
+    mockRunParikshaka.mockRejectedValue(new Error('Parikshaka exploded'));
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    dispatchE2EAsync(KSHETRA, TASK, SILPI_OUTPUT);
+    dispatchParikshakaAsync(KSHETRA, TASK, SILPI_OUTPUT);
     await new Promise(r => setTimeout(r, 0));
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('E2E exploded'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Parikshaka exploded'));
     consoleSpy.mockRestore();
   });
 });

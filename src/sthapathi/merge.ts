@@ -5,7 +5,7 @@ import { git, GitError } from './git.js';
 import { branchName } from './branch.js';
 import { pauseKshetra } from '../kshetra/state.js';
 import { notifyVichara } from './errors.js';
-import { dispatchE2EAsync } from './e2e-dispatch.js';
+import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
 
 function buildCommitMessage(task: Task, output: SilpiOutput): string {
   const lines = [
@@ -155,8 +155,8 @@ export async function squashMergeAndClose(
   await g.commit(buildCommitMessage(task, output));
   await g.push('origin', main);
 
-  // Fire E2E agent after merge commit — non-blocking, does not stall the main loop
-  dispatchE2EAsync(kshetra, task, output);
+  // Fire Parikshaka after merge commit — non-blocking, does not stall the main loop
+  dispatchParikshakaAsync(kshetra, task, output);
 
   const note =
     `Merged: confidence=${output.confidenceScore} ` +

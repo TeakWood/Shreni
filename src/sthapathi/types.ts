@@ -53,7 +53,7 @@ export interface ViharapalaOutput {
   insights: string[];
 }
 
-export interface E2EOutput {
+export interface ParikshakaOutput {
   testFilesAdded: string[];
   coverageGaps: { feature: string; description: string; priority: number }[];
 }

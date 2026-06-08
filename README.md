@@ -13,7 +13,7 @@ Shreni has five named components:
 | **Sthapathi** | Orchestrator. Polls `bd` for tasks, manages agent dispatch, drives the Silpi↔Viharapala review loop, and owns the entire task lifecycle and git workflow. |
 | **Silpi** | Coding agent. Receives a task (context injected by Sthapathi), writes implementation code and unit tests, runs lint and tests, then submits for review. |
 | **Viharapala** | Review agent. Evaluates Silpi's output against acceptance criteria, code quality, and test coverage. Returns `APPROVE` or `REJECT` with structured feedback. |
-| **E2E Agent** | Test agent. Runs asynchronously after each merge. Writes end-to-end tests for shipped features and surfaces coverage gaps back to Sthapathi. |
+| **Parikshaka** | Test agent (Sanskrit: examiner). Runs asynchronously after each merge. Writes tests for shipped features and surfaces coverage gaps back to Sthapathi. |
 | **Vichara** | Conversational interface. Mobile-first PWA + CLI. Ask questions, check status, file bugs — from phone or terminal. |
 
 Each project managed by Shreni is a **Kshetra** (Sanskrit: field). A Kshetra has its own git repo, `bd` task database, RAG index, and agent queue. Kshetras are fully isolated — no cross-contamination of context, tasks, or git state.
