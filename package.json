@@ -36,6 +36,7 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.102.0",
     "@types/js-yaml": "^4.0.9",
     "js-yaml": "^4.2.0",
     "zod": "^4.4.3"
