@@ -22,7 +22,8 @@ async function run(
 ): Promise<{ stdout: string; stderr: string }> {
   try {
     const result = await execFileAsync('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 });
-    return { stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+    // trimEnd only — leading whitespace in stdout is meaningful for git --porcelain format
+    return { stdout: result.stdout.trimEnd(), stderr: result.stderr.trim() };
   } catch (err: unknown) {
     const e = err as { stderr?: string; message?: string; code?: string | number };
     throw new GitError(
@@ -62,9 +63,10 @@ export function git(kshetraOrPath: KshetraConfig | string) {
       try {
         await run(['commit', '-m', message, ...args], repoPath);
       } catch (err) {
-        // Treat "nothing to commit" as success — repo is already clean
-        const msg = (err as GitError).message ?? '';
-        if (msg.includes('nothing to commit') || msg.includes('nothing added')) return;
+        // git exits 1 when nothing to commit; message appears in stdout, not stderr
+        const cause = (err as GitError).cause as { stdout?: string } | undefined;
+        const combined = `${(err as GitError).message} ${cause?.stdout ?? ''}`;
+        if (combined.includes('nothing to commit') || combined.includes('nothing added')) return;
         throw err;
       }
     },
