@@ -66,11 +66,18 @@ export function pickNext(tasks: Task[]): Task | null {
 
 export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promise<void> {
   const g = git(kshetra);
+  const main = kshetra.repo.mainBranch;
+
+  await g.checkout(main);
+
   const status = await g.status();
   const dirty = [...status.modified, ...status.staged];
   if (dirty.length > 0) {
     throw new PreFlightError(task, `dirty working tree: ${dirty.join(', ')}`);
   }
+
+  await g.pull('--rebase', 'origin', main);
+
   const branch = `bead-${task.id}/${task.slug}`;
   if (await g.branchExists(branch)) {
     throw new PreFlightError(task, `branch already exists: ${branch}`);

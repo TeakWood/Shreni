@@ -2,10 +2,12 @@ import { readFile } from 'fs/promises';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import type { KshetraConfig } from '../kshetra/config.js';
-import type { AgentContext, Task, ViharapalaOutput } from './types.js';
+import type { AgentContext, Task, SilpiOutput, ViharapalaOutput } from './types.js';
 import { bd } from './beads.js';
 import { runSilpi } from '../agents/silpi.js';
 import { runViharapala } from '../agents/viharapala.js';
+import { withRetry } from './retry.js';
+import { ParseError, AgentError } from './errors.js';
 
 async function readFileOptional(filePath: string): Promise<string> {
   try {
@@ -66,6 +68,54 @@ export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Pro
     architecture,
     ragChunks: '',
   };
+}
+
+export async function runSilpiSafe(
+  kshetra: KshetraConfig,
+  task: Task,
+  context: AgentContext,
+  round: number,
+  feedback?: ViharapalaOutput | null,
+): Promise<SilpiOutput> {
+  const bdClient = bd(kshetra);
+  await bdClient.addNote(task.id, `Round ${round}: dispatching Silpi`);
+  try {
+    const output = await withRetry(`Silpi r${round}`, () => runSilpi(context, round, feedback));
+    await bdClient.addNote(task.id, `Round ${round}: Silpi submitted`);
+    return output;
+  } catch (err) {
+    if (err instanceof ParseError) {
+      await bdClient.addNote(task.id, `Round ${round}: Silpi output malformed — ${err.message}`);
+      throw new AgentError('MALFORMED_OUTPUT', { task, round, cause: err });
+    }
+    await bdClient.addNote(task.id, `Round ${round}: Silpi failed after retries — ${(err as Error).message}`);
+    throw new AgentError('API_FAILURE', { task, round, cause: err });
+  }
+}
+
+export async function runViharapalaSafe(
+  kshetra: KshetraConfig,
+  task: Task,
+  context: AgentContext,
+  silpiOut: SilpiOutput,
+  round: number,
+): Promise<ViharapalaOutput> {
+  const bdClient = bd(kshetra);
+  await bdClient.addNote(task.id, `Round ${round}: dispatching Viharapala`);
+  try {
+    const output = await withRetry(`Viharapala r${round}`, () =>
+      runViharapala(context, silpiOut, round, context.taskDetails),
+    );
+    await bdClient.addNote(task.id, `Round ${round}: ${output.verdict}`);
+    return output;
+  } catch (err) {
+    if (err instanceof ParseError) {
+      await bdClient.addNote(task.id, `Round ${round}: Viharapala output malformed — ${err.message}`);
+      throw new AgentError('MALFORMED_OUTPUT', { task, round, cause: err });
+    }
+    await bdClient.addNote(task.id, `Round ${round}: Viharapala failed after retries — ${(err as Error).message}`);
+    throw new AgentError('API_FAILURE', { task, round, cause: err });
+  }
 }
 
 export async function runSilpiViharapalaLoop(

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
 import { bd } from '../sthapathi/beads.js';
+import { ParseError } from '../sthapathi/errors.js';
 
 function buildSilpiSystemPrompt(
   context: AgentContext,
@@ -82,7 +83,12 @@ export async function runSilpi(
     throw new Error('Silpi: no text block in Claude response');
   }
 
-  const output: SilpiOutput = JSON.parse(textBlock.text) as SilpiOutput;
+  let output: SilpiOutput;
+  try {
+    output = JSON.parse(textBlock.text) as SilpiOutput;
+  } catch (err) {
+    throw new ParseError(`Silpi: invalid JSON in response — ${(err as Error).message}`, err);
+  }
 
   const note =
     `Round ${round}: confidence=${output.confidenceScore} ` +

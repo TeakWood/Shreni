@@ -15,9 +15,12 @@ vi.mock('./beads.js', () => ({
 
 const mockStatus = vi.fn<() => Promise<{ modified: string[]; staged: string[]; untracked: string[] }>>();
 const mockBranchExists = vi.fn<() => Promise<boolean>>();
+const mockCheckout = vi.fn<() => Promise<void>>();
+const mockPull = vi.fn<() => Promise<void>>();
 
 vi.mock('./git.js', () => ({
-  git: vi.fn(() => ({ status: mockStatus, branchExists: mockBranchExists })),
+  git: vi.fn(() => ({ status: mockStatus, branchExists: mockBranchExists, checkout: mockCheckout, pull: mockPull })),
+  GitError: class GitError extends Error { constructor(public readonly code: string, message: string) { super(message); } },
 }));
 
 // ── imports after mocks ──────────────────────────────────────────────────────
@@ -56,6 +59,8 @@ beforeEach(() => {
   mockSyncBeads.mockResolvedValue(undefined);
   mockStatus.mockResolvedValue({ modified: [], staged: [], untracked: [] });
   mockBranchExists.mockResolvedValue(false);
+  mockCheckout.mockResolvedValue(undefined);
+  mockPull.mockResolvedValue(undefined);
 });
 
 // ── parseReadyOutput ──────────────────────────────────────────────────────────

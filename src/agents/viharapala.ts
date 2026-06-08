@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
+import { ParseError } from '../sthapathi/errors.js';
 
 function buildViharapalaSystemPrompt(
   context: AgentContext,
@@ -76,5 +77,9 @@ export async function runViharapala(
     throw new Error('Viharapala: no text block in Claude response');
   }
 
-  return JSON.parse(textBlock.text) as ViharapalaOutput;
+  try {
+    return JSON.parse(textBlock.text) as ViharapalaOutput;
+  } catch (err) {
+    throw new ParseError(`Viharapala: invalid JSON in response — ${(err as Error).message}`, err);
+  }
 }
