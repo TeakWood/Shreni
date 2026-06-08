@@ -8,6 +8,10 @@ import { runLogs } from './logs';
 import { runRun } from './run';
 import { runSync } from './sync';
 import { initKshetra } from './init-kshetra';
+import { runRegister } from './register';
+import { verifyHooks } from './verify-hooks';
+import { runList } from './list';
+import { startVichara, stopVichara, statusVichara } from './vichara';
 
 function parseFlag(argv: string[], flag: string): string | undefined {
   const idx = argv.indexOf(flag);
@@ -134,8 +138,79 @@ switch (command) {
     break;
   }
 
+  case 'register': {
+    const kshetraPath = args[0];
+    if (!kshetraPath) {
+      console.error('Usage: shreni register <path>');
+      process.exit(1);
+    } else {
+      try {
+        const result = runRegister(kshetraPath);
+        console.log(`Kshetra "${result.id}" registered (${result.configPath})`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+    break;
+  }
+
+  case 'list': {
+    runList();
+    break;
+  }
+
+  case 'verify-hooks': {
+    const result = verifyHooks();
+    const ok = (v: boolean) => v ? '✓' : '✗';
+    console.log(`SessionStart hook (bd prime): ${ok(result.sessionStart.present)}`);
+    console.log(`PreCompact hook  (bd prime): ${ok(result.preCompact.present)}`);
+    if (!result.allPresent) {
+      console.error('\nOne or more hooks missing. Run `bd setup claude` in your Kshetra to install them.');
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'vichara': {
+    const sub = args[0];
+    const port = parseFlag(args.slice(1), '--port');
+    const parsedPort = port ? parseInt(port, 10) : undefined;
+
+    if (sub === 'start') {
+      const result = startVichara(parsedPort);
+      if (result.status === 'already_running') {
+        console.log(`vichara is already running (pid ${result.pid})`);
+      } else {
+        console.log(`vichara started (pid ${result.pid})`);
+      }
+      console.log(`Open: ${result.url}`);
+    } else if (sub === 'stop') {
+      const result = stopVichara();
+      if (result.status === 'stopped') {
+        console.log(`vichara stopped (pid ${result.pid})`);
+      } else if (result.status === 'stale_pid_cleared') {
+        console.log('vichara was not running (stale PID file cleared)');
+      } else {
+        console.log('vichara is not running');
+      }
+    } else if (sub === 'status') {
+      const result = statusVichara(parsedPort);
+      if (result.running) {
+        console.log(`vichara running (pid ${result.pid})`);
+        console.log(`URL: ${result.url}`);
+      } else {
+        console.log('vichara is not running');
+      }
+    } else {
+      console.error('Usage: shreni vichara <start|stop|status> [--port <port>]');
+      process.exit(1);
+    }
+    break;
+  }
+
   default:
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume|run|sync|init-kshetra>');
+    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume|run|sync|init-kshetra|register|verify-hooks|vichara>');
     process.exit(1);
 }

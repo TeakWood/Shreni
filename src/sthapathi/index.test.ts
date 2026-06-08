@@ -260,4 +260,30 @@ describe('start', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect((hooks.pickNext as ReturnType<typeof vi.fn>).mock.calls.length).toBe(countAtStop);
   });
+
+  it('crash in one Kshetra loop does not stop the other (2cw.1 isolation)', async () => {
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const scheduler = createScheduler();
+
+    // KSHETRA always errors; KSHETRA_B succeeds
+    const pickNextA = vi.fn().mockRejectedValue(new Error('kshetra A crash'));
+    const pickNextB = vi.fn().mockResolvedValue(null);
+
+    const hooksA = makeHooks({ pickNext: pickNextA });
+    const hooksB = makeHooks({ pickNext: pickNextB });
+
+    // Use per-kshetra loops so their hooks are independent
+    const stopA = scheduler.scheduleLoop(KSHETRA, hooksA, 100);
+    const stopB = scheduler.scheduleLoop(KSHETRA_B, hooksB, 100);
+
+    await vi.advanceTimersByTimeAsync(350);
+    // B should have been called multiple times despite A's crashes
+    expect(pickNextB.mock.calls.length).toBeGreaterThan(1);
+    expect(consoleSpy).toHaveBeenCalled();
+
+    stopA();
+    stopB();
+    consoleSpy.mockRestore();
+  });
 });

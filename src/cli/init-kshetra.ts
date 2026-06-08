@@ -129,11 +129,19 @@ export function writeKshetraConfig(repoPath: string, content: string): string {
 
 // ── Step 8: Append SHRENI INTEGRATION to CLAUDE.md ───────────────────────────
 
-const SHRENI_SECTION = `
+export const SHRENI_SECTION = `
 ## SHRENI INTEGRATION
 
-This project is managed by Shreni. The Sthapathi daemon automatically picks up
-beads issues and implements them via Claude Code agents.
+This project is managed by Shreni. The Sthapathi daemon picks up beads issues
+and implements them via Claude Code agents.
+
+**Your role in interactive sessions: task producer only.**
+Create beads issues for the daemon to implement — do NOT implement tasks yourself.
+
+Prohibited in interactive sessions:
+  bd update --claim            Sthapathi claims tasks, not interactive agents
+  bd close                     Sthapathi closes tasks on completion
+  git checkout -b / git branch Sthapathi owns all bead-* branches
 
 Useful commands:
   shreni status --all          Show all kshetra states

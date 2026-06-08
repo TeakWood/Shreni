@@ -47,6 +47,25 @@ describe('bd() wrapper', () => {
     expect(lastCall().env['BEADS_DIR']).toBe('/projects/sishya-beads');
   });
 
+  it('uses different BEADS_DIR for different Kshetras — no cross-contamination (2cw.2)', async () => {
+    const KSHETRA_B = {
+      ...KSHETRA,
+      id: 'mandira',
+      beads: { ...KSHETRA.beads, path: '/projects/mandira-beads' },
+    };
+    mockSuccess('[]');
+    await bd(KSHETRA).ready();
+    const envA = lastCall().env['BEADS_DIR'];
+
+    mockSuccess('[]');
+    await bd(KSHETRA_B).ready();
+    const envB = lastCall().env['BEADS_DIR'];
+
+    expect(envA).toBe('/projects/sishya-beads');
+    expect(envB).toBe('/projects/mandira-beads');
+    expect(envA).not.toBe(envB);
+  });
+
   it('ready() calls bd ready --json', async () => {
     mockSuccess('[]');
     const result = await bd(KSHETRA).ready();

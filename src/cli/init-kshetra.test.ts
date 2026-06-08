@@ -54,6 +54,7 @@ const {
   createRagIndexStub,
   registerWithSthapathi,
   initKshetra,
+  SHRENI_SECTION,
 } = await import('./init-kshetra');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -226,6 +227,24 @@ describe('generateKshetraYaml', () => {
 });
 
 // ── Step 8: appendShreniIntegration ──────────────────────────────────────────
+
+describe('SHRENI_SECTION content', () => {
+  it('states the task-producer-only role boundary', () => {
+    expect(SHRENI_SECTION).toContain('task producer only');
+  });
+
+  it('lists bd update --claim as prohibited', () => {
+    expect(SHRENI_SECTION).toContain('bd update --claim');
+  });
+
+  it('lists bd close as prohibited', () => {
+    expect(SHRENI_SECTION).toContain('bd close');
+  });
+
+  it('lists git branch operations as prohibited', () => {
+    expect(SHRENI_SECTION).toMatch(/git checkout.*-b|git branch/);
+  });
+});
 
 describe('appendShreniIntegration', () => {
   it('appends the SHRENI INTEGRATION section to CLAUDE.md', () => {
