@@ -54,12 +54,13 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
+**Package manager: pnpm only.** Never use `npm` or `yarn` — the project enforces this via `engines` in package.json and `.npmrc`.
 
 ```bash
-# Example:
-# npm install
-# npm test
+pnpm install        # install dependencies
+pnpm build          # compile TypeScript
+pnpm typecheck      # type-check without emitting
+pnpm dev            # run via tsx
 ```
 
 ## Architecture Overview

@@ -17,6 +17,11 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "packageManager": "pnpm@10.12.1",
+  "engines": {
+    "npm": "please-use-pnpm",
+    "yarn": "please-use-pnpm"
+  },
   "bugs": {
     "url": "https://github.com/TeakWood/Shreni/issues"
   },
