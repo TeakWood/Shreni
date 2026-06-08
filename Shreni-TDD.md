@@ -12,13 +12,15 @@
 2. [Repository Structure](#2-repository-structure)
 3. [Data Models](#3-data-models)
 4. [Sthapathi — Orchestrator Design](#4-sthapathi--orchestrator-design)
-5. [Agent Design](#5-agent-design)
-6. [Vichara — Server Design](#6-vichara--server-design)
-7. [RAG Index Design](#7-rag-index-design)
-8. [Git Operations](#8-git-operations)
-9. [shreni CLI](#9-shreni-cli)
-10. [Security Model](#10-security-model)
-11. [Recommended Build Sequence](#11-recommended-build-sequence)
+5. [Error Handling and Recovery](#5-error-handling-and-recovery)
+6. [Agent Design](#6-agent-design)
+7. [Interactive Claude Code Integration](#7-interactive-claude-code-integration)
+8. [Vichara — Server Design](#8-vichara--server-design)
+9. [RAG Index Design](#9-rag-index-design)
+10. [Git Operations](#10-git-operations)
+11. [shreni CLI](#11-shreni-cli)
+12. [Security Model](#12-security-model)
+13. [Recommended Build Sequence](#13-recommended-build-sequence)
 
 ---
 
@@ -28,7 +30,7 @@ Shreni is a locally-hosted multi-agent code development harness. This document d
 
 The system is built with **TypeScript/Node.js** for the Sthapathi orchestrator and Vichara server. Agents invoke **Claude Sonnet 4** via the Anthropic API. Task storage uses **`bd` (Beads)** — a Dolt-powered embedded CLI tool. All project repos and beads repos are hosted on `github.com/TeakWood/`.
 
-### Command Boundary
+### 1.1 Command Boundary
 
 Two CLI tools, distinct responsibilities, no overlap:
 
@@ -38,6 +40,21 @@ Two CLI tools, distinct responsibilities, no overlap:
 | `shreni` | Harness operations — Kshetra management, agent control, workflow, RAG, Vichara |
 
 `shreni` never wraps or proxies `bd` commands. If you need to manage tasks, use `bd` directly.
+
+### 1.2 `bd` Caller Boundary
+
+This is the most important design constraint in the system:
+
+| Caller | Permitted `bd` operations |
+|---|---|
+| **Sthapathi** | All — `ready`, `claim`, `show`, `prime`, `note`, `remember`, `close`, `create` (E2E gaps), `flag` |
+| **Vichara** | `create`, `dep add`, `show`, `ready` (read + file only) |
+| **Interactive Claude Code** | `create`, `dep add`, `show`, `ready`, `prime` (read + file only) |
+| **Silpi** | None — receives `bd` output as injected context, never calls `bd` |
+| **Viharapala** | None — receives `bd` output as injected context, never calls `bd` |
+| **E2E Agent** | None — returns coverage gaps in output; Sthapathi calls `bd create` on its behalf |
+
+`bd update --claim` and `bd close` are called **only by Sthapathi**. No other component touches task state transitions.
 
 ---
 
@@ -54,7 +71,7 @@ TeakWood/shreni/
 │   ├── scheduler.ts    # Per-Kshetra queue management
 │   ├── git.ts          # Branch create, merge, push helpers
 │   ├── beads.ts        # bd CLI wrapper — internal to Sthapathi only
-│   └── dispatch.ts     # Agent session builder
+│   └── dispatch.ts     # Agent session builder + context injector
 ├── agents/
 │   ├── silpi.ts        # Coding agent session
 │   ├── viharapala.ts   # Review agent session
@@ -63,7 +80,7 @@ TeakWood/shreni/
 │   ├── server.ts       # Fastify + WebSocket
 │   ├── tools/
 │   │   ├── read.ts     # Codebase search, bead queries
-│   │   └── write.ts    # Bead create/update (routes through Sthapathi API)
+│   │   └── write.ts    # bd create/dep — routes through Sthapathi API
 │   ├── rag.ts          # Per-Kshetra vector index
 │   └── pwa/            # Mobile PWA (React)
 ├── kshetra/
@@ -84,10 +101,11 @@ TeakWood/shreni/
 │   ├── style-guide.md          # Silpi reads this
 │   ├── arch.md                 # Architecture context for agents
 │   └── personas.yaml           # E2E user personas
-├── CLAUDE.md                   # Agent skills — global for this project
+├── CLAUDE.md                   # Agent skills + SHRENI INTEGRATION section
 ├── .claude/
+│   ├── settings.json           # bd SessionStart/PreCompact hooks (bd setup claude)
 │   └── commands/               # Per-task scoped skills
-├── AGENTS.md                   # Written by: bd setup claude
+├── AGENTS.md                   # Written by: bd init
 ├── .gitignore                  # Includes: .beads/
 └── src/
 
@@ -96,7 +114,7 @@ TeakWood/shreni/
 └── embeddeddolt/               # bd Dolt database (committed to GitHub)
 ```
 
-> **Symlink pattern:** `bd` embedded mode requires `BEADS_DIR` to point at the directory containing `embeddeddolt/`. Sthapathi sets `BEADS_DIR=/projects/<slug>-beads` for all `bd` calls. The `.beads/` symlink inside the project dir is a convenience for agents running with `cwd` set to the project.
+> **Symlink pattern:** `bd` embedded mode requires `BEADS_DIR` to point at the directory containing `embeddeddolt/`. Sthapathi sets `BEADS_DIR=/projects/<slug>-beads` for all `bd` calls. The `.beads/` symlink inside the project dir is a convenience for interactive Claude Code sessions running with `cwd` set to the project.
 
 ---
 
@@ -151,46 +169,42 @@ interface SilpiOutput {
   questionsForReviewer: string[];
   lintPassed: boolean;
   testsPassed: boolean;
+  insights: string[];            // Sthapathi calls bd remember for each
 }
 
 // Viharapala output
 interface ViharapalaOutput {
   verdict: 'APPROVE' | 'REJECT';
   overallScore: number;          // 0-100
-  mustFix: string[];             // blockers; Silpi must address
+  mustFix: string[];             // blockers; passed back to Silpi next round
   suggestions: string[];         // non-blocking improvements
   issues: {
     severity: 'blocker' | 'major' | 'minor';
     file?: string;
     description: string;
   }[];
+  insights: string[];            // Sthapathi calls bd remember for each
 }
 
 // E2E Agent output
 interface E2EOutput {
   testFilesAdded: string[];
-  coverageGaps: { feature: string; description: string }[];
-  newBeadsCreated: string[];     // bd IDs of gap-filling tasks filed
+  coverageGaps: { feature: string; description: string; priority: number }[];
+  // Sthapathi calls bd create for each coverageGap — E2E agent never calls bd
 }
 ```
 
 ### 3.3 Shreni Runtime State
 
-Sthapathi maintains live state in memory, exposed to the `shreni` CLI and Vichara via a local API:
-
 ```typescript
-interface ShreniState {
-  kshetras: KshetraState[];
-}
-
 interface KshetraState {
   id: string;
   name: string;
   status: 'running' | 'paused' | 'idle' | 'error';
-  activeBead: string | null;     // bd task ID currently being worked
+  activeBead: string | null;
   activeAgent: 'silpi' | 'viharapala' | 'e2e' | null;
   round: number;
-  queueDepth: number;            // bd ready count
+  queueDepth: number;
   lastCompletedAt: string | null;
   lastError: string | null;
 }
@@ -213,14 +227,15 @@ async function runCycle(kshetra: Kshetra): Promise<void> {
 
   const task = pickNext(tasks);               // P0 first, then FIFO
   await bd(kshetra).claim(task.id);           // bd update --claim (atomic)
+                                              // ONLY Sthapathi calls this
 
   const branch = await git(kshetra).createBranch(task);
   const result = await runSilpiViharapalaLoop(kshetra, task, branch);
 
   if (result.approved) {
     await git(kshetra).merge(branch);
-    await bd(kshetra).close(task.id, result.note);
-    await syncBeads(kshetra);                 // git push
+    await bd(kshetra).close(task.id, result.note);  // ONLY Sthapathi calls this
+    await syncBeads(kshetra);
     dispatch(e2eAgent, kshetra, task);        // async, non-blocking
   } else {
     await bd(kshetra).flag(task.id, 'Exceeded max rounds');
@@ -240,15 +255,31 @@ async function runSilpiViharapalaLoop(
 
   while (round < kshetra.agents.maxRoundsPerBead) {
     round++;
-    const silpiOut = await runSilpi(kshetra, task, branch, feedback);
+
+    // Sthapathi builds context — agents never call bd themselves
+    const context = await buildAgentContext(kshetra, task);
+    const silpiOut = await runSilpi(context, branch, feedback);
+
+    // Sthapathi persists insights on Silpi's behalf
+    for (const insight of silpiOut.insights) {
+      await bd(kshetra).remember(insight);
+    }
 
     if (!silpiOut.testsPassed || !silpiOut.lintPassed) {
-      // Silpi self-reported failure — don't send to Viharapala
-      feedback = { verdict: 'REJECT', mustFix: ['Tests or lint failed'], ... };
+      await bd(kshetra).addNote(task.id, `Round ${round}: lint/tests failed`);
+      feedback = { verdict: 'REJECT', mustFix: ['Tests or lint failed'], insights: [] };
       continue;
     }
 
-    feedback = await runViharapala(kshetra, task, silpiOut, round);
+    await bd(kshetra).addNote(task.id, `Round ${round}: submitted for review`);
+
+    feedback = await runViharapala(context, silpiOut, round);
+
+    // Sthapathi persists Viharapala insights
+    for (const insight of feedback.insights) {
+      await bd(kshetra).remember(insight);
+    }
+
     await bd(kshetra).addNote(task.id, `Round ${round}: ${feedback.verdict}`);
 
     if (feedback.verdict === 'APPROVE') {
@@ -259,24 +290,49 @@ async function runSilpiViharapalaLoop(
 }
 ```
 
-### 4.3 Beads Sync
+### 4.3 Agent Context Builder
+
+Sthapathi builds the full context before each agent dispatch. Agents receive `bd` output as data — they never call `bd` themselves.
+
+```typescript
+// sthapathi/dispatch.ts
+async function buildAgentContext(kshetra: Kshetra, task: Task): Promise<AgentContext> {
+  return {
+    // bd output injected as context — NOT available as a tool to agents
+    projectMemory:   await bd(kshetra).prime(),        // bd prime output
+    taskDetails:     await bd(kshetra).show(task.id),  // full task + history
+
+    // Skills — three-tier injection
+    universalSkills: loadSkills('~/.shreni/skills/'),
+    projectSkills:   readFile(kshetra, 'CLAUDE.md'),
+    scopedSkills:    loadScopedClaudes(kshetra, task.context.relatedFiles),
+
+    // Project conventions
+    conventions:     readFile(kshetra, '.shreni/style-guide.md'),
+    architecture:    readFile(kshetra, '.shreni/arch.md'),
+
+    // Codebase context
+    ragChunks:       await rag(kshetra).search(task.title, { topK: 10 }),
+    stack:           kshetra.stack,
+  };
+}
+```
+
+### 4.4 Beads Sync
 
 `bd` calls are internal to Sthapathi only. The `beads.ts` wrapper is not used by the `shreni` CLI or Vichara.
 
 ```typescript
-// sthapathi/beads.ts — internal module, not exposed via shreni CLI
+// sthapathi/beads.ts — internal module, not exposed outside Sthapathi
 
 async function syncBeads(kshetra: Kshetra): Promise<void> {
   const p = kshetra.beads.path;
-  await git(p).pull('--rebase', 'origin', 'main');  // pull first
-  // ... bd operations ...
+  await git(p).pull('--rebase', 'origin', 'main');
   await git(p).add('-A');
   await git(p).commit(`shreni: sync ${new Date().toISOString()}`);
   await git(p).push('origin', 'main');
 }
 
-// bd CLI wrapper — scopes BEADS_DIR per Kshetra
-// Used only by Sthapathi internals and agent sessions
 function bd(kshetra: Kshetra) {
   const env = { ...process.env, BEADS_DIR: kshetra.beads.path };
   return {
@@ -293,47 +349,687 @@ function bd(kshetra: Kshetra) {
 }
 ```
 
----
-
-## 5. Agent Design
-
-### 5.1 Agent Session Pattern
-
-All three agents follow the same session structure. Each agent call is a single Claude API request with a carefully constructed system prompt + user message. There is no persistent agent process — context is fully injected per session.
+### 4.5 E2E Agent Dispatch
 
 ```typescript
-async function buildAgentContext(kshetra: Kshetra, task: Task): Promise<AgentContext> {
-  return {
-    universalSkills: loadSkills('~/.shreni/skills/'),       // global skills
-    projectSkills:   readFile(kshetra, 'CLAUDE.md'),        // project CLAUDE.md
-    scopedSkills:    loadScopedClaudes(kshetra, task.context.relatedFiles),
-    projectMemory:   await bd(kshetra).prime(),             // bd prime output
-    taskDetails:     await bd(kshetra).show(task.id),       // full task + history
-    conventions:     readFile(kshetra, '.shreni/style-guide.md'),
-    architecture:    readFile(kshetra, '.shreni/arch.md'),
-    ragChunks:       await rag(kshetra).search(task.title, { topK: 10 }),
-    stack:           kshetra.stack,
-  };
+async function runE2EAgent(kshetra: Kshetra, mergedTask: Task): Promise<void> {
+  const personas      = readFile(kshetra, '.shreni/personas.yaml');
+  const existingTests = scanTestFiles(kshetra);
+  const diff          = await git(kshetra).diffMerged(mergedTask.branch);
+
+  const output: E2EOutput = await callClaude({
+    system: buildE2ESystemPrompt(kshetra, personas),
+    user:   { task: mergedTask, diff, existingTests }
+  });
+
+  // Sthapathi commits test files — E2E agent does not touch git directly
+  for (const file of output.testFilesAdded) {
+    await git(kshetra).commitFile(file, `e2e: add tests for ${mergedTask.id}`);
+  }
+
+  // Sthapathi files coverage gaps — E2E agent never calls bd create
+  for (const gap of output.coverageGaps) {
+    await bd(kshetra).create(gap.description, gap.priority, 'e2e');
+  }
+
+  await syncBeads(kshetra);
 }
 ```
 
-Skills are loaded in three tiers and injected in order — universal → project → scoped. See Section 9.4 for skill management via the `shreni` CLI.
+---
 
-### 5.2 Silpi System Prompt Structure
+## 5. Error Handling and Recovery
+
+### 5.1 Failure Taxonomy
+
+| Failure | Example | Recoverable? | Sthapathi action |
+|---|---|---|---|
+| Transient API error | Rate limit 429, 529 overloaded, timeout | ✅ Retry with backoff | Retry up to 3× with exponential backoff |
+| API hard failure | 400 bad request, invalid key | ❌ Stop | Block bead, alert Vichara, pause Kshetra |
+| Malformed agent output | Claude returns truncated or non-JSON | ✅ Retry once | Retry round, escalate after 2 failures |
+| Lint / test failure | Silpi self-reports `testsPassed: false` | ✅ Normal flow | Counts as a round, Viharapala not dispatched |
+| Git failure | Push rejected, merge conflict | ❌ Stop | Block bead, pause Kshetra, alert Vichara |
+| `bd` failure | Database locked, disk full | ❌ Stop | Pause Kshetra, alert Vichara |
+| Machine restart | Process killed mid-round | ✅ Resume | Reconstruct state from `bd show` + disk files on startup |
+
+### 5.2 What State Lives Where
+
+The critical design principle: **no essential state lives only in Sthapathi's memory.** Everything needed to resume is on disk or in `bd`.
+
+```
+Sthapathi process (ephemeral — lost on crash)
+  ├── in-memory Kshetra loop handles
+  ├── active bead pointer per Kshetra
+  └── current round counter
+
+~/.shreni/registry.json (durable — survives crash)
+  └── registered Kshetras and their config paths
+
+~/.shreni/state.json (durable — survives crash)
+  └── per-Kshetra pause state and reason
+
+bd / beads repo (durable — survives crash)
+  ├── bead status: in_progress / blocked / pending
+  ├── round notes: "Round 2: dispatching Silpi"
+  ├── all prior agent output as notes
+  └── project memory (bd remember entries)
+
+git (durable — survives crash)
+  ├── bead branch with all Silpi commits
+  └── main branch untouched until approved merge
+```
+
+### 5.3 Persistent Registry
+
+`shreni register` writes to `~/.shreni/registry.json`. This is the only thing Sthapathi needs on startup to discover all Kshetras — it reads this file, loads each `kshetra.yaml`, and begins recovery.
+
+```json
+// ~/.shreni/registry.json
+{
+  "kshetras": [
+    {
+      "id": "sishya",
+      "configPath": "/projects/sishya/.shreni/kshetra.yaml",
+      "registeredAt": "2026-06-01T10:00:00Z"
+    },
+    {
+      "id": "shreni",
+      "configPath": "/projects/shreni/.shreni/kshetra.yaml",
+      "registeredAt": "2026-06-01T10:05:00Z"
+    }
+  ]
+}
+```
+
+If a `configPath` is missing on startup (project moved or deleted), Sthapathi logs a warning and skips that Kshetra — it does not crash.
+
+### 5.4 Persistent Pause State
+
+Kshetra pause state is written to `~/.shreni/state.json` before any pause takes effect. This ensures a manual pause (from git or `bd` failure) survives a crash and is not accidentally auto-cleared on restart.
+
+```json
+// ~/.shreni/state.json
+{
+  "kshetras": {
+    "sishya": {
+      "paused": false
+    },
+    "bms": {
+      "paused": true,
+      "reason": "git_failed",
+      "message": "Push rejected: remote contains work not in local",
+      "pausedAt": "2026-06-08T14:30:00Z",
+      "requiresManualResume": true
+    }
+  }
+}
+```
+
+On startup, Sthapathi reads `state.json` and skips any Kshetra where `paused: true` + `requiresManualResume: true`. The human must still run `shreni resume --kshetra bms` — a crash does not auto-clear a manual pause.
+
+API cooldown pauses (`requiresManualResume: false`) are cleared automatically on restart since the API is likely recovered.
+
+```typescript
+// kshetra/state.ts
+
+async function pauseKshetra(
+  kshetra: Kshetra,
+  opts: { cooldownMs?: number; manual?: boolean; reason: string; message: string }
+): Promise<void> {
+  const state = await loadState();
+  state.kshetras[kshetra.id] = {
+    paused: true,
+    reason: opts.reason,
+    message: opts.message,
+    pausedAt: new Date().toISOString(),
+    requiresManualResume: opts.manual ?? false,
+  };
+  await saveState(state);  // writes to disk BEFORE stopping the loop
+
+  if (opts.cooldownMs) {
+    setTimeout(() => autoResumeKshetra(kshetra), opts.cooldownMs);
+  }
+}
+
+async function resumeKshetra(kshetra: Kshetra): Promise<void> {
+  const state = await loadState();
+  state.kshetras[kshetra.id] = { paused: false };
+  await saveState(state);
+  scheduleLoop(kshetra);
+}
+```
+
+### 5.5 Bead State as Recovery Anchor
+
+`bd` task notes are the per-bead state log. The rule: **write to `bd` before the risky operation, not after.**
+
+```typescript
+// WRONG — if dispatch crashes, bd still shows previous state
+await runSilpi(context);
+await bd(kshetra).addNote(task.id, 'Round 1: dispatched');
+
+// CORRECT — bd reflects intent before the operation starts
+await bd(kshetra).addNote(task.id, 'Round 1: dispatching Silpi');
+await runSilpi(context);   // if this throws, bd shows last known state
+```
+
+### 5.6 Startup Sequence
+
+```typescript
+// sthapathi/index.ts
+
+async function start(): Promise<void> {
+
+  // 1. Load Kshetras from persistent registry
+  const registry = await loadRegistry();           // ~/.shreni/registry.json
+  const kshetras = registry.kshetras
+    .map(entry => loadKshetraConfig(entry.configPath))
+    .filter(k => k !== null);                      // skip missing configs
+
+  // 2. Load pause state from disk
+  const state = await loadState();                 // ~/.shreni/state.json
+
+  // 3. Sync beads repos (pull any tasks filed while down)
+  for (const k of kshetras) {
+    try {
+      await syncBeads(k);
+    } catch (err) {
+      log.warn(`Sync failed for ${k.id} on startup: ${err.message}`);
+      // Non-fatal — continue with local state
+    }
+  }
+
+  // 4. Recover in-flight tasks for each running Kshetra
+  for (const k of kshetras) {
+    const kshetraState = state.kshetras[k.id];
+
+    if (kshetraState?.paused && kshetraState.requiresManualResume) {
+      log.info(`Skipping ${k.id} — manually paused (${kshetraState.reason})`);
+      continue;
+    }
+
+    // Clear API cooldown pauses — API likely recovered
+    if (kshetraState?.paused && !kshetraState.requiresManualResume) {
+      await resumeKshetra(k);
+    }
+
+    await recoverKshetra(k);
+  }
+
+  // 5. Start main polling loop for all recovered Kshetras
+  for (const k of kshetras) {
+    const s = state.kshetras[k.id];
+    if (!s?.paused) scheduleLoop(k);
+  }
+}
+```
+
+### 5.7 In-Flight Task Recovery
+
+```typescript
+async function recoverKshetra(kshetra: Kshetra): Promise<void> {
+  const inFlight = await bd(kshetra).list({ status: 'in_progress' });
+
+  for (const task of inFlight) {
+    const lastNote  = parseLastNote(task.notes);
+    const branch    = `bead-${task.id}/${task.slug}`;
+    const hasBranch = await git(kshetra).branchExists(branch);
+
+    log.info(`Recovery [${kshetra.id}]: ${task.id} — "${lastNote}"`);
+
+    // Crashed before branch was created
+    if (lastNote.includes('claiming') && !hasBranch) {
+      await git(kshetra).createBranch(task);
+      scheduleResume(kshetra, task, 'silpi');
+    }
+
+    // Crashed while Silpi was running
+    else if (lastNote.includes('dispatching Silpi')) {
+      await bd(kshetra).addNote(task.id,
+        `Round ${task.round}: resuming Silpi after restart`
+      );
+      scheduleResume(kshetra, task, 'silpi');
+    }
+
+    // Silpi finished, crashed before Viharapala dispatched
+    else if (lastNote.includes('Silpi submitted')) {
+      await bd(kshetra).addNote(task.id,
+        `Round ${task.round}: resuming at Viharapala after restart`
+      );
+      const silpiOut = await reconstructSilpiOutput(kshetra, task);
+      scheduleResume(kshetra, task, 'viharapala', { silpiOut });
+    }
+
+    // Crashed while Viharapala was running
+    else if (lastNote.includes('dispatching Viharapala')) {
+      await bd(kshetra).addNote(task.id,
+        `Round ${task.round}: resuming Viharapala after restart`
+      );
+      const silpiOut = await reconstructSilpiOutput(kshetra, task);
+      scheduleResume(kshetra, task, 'viharapala', { silpiOut });
+    }
+
+    // Viharapala approved — crashed before or during merge
+    else if (lastNote.includes('APPROVE')) {
+      const alreadyMerged = await git(kshetra).isAncestor(branch, 'main');
+      if (alreadyMerged) {
+        // Merge done, bd close didn't run — just close it
+        await bd(kshetra).close(task.id, 'Recovered: merged before crash');
+        await syncBeads(kshetra);
+      } else {
+        // Merge didn't happen — redo from approval
+        scheduleResume(kshetra, task, 'merge');
+      }
+    }
+
+    // Was paused waiting for API — retry
+    else if (lastNote.includes('Paused: API unavailable')) {
+      scheduleResume(kshetra, task, 'silpi');
+    }
+
+    // Already blocked/failed — leave for human
+    else {
+      log.info(`Recovery: ${task.id} is blocked/failed, skipping`);
+    }
+  }
+}
+
+// Silpi output is recoverable from the branch diff + bd notes
+async function reconstructSilpiOutput(
+  kshetra: Kshetra,
+  task: Task
+): Promise<SilpiOutput> {
+  const diff  = await git(kshetra).branchDiff(`bead-${task.id}`);
+  const notes = parseRoundNotes(task.notes);
+  return reconstructFromDiffAndNotes(diff, notes);
+}
+```
+
+### 5.8 Retry Strategy
+
+```typescript
+// sthapathi/retry.ts
+
+const AGENT_RETRY_CONFIG = {
+  maxAttempts: 3,
+  initialDelayMs: 5_000,
+  backoffMultiplier: 2,
+  maxDelayMs: 60_000,
+  retryableStatuses: [429, 502, 503, 529],
+  retryableErrors: ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND'],
+};
+
+async function withRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  config = AGENT_RETRY_CONFIG
+): Promise<T> {
+  let attempt = 0;
+  let delay = config.initialDelayMs;
+
+  while (attempt < config.maxAttempts) {
+    attempt++;
+    try {
+      return await fn();
+    } catch (err) {
+      const isRetryable =
+        config.retryableStatuses.includes(err.status) ||
+        config.retryableErrors.some(e => err.message?.includes(e));
+
+      if (!isRetryable || attempt >= config.maxAttempts) throw err;
+
+      log.warn(`${label} attempt ${attempt} failed (${err.message}). Retry in ${delay}ms`);
+      await sleep(delay);
+      delay = Math.min(delay * config.backoffMultiplier, config.maxDelayMs);
+    }
+  }
+  throw new Error(`${label} exhausted ${config.maxAttempts} attempts`);
+}
+```
+
+### 5.9 Agent Dispatch With Error Handling
+
+```typescript
+// sthapathi/dispatch.ts
+
+async function runSilpiSafe(
+  kshetra: Kshetra, task: Task, context: AgentContext, round: number
+): Promise<SilpiOutput> {
+
+  await bd(kshetra).addNote(task.id, `Round ${round}: dispatching Silpi`);
+
+  try {
+    const raw    = await withRetry(`Silpi r${round}`, () => callClaude(buildSilpiPrompt(context)));
+    const output = parseSilpiOutput(raw);     // throws ParseError if invalid
+    await bd(kshetra).addNote(task.id, `Round ${round}: Silpi submitted`);
+    return output;
+
+  } catch (err) {
+    if (err instanceof ParseError) {
+      await bd(kshetra).addNote(task.id, `Round ${round}: Silpi output malformed — ${err.message}`);
+      throw new AgentError('MALFORMED_OUTPUT', { task, round, cause: err });
+    }
+    await bd(kshetra).addNote(task.id, `Round ${round}: Silpi failed after retries — ${err.message}`);
+    throw new AgentError('API_FAILURE', { task, round, cause: err });
+  }
+}
+
+async function runViharapalaSafe(
+  kshetra: Kshetra, task: Task, context: AgentContext, silpiOut: SilpiOutput, round: number
+): Promise<ViharapalaOutput> {
+
+  await bd(kshetra).addNote(task.id, `Round ${round}: dispatching Viharapala`);
+
+  try {
+    const raw    = await withRetry(`Viharapala r${round}`, () => callClaude(buildViharapalaPrompt(context, silpiOut, round)));
+    const output = parseViharapalaOutput(raw);
+    await bd(kshetra).addNote(task.id, `Round ${round}: ${output.verdict}`);
+    return output;
+
+  } catch (err) {
+    if (err instanceof ParseError) {
+      await bd(kshetra).addNote(task.id, `Round ${round}: Viharapala output malformed — ${err.message}`);
+      throw new AgentError('MALFORMED_OUTPUT', { task, round, cause: err });
+    }
+    await bd(kshetra).addNote(task.id, `Round ${round}: Viharapala failed after retries — ${err.message}`);
+    throw new AgentError('API_FAILURE', { task, round, cause: err });
+  }
+}
+```
+
+### 5.10 Top-Level Cycle Error Handler
+
+```typescript
+async function handleCycleError(
+  kshetra: Kshetra, task: Task | null, err: Error
+): Promise<void> {
+
+  switch (classifyError(err)) {
+
+    case 'API_DOWN':
+      if (task) await bd(kshetra).addNote(task.id,
+        `Paused: API unavailable — ${err.message}. Will retry.`
+      );
+      await pauseKshetra(kshetra, {
+        reason: 'api_down', message: err.message,
+        cooldownMs: 5 * 60 * 1000                 // auto-resumes after 5 min
+      });
+      await notifyVichara(kshetra, task, 'api_down');
+      break;
+
+    case 'AGENT_FAILED':
+      // Block bead — Kshetra continues with next task
+      if (task) {
+        await bd(kshetra).flag(task.id, `Agent failed: ${err.message}`);
+        await syncBeads(kshetra);
+      }
+      await notifyVichara(kshetra, task, 'agent_failed');
+      break;
+
+    case 'MALFORMED_OUTPUT':
+      if (task) {
+        await bd(kshetra).flag(task.id, `Malformed output after retries: ${err.message}`);
+        await syncBeads(kshetra);
+      }
+      await notifyVichara(kshetra, task, 'agent_failed');
+      break;
+
+    case 'GIT_FAILED':
+      if (task) {
+        await bd(kshetra).flag(task.id, `Git failure: ${err.message}. Branch kept.`);
+        await syncBeads(kshetra);
+      }
+      await pauseKshetra(kshetra, {
+        reason: 'git_failed', message: err.message,
+        manual: true                               // requires shreni resume
+      });
+      await notifyVichara(kshetra, task, 'git_failed');
+      break;
+
+    case 'BD_FAILED':
+      await pauseKshetra(kshetra, {
+        reason: 'bd_failed', message: err.message,
+        manual: true
+      });
+      await notifyVichara(kshetra, null, 'bd_failed');
+      break;
+
+    default:
+      if (task) {
+        await bd(kshetra).flag(task.id, `Unexpected error: ${err.message}`);
+        await syncBeads(kshetra);
+      }
+      await notifyVichara(kshetra, task, 'unknown_error');
+  }
+}
+```
+
+### 5.11 Bead State After Each Failure Scenario
+
+| Scenario | Bead status | Branch | Kshetra | `state.json` | Next action |
+|---|---|---|---|---|---|
+| API rate limit, retries succeed | `in_progress` | Alive | Running | unchanged | Continues normally |
+| API down, retries exhausted | `in_progress` + note | Alive | Paused 5 min | `paused: true, requiresManualResume: false` | Auto-resumes after cooldown |
+| Malformed output, retried | `in_progress` + note | Alive | Running | unchanged | Sthapathi retries round |
+| Malformed output, 2nd failure | `blocked` + note | Alive | Running | unchanged | Human: `bd update --unblock` |
+| Agent hard failure | `blocked` + note | Alive | Running | unchanged | Human: `bd update --unblock` |
+| Git failure | `blocked` + note | Alive | Paused (manual) | `paused: true, requiresManualResume: true` | Human fixes, `shreni resume` |
+| `bd` failure | unchanged | unchanged | Paused (manual) | `paused: true, requiresManualResume: true` | Human fixes, `shreni resume` |
+| Sthapathi crash mid-round | `in_progress` + note | Alive | Recovers on restart | auto-cleared if API cooldown | Re-runs current round |
+| Sthapathi crash post-approve | `in_progress` + note | Alive | Recovers on restart | unchanged | Re-checks merge, closes bead |
+| Max rounds exceeded | `blocked` + note | Alive | Running | unchanged | Human reviews, `bd update --unblock` |
+
+> **Branch retention:** Bead branches are never deleted on failure. They are kept for human inspection. Cleanup is a manual `git branch -d` after the human resolves the block.
+
+> **Blocked beads do not require `shreni resume`.** `shreni resume` is only for Kshetra-level pauses caused by git or `bd` failures. For a blocked bead, Sthapathi keeps running and picks up the next pending task automatically. The human unblocks via `bd update --unblock` when ready.
+
+### 5.12 Human Recovery via CLI
+
+```bash
+# Inspect what failed and why
+shreni status --kshetra sishya
+shreni logs --kshetra sishya --bead bd-f3a2
+bd show bd-f3a2              # full round notes and error detail
+
+# Resume a Kshetra paused by git or bd failure
+shreni resume --kshetra sishya
+
+# Unblock a bead and let Sthapathi retry it
+# (no shreni command needed — bd is enough)
+bd update bd-f3a2 --unblock
+```
+
+### 5.13 Git Conflict Handling
+
+Merge failures are a distinct failure class with their own response strategy. The goal is to auto-resolve as many cases as possible before escalating to human.
+
+#### Failure Scenarios
+
+| Scenario | Sthapathi action | Bead | Kshetra |
+|---|---|---|---|
+| Dirty working tree on `main` | Pre-flight fails, task never claimed | `pending` (untouched) | Running |
+| `main` moved since branch cut | Rebase attempt before merge | `in_progress` | Running |
+| Rebase succeeds | Merge proceeds normally | → `complete` | Running |
+| Rebase fails, conflict in task files, rounds remain | Re-dispatch Silpi with conflict context | `in_progress` + note | Running |
+| Rebase fails, conflict outside task scope | Block bead, pause Kshetra | `blocked` + note | Paused (manual) |
+| Push rejected (non-fast-forward) | Pull-rebase and retry once | `in_progress` | Running |
+| Push rejected twice | Block bead, pause Kshetra | `blocked` + note | Paused (manual) |
+
+#### Pre-Flight Check (before `bd claim`)
+
+Sthapathi verifies `main` is clean before creating a branch. If this fails, the task is never claimed — it stays `pending` and is retried next cycle.
+
+```typescript
+// sthapathi/git.ts
+
+async function preFlightCheck(kshetra: Kshetra): Promise<void> {
+  const repo = kshetra.repo.path;
+  await git(repo).checkout('main');
+
+  const status = await git(repo).status();
+  if (status.modified.length > 0 || status.staged.length > 0) {
+    throw new GitError('DIRTY_WORKING_TREE',
+      `Uncommitted changes on main: ${status.modified.join(', ')}`
+    );
+  }
+
+  // Pull latest main before branching so Silpi starts from current state
+  await git(repo).pull('--rebase', 'origin', 'main');
+}
+```
+
+`preFlightCheck` is called before `bd.claim()` in the main cycle:
+
+```typescript
+async function runCycle(kshetra: Kshetra): Promise<void> {
+  await syncBeads(kshetra);
+  const tasks = await bd(kshetra).ready();
+  if (tasks.length === 0) return;
+
+  const task = pickNext(tasks);
+
+  await preFlightCheck(kshetra);   // ← fails here = task stays pending, no bd state touched
+  await bd(kshetra).claim(task.id);
+  // ...
+}
+```
+
+#### Safe Merge (rebase + conflict detection + push retry)
+
+```typescript
+async function safeMerge(kshetra: Kshetra, task: Task, branch: string): Promise<void> {
+
+  // 1. Fetch latest main
+  await git(kshetra).fetch('origin', 'main');
+
+  // 2. If main has moved, rebase branch onto it before merging
+  const mainAhead = await git(kshetra).revsBetween(branch, 'origin/main');
+  if (mainAhead.length > 0) {
+    await rebaseBranchOnMain(kshetra, task, branch);
+  }
+
+  // 3. Dry-run conflict check before committing
+  const conflicts = await git(kshetra).mergeTree(branch, 'main');
+  if (conflicts.length > 0) {
+    await handleMergeConflict(kshetra, task, branch, conflicts);
+    return;
+  }
+
+  // 4. Squash merge and push
+  await git(kshetra).checkout('main');
+  await git(kshetra).merge('--squash', branch);
+  await git(kshetra).commit(`bead-${task.id}: ${task.title}`);
+  await safePush(kshetra, task);
+}
+
+async function rebaseBranchOnMain(
+  kshetra: Kshetra, task: Task, branch: string
+): Promise<void> {
+  await bd(kshetra).addNote(task.id,
+    'main has new commits — attempting rebase before merge'
+  );
+  try {
+    await git(kshetra).checkout(branch);
+    await git(kshetra).rebase('origin/main');
+    await git(kshetra).checkout('main');
+    await bd(kshetra).addNote(task.id, 'rebase onto main succeeded');
+  } catch (err) {
+    await git(kshetra).rebase('--abort');
+    await git(kshetra).checkout('main');
+    throw new GitError('REBASE_FAILED', err.message);
+  }
+}
+
+async function safePush(kshetra: Kshetra, task: Task): Promise<void> {
+  try {
+    await git(kshetra).push('origin', 'main');
+  } catch (pushErr) {
+    if (!pushErr.message.includes('non-fast-forward')) throw pushErr;
+
+    // main moved between merge and push — pull-rebase and retry once
+    await bd(kshetra).addNote(task.id,
+      'push rejected (non-fast-forward) — pull-rebase and retrying'
+    );
+    try {
+      await git(kshetra).pull('--rebase', 'origin', 'main');
+      await git(kshetra).push('origin', 'main');
+    } catch (retryErr) {
+      throw new GitError('PUSH_FAILED',
+        `Push failed after rebase retry: ${retryErr.message}`
+      );
+    }
+  }
+}
+```
+
+#### Merge Conflict — Diagnose Before Blocking
+
+When a conflict is unavoidable, Sthapathi distinguishes between Silpi drifting outside scope vs a legitimate collision within task files:
+
+```typescript
+async function handleMergeConflict(
+  kshetra: Kshetra, task: Task, branch: string, conflictedFiles: string[]
+): Promise<void> {
+
+  const taskFiles  = task.context.relatedFiles;
+  const outOfScope = conflictedFiles.filter(f => !taskFiles.includes(f));
+
+  if (outOfScope.length > 0) {
+    // Silpi touched files outside task scope — human must review
+    await bd(kshetra).flag(task.id,
+      `Merge conflict in files outside task scope: ${outOfScope.join(', ')}. ` +
+      `Silpi may have drifted. Branch kept for inspection.`
+    );
+    await pauseKshetra(kshetra, {
+      reason: 'git_failed', manual: true,
+      message: `Out-of-scope conflict: ${outOfScope.join(', ')}`
+    });
+    await notifyVichara(kshetra, task, 'merge_conflict_out_of_scope');
+    return;
+  }
+
+  // All conflicts within task scope — legitimate collision
+  // Re-dispatch Silpi with conflict context if rounds remain
+  if (task.round < kshetra.agents.maxRoundsPerBead) {
+    await bd(kshetra).addNote(task.id,
+      `Merge conflict in task files — re-dispatching Silpi with conflict context. ` +
+      `Conflicted: ${conflictedFiles.join(', ')}`
+    );
+    // Conflict context is injected into Silpi's next prompt
+    // Silpi is told to resolve the conflict with the current main state
+    scheduleResumeWithConflictContext(kshetra, task, conflictedFiles);
+  } else {
+    await bd(kshetra).flag(task.id,
+      `Merge conflict after max rounds: ${conflictedFiles.join(', ')}`
+    );
+    await pauseKshetra(kshetra, {
+      reason: 'git_failed', manual: true,
+      message: `Unresolved merge conflict: ${conflictedFiles.join(', ')}`
+    });
+    await notifyVichara(kshetra, task, 'merge_conflict');
+  }
+}
+```
+
+---
+
+## 6. Agent Design
+
+### 6.1 Silpi System Prompt
 
 ```
 You are Silpi, a coding agent for the {kshetra.name} project.
 
 == SKILLS ==
-{universal skills}
-{CLAUDE.md}
+{universal skills from ~/.shreni/skills/}
+{CLAUDE.md — project skills}
 {scoped CLAUDE.md files for related directories}
 
 == PROJECT MEMORY ==
-{bd prime output}
+{bd prime output — injected by Sthapathi}
 
 == TASK ==
-{bd show <id> output}
+{bd show <id> output — injected by Sthapathi}
 
 == PRIOR FEEDBACK (Round {n}) ==
 {viharapala must-fix list from last round, if any}
@@ -347,14 +1043,22 @@ You are Silpi, a coding agent for the {kshetra.name} project.
 == RELEVANT CODE ==
 {RAG chunks: top-10 relevant file sections}
 
+== ROLE BOUNDARY ==
+Your job is to write code and return a SilpiOutput JSON object.
+You do NOT call bd commands or manage task state — Sthapathi handles
+all of that. Any project insights you discover should go in the
+`insights` field of your output; Sthapathi will persist them.
+Do NOT call bd, git, or any shell commands outside of running
+lint and tests on the code you write.
+
 == INSTRUCTIONS ==
-1. Implement the task. Write unit tests. Run lint and tests.
-2. If tests fail, fix them before submitting.
-3. Call bd remember for any useful project insights.
+1. Implement the task to satisfy all acceptance criteria.
+2. Write unit tests. Run lint and tests.
+3. If tests fail, fix them before submitting.
 4. Respond ONLY with a JSON SilpiOutput object.
 ```
 
-### 5.3 Viharapala System Prompt Structure
+### 6.2 Viharapala System Prompt
 
 ```
 You are Viharapala, a code reviewer for the {kshetra.name} project.
@@ -362,19 +1066,19 @@ You are Viharapala, a code reviewer for the {kshetra.name} project.
 == SKILLS ==
 {universal skills}
 {CLAUDE.md}
-{scoped CLAUDE.md files for related directories}
+{scoped CLAUDE.md files}
 
 == PROJECT MEMORY ==
-{bd prime output}
+{bd prime output — injected by Sthapathi}
 
 == TASK AND ACCEPTANCE CRITERIA ==
-{bd show <id> output}
+{bd show <id> output — injected by Sthapathi}
 
 == SILPI'S OUTPUT (Round {n}) ==
 {SilpiOutput JSON}
 
 == FULL ROUND HISTORY ==
-{all prior round notes from bd show}
+{all prior round notes — injected by Sthapathi from bd show}
 
 == REVIEW DIMENSIONS ==
 1. Correctness: Does code satisfy all acceptance criteria?
@@ -383,43 +1087,110 @@ You are Viharapala, a code reviewer for the {kshetra.name} project.
 4. Side effects: Regressions, breaking interface changes.
 5. Completeness: No TODOs, no half-done work.
 
+== ROLE BOUNDARY ==
+Your job is to review code and return a ViharapalaOutput JSON object.
+You do NOT call bd commands or manage task state — Sthapathi handles
+all of that. Any project insights you discover should go in the
+`insights` field of your output; Sthapathi will persist them.
 Minor issues do not block approval. Only raise REJECT for blockers.
+
 Respond ONLY with a JSON ViharapalaOutput object.
-```
-
-### 5.4 E2E Agent
-
-The E2E agent runs asynchronously after each merge. It is dispatched by Sthapathi via a fire-and-forget call; results are committed to `main` independently.
-
-```typescript
-async function runE2EAgent(kshetra: Kshetra, mergedTask: Task): Promise<void> {
-  const personas      = readFile(kshetra, '.shreni/personas.yaml');
-  const existingTests = scanTestFiles(kshetra);
-  const diff          = await git(kshetra).diffMerged(mergedTask.branch);
-
-  const output: E2EOutput = await callClaude({
-    system: buildE2ESystemPrompt(kshetra, personas),
-    user:   { task: mergedTask, diff, existingTests }
-  });
-
-  // Commit new tests to main
-  for (const file of output.testFilesAdded) {
-    await git(kshetra).commitFile(file, `e2e: add tests for ${mergedTask.id}`);
-  }
-
-  // File coverage gaps as P2 tasks via bd (internal call)
-  for (const gap of output.coverageGaps) {
-    await bd(kshetra).create(gap.description, 2, 'e2e');
-  }
-  await syncBeads(kshetra);
-}
 ```
 
 ---
 
-## 6. Vichara — Server Design
+## 7. Interactive Claude Code Integration
 
-### 6.1 Server Stack
+Interactive Claude Code sessions serve a distinct role in the Shreni workflow: **discuss features and file tasks, never implement**.
+
+### 7.1 What `bd setup claude` Installs
+
+`bd setup claude` (run during `shreni init-kshetra`) installs hooks into `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": ["bd prime"],
+    "PreCompact": ["bd prime"]
+  }
+}
+```
+
+- **`SessionStart`:** runs `bd prime` automatically when a Claude Code session starts in the project. Injects pending tasks, project memory, and `bd` workflow context (~1-2k tokens).
+- **`PreCompact`:** runs `bd prime` before context compaction so task awareness survives long sessions.
+
+These hooks fire for **interactive sessions only** — they have no role in Sthapathi's automated workflow. Sthapathi calls `bd prime` explicitly in `buildAgentContext()`.
+
+### 7.2 CLAUDE.md — SHRENI INTEGRATION Section
+
+`shreni init-kshetra` appends a SHRENI INTEGRATION section to `CLAUDE.md` that defines the interactive session's role boundary:
+
+```markdown
+## SHRENI INTEGRATION
+
+This project is managed by Shreni, an automated code development harness.
+
+### Your role in this project
+You are a **task producer**, not an implementor. Your job is to:
+- Answer questions about the codebase and architecture
+- Discuss and clarify feature requirements
+- Decompose features into atomic bd tasks with clear acceptance criteria
+- File tasks via `bd create` and link dependencies via `bd dep add`
+- Check task status via `bd show`, `bd ready`, and `bd prime`
+
+### What you must NOT do
+- Implement features or write production code to the main branch
+- Call `bd update --claim` or `bd close` — Sthapathi owns task state transitions
+- Create git branches or merge code — Sthapathi owns the git workflow
+- Run Sthapathi's agents or trigger the automated workflow
+
+### Filing a task
+When a feature is agreed, file it as:
+```
+bd create "title" -p <0|1|2> --description "acceptance criteria"
+bd dep add <child-id> <parent-id>   # if dependencies exist
+```
+
+Keep tasks atomic — one clear outcome, testable acceptance criteria.
+Sthapathi picks them up automatically within 30 seconds.
+```
+
+### 7.3 What Interactive Claude Code Can Do
+
+```bash
+# Discuss and understand the project
+bd prime                           # load project context
+bd show bd-f3a2                    # understand a specific task
+bd ready                           # see what's pending
+
+# File new tasks
+bd create "Bulk CSV import" -p 1 --description "per-row errors, upsert on duplicate"
+bd create "CSV parser" -p 1        # sub-task
+bd dep add <csv-parser-id> <bulk-import-id>
+
+# File bugs
+bd create "Timer not stopping" -p 0 -t bug
+
+# Query and discuss
+bd ready --json                    # what's in the queue
+bd show <id>                       # task detail
+```
+
+### 7.4 What Interactive Claude Code Must NOT Do
+
+```bash
+# These are Sthapathi-only — never call from interactive session
+bd update <id> --claim             # ❌ task state transition
+bd close <id>                      # ❌ task state transition
+git checkout -b bead-*/            # ❌ Sthapathi owns branches
+git merge                          # ❌ Sthapathi owns merges
+```
+
+---
+
+## 8. Vichara — Server Design
+
+### 8.1 Server Stack
 
 | Layer | Technology |
 |---|---|
@@ -432,11 +1203,9 @@ async function runE2EAgent(kshetra: Kshetra, mergedTask: Task): Promise<void> {
 | Auth | Shared secret token (Tailscale-only, not public) |
 | Mobile connectivity | Tailscale — machine accessible as `shreni.local` |
 
-Vichara is started and stopped via `shreni vichara start / stop`. It does not start automatically with Sthapathi.
+### 8.2 Tool Registry
 
-### 6.2 Tool Registry
-
-Vichara exposes Claude a set of tools. On each user message, Claude decides which tools to call based on intent. Write tools route through Sthapathi's internal API — Vichara never calls `bd` directly.
+Write tools route through Sthapathi's internal API — Vichara never calls `bd update --claim` or `bd close`.
 
 | Tool | Type | Description |
 |---|---|---|
@@ -446,22 +1215,21 @@ Vichara exposes Claude a set of tools. On each user message, Claude decides whic
 | `search_codebase` | Read | Semantic RAG search over Kshetra files |
 | `read_file` | Read | Read a specific file by path |
 | `get_diff` | Read | Get git diff for a bead branch |
-| `create_bead` | Write | Create a new task bead (requires confirmation) |
-| `create_bug` | Write | File a bug bead — P0 bypasses confirmation |
-| `add_comment` | Write | Add note to an existing bead |
-| `flag_bead` | Write | Mark a bead blocked with reason |
+| `create_bead` | Write | `bd create` — new task bead (requires confirmation) |
+| `create_bug` | Write | `bd create -t bug` — P0 bypasses confirmation |
+| `add_comment` | Write | `bd update --note` — add note to existing bead |
+| `flag_bead` | Write | `bd update --block` — mark bead blocked with reason |
 
-### 6.3 Context Injection Per Request
+### 8.3 Context Injection Per Request
 
 ```typescript
 function buildVicharaSystemPrompt(kshetra: Kshetra | null): string {
-  const agentState = sthapathi.getState();  // live read from Sthapathi
+  const agentState = sthapathi.getState();
   return `
 You are Vichara, the project assistant for Shreni.
 
 Current time: ${new Date().toISOString()}
 Active Kshetras: ${activeKshetras.map(k => k.name).join(', ')}
-
 ${kshetra ? `Active project: ${kshetra.name}` : 'Cross-project mode'}
 
 Agent state:
@@ -469,14 +1237,15 @@ ${agentState.map(s => `  ${s.kshetra}: ${s.status} — ${s.activeBead ?? 'idle'}
 
 Recent completions (last 5): ${recentCompletions(kshetra)}
 
-For P0 bugs: act immediately, confirm after.
-For all other writes: confirm details before calling write tools.
+Role boundary: You file tasks and answer questions. You never claim
+or close tasks — those are Sthapathi's operations. For P0 bugs: act
+immediately, confirm after. For all other writes: confirm before acting.
 When asked about code: use search_codebase first.
   `;
 }
 ```
 
-### 6.4 PWA — Mobile UI Spec
+### 8.4 PWA — Mobile UI Spec
 
 | Element | Specification |
 |---|---|
@@ -490,13 +1259,13 @@ When asked about code: use search_codebase first.
 
 ---
 
-## 7. RAG Index Design
+## 9. RAG Index Design
 
-### 7.1 Storage
+### 9.1 Storage
 
 Each Kshetra has a LanceDB vector index stored at `~/.shreni/indexes/<kshetra-id>/`. LanceDB is embedded (no server), written as Arrow files, queryable from Node.js.
 
-### 7.2 Chunk Schema and Strategy
+### 9.2 Chunk Schema and Strategy
 
 ```typescript
 interface CodeChunk {
@@ -514,7 +1283,7 @@ interface CodeChunk {
 // Rebuild:   initial registration + incremental on every merged bead
 ```
 
-### 7.3 Rebuild Triggers
+### 9.3 Rebuild Triggers
 
 - **Full rebuild:** on first Kshetra registration and on manual `shreni index rebuild --kshetra <id>`.
 - **Incremental:** after each merge, only files changed in the merged bead are re-embedded.
@@ -523,160 +1292,138 @@ interface CodeChunk {
 
 ---
 
-## 8. Git Operations
+## 10. Git Operations
 
-### 8.1 Branch Lifecycle
+### 10.1 Branch Lifecycle
 
 | Event | Git Operation |
 |---|---|
-| Task claimed by Sthapathi | `git checkout -b bead-{id}/{slug}` from `main` |
+| Pre-flight check | `git status` + `git pull --rebase origin main` — before `bd claim` |
+| Task claimed | `git checkout -b bead-{id}/{slug}` from `main` |
 | Silpi submits (each round) | `git add -A && git commit -m 'silpi: round {n} — {title}'` |
 | Viharapala rejects | Silpi continues on same branch; adds fixup commits |
-| Viharapala approves | `git checkout main && git merge --squash bead-{id}/{slug}` |
-| Merge committed | `git commit -m 'bead-{id}: {title}' && git push origin main` |
-| Branch cleanup | `git branch -d bead-{id}/{slug} && git push origin --delete bead-{id}/{slug}` |
+| Viharapala approves | fetch + rebase check + `git merge --squash bead-{id}/{slug}` |
+| Merge committed | `git commit -m 'bead-{id}: {title}'` |
+| Push | `git push origin main` with pull-rebase retry on rejection |
+| Branch cleanup (success only) | `git branch -d bead-{id}/{slug} && git push origin --delete bead-{id}/{slug}` |
+| Branch on failure | Kept alive — never deleted on error |
 
-> **Squash merge rationale:** All round iterations (fix commits) are squashed into a single clean commit on `main`. The full round history is preserved in the `bd` bead record, not in git history.
+> **Squash merge rationale:** All round iterations are squashed into a single clean commit on `main`. The full round history is preserved in the `bd` bead record, not in git history.
 
-### 8.2 Conflict Prevention
+### 10.2 Merge Safety Functions
 
-- `maxConcurrentBeads: 1` per Kshetra — only one branch active at a time, so merge conflicts are structurally prevented.
-- Beads repo (`TeakWood/<slug>-beads`) uses `git pull --rebase` before every write to handle concurrent updates from phone/CLI.
-- Sthapathi is the sole writer to the Dolt embedded database — no concurrent write conflicts possible.
+The full merge flow is handled by three functions in `sthapathi/git.ts`. See Section 5.13 for implementation details.
+
+| Function | Purpose |
+|---|---|
+| `preFlightCheck()` | Verifies `main` is clean and pulls latest before branching. Called before `bd claim` — failure leaves bead `pending`. |
+| `rebaseBranchOnMain()` | Rebases bead branch onto `origin/main` when main has moved. Aborts cleanly on conflict. |
+| `safeMerge()` | Orchestrates: fetch → rebase if needed → dry-run conflict check → squash merge → `safePush`. |
+| `safePush()` | Pushes to `origin/main`. On non-fast-forward rejection: pull-rebase and retry once. |
+| `handleMergeConflict()` | Diagnoses conflict scope. Out-of-scope → block + pause. In-scope + rounds remain → re-dispatch Silpi with conflict context. |
+
+### 10.3 Conflict Prevention
+
+- `maxConcurrentBeads: 1` per Kshetra — only one branch active at a time, eliminating most inter-bead conflicts.
+- Pre-flight pulls latest `main` before each branch, minimising the window for divergence.
+- Beads repo uses `git pull --rebase` before every write to handle concurrent `bd create` from phone/CLI/interactive Claude Code.
+- Sthapathi is the sole caller of `bd update --claim` and `bd close` — no concurrent state transition conflicts.
 
 ---
 
-## 9. `shreni` CLI
+## 11. `shreni` CLI
 
 The `shreni` CLI controls the harness — Kshetras, agents, workflow, RAG, and Vichara. It does not manage tasks; use `bd` directly for all task operations.
 
-### 9.1 Installation
+### 11.1 Installation
 
 ```bash
 cd /projects/shreni
 npm install && npm run build
 npm install -g .
-
-# shreni is now available globally
-shreni --version
 ```
 
-### 9.2 Command Reference
+### 11.2 Command Reference
 
 #### Kshetra Management
 
 ```bash
 shreni init-kshetra --slug sishya --path /projects/sishya
-# 1. Creates TeakWood/sishya-beads on GitHub (gh repo create)
+# 1. Creates TeakWood/sishya-beads on GitHub
 # 2. Clones to /projects/sishya-beads
-# 3. Runs: BEADS_DIR=/projects/sishya-beads bd init --stealth
+# 3. BEADS_DIR=/projects/sishya-beads bd init --stealth
 # 4. Creates symlink: /projects/sishya/.beads → /projects/sishya-beads
 # 5. Appends .beads to /projects/sishya/.gitignore
-# 6. Runs: BEADS_DIR=/projects/sishya-beads bd setup claude
+# 6. BEADS_DIR=/projects/sishya-beads bd setup claude
+#    (installs SessionStart/PreCompact hooks for interactive Claude Code)
 # 7. Generates .shreni/kshetra.yaml from template
-# 8. Builds initial RAG index
-# 9. Registers Kshetra with Sthapathi
+# 8. Appends SHRENI INTEGRATION section to CLAUDE.md
+# 9. Builds initial RAG index
+# 10. Registers Kshetra with Sthapathi
 
-shreni register /projects/sishya          # register an already-initialised project
-shreni list                               # all registered Kshetras + status
-shreni status                             # current Kshetra (auto-detected from cwd)
-shreni status --all                       # all Kshetras
-shreni status --kshetra sishya            # specific Kshetra
+shreni register /projects/sishya   # register already-initialised project
+shreni list                        # all registered Kshetras + status
+shreni status                      # current Kshetra (auto-detected from cwd)
+shreni status --all
 ```
 
 #### Workflow Control
 
 ```bash
-shreni start                              # start Sthapathi loop (all Kshetras)
-shreni stop                               # graceful shutdown
-shreni pause --kshetra sishya             # pause a Kshetra queue
+shreni start                       # start Sthapathi loop
+shreni stop                        # graceful shutdown
+shreni pause --kshetra sishya
 shreni resume --kshetra sishya
-shreni run --kshetra sishya               # force one cycle immediately (useful for testing)
-shreni sync --kshetra sishya              # force beads git pull + push
+shreni run --kshetra sishya        # force one cycle immediately
+shreni sync --kshetra sishya       # force beads git pull + push
 shreni sync --all
 ```
 
 #### Agent Inspection
 
 ```bash
-shreni agents                             # what each agent is doing right now
-shreni logs --kshetra sishya              # tail agent activity log
-shreni logs --kshetra sishya --bead bd-f3a2   # logs for a specific bead
-shreni logs --all                         # all Kshetras
+shreni agents                      # what each agent is doing right now
+shreni logs --kshetra sishya
+shreni logs --kshetra sishya --bead bd-f3a2
+shreni logs --all
 ```
 
 #### RAG Index
 
 ```bash
-shreni index rebuild                      # rebuild current Kshetra (auto-detected)
+shreni index rebuild
 shreni index rebuild --kshetra sishya
 shreni index rebuild --all
-shreni index status                       # when each index was last built, size
+shreni index status
 ```
 
 #### Vichara
 
 ```bash
-shreni vichara start                      # start Vichara server
+shreni vichara start
 shreni vichara stop
-shreni vichara status                     # port, connected clients, uptime
+shreni vichara status
 ```
 
 #### Skills
 
 ```bash
-shreni skills list                        # show loaded skills for current Kshetra
-shreni skills add <path>                  # install a local skill file
-shreni skills add <url>                   # install from URL (e.g. awesome-claude-code)
+shreni skills list
+shreni skills add <path-or-url>
 shreni skills remove <name>
 ```
 
-### 9.3 Auto-detection
+### 11.3 What `shreni` Does NOT Do
 
-`shreni` resolves the current Kshetra from `cwd` by walking up the directory tree looking for `.shreni/kshetra.yaml`. This means you can run `shreni status` from anywhere inside a registered project and get scoped output. Pass `--kshetra <id>` to override.
-
-### 9.4 Skill Management Detail
-
-Skills are markdown files injected into agent context at session start. Three tiers, loaded in order:
-
-```
-~/.shreni/skills/               ← Tier 1: universal (all Kshetras)
-  base-coding.md
-  base-review.md
-
-/projects/sishya/CLAUDE.md      ← Tier 2: project-wide
-/projects/sishya/src/payments/CLAUDE.md   ← Tier 3: scoped to directory
-
-/projects/sishya/.claude/commands/        ← Named skills (slash commands)
-  review-checklist.md
-  migration-check.md
-```
-
-`shreni skills add` copies the file into the appropriate tier based on the current directory context:
+These remain `bd` commands — never exposed through `shreni`:
 
 ```bash
-cd /projects/sishya
-shreni skills add ~/downloads/nextjs-patterns.md   # → CLAUDE.md (project tier)
-
-cd /projects/sishya/src/payments
-shreni skills add ~/downloads/razorpay-patterns.md # → src/payments/CLAUDE.md (scoped)
-
-shreni skills add https://raw.githubusercontent.com/.../vitest-patterns.md
-```
-
-Skills are picked up on the next agent session — no restart of Sthapathi needed.
-
-### 9.5 What `shreni` Does NOT Do
-
-These remain `bd` commands and are never exposed through `shreni`:
-
-```bash
-bd create "title" -p 0 -t bug   # create tasks
+bd create "title" -p 0 -t bug   # file tasks (human, Vichara, or interactive Claude Code)
 bd ready                         # list ready tasks
 bd show <id>                     # view task detail
-bd update <id> --claim           # claim a task
-bd close <id> "note"             # close a task
-bd remember "insight"            # store project memory
+bd update <id> --claim           # claim a task (Sthapathi only)
+bd close <id> "note"             # close a task (Sthapathi only)
+bd remember "insight"            # store memory (Sthapathi only, on behalf of agents)
 bd prime                         # print project context
 bd dep add <child> <parent>      # link tasks
 bd dolt push / pull              # sync beads database
@@ -684,29 +1431,29 @@ bd dolt push / pull              # sync beads database
 
 ---
 
-## 10. Security Model
+## 12. Security Model
 
 - Shreni is a local-only system. Vichara is not exposed to the public internet.
 - Tailscale provides the only remote access path — device-level authentication.
-- A shared secret token (set at `shreni init` time) is required for all Vichara API calls, including from the PWA.
-- The Anthropic API key is stored in the local environment (`ANTHROPIC_API_KEY`) and never committed to any repo.
+- A shared secret token (set at `shreni init` time) is required for all Vichara API calls.
+- The Anthropic API key is stored in the local environment (`ANTHROPIC_API_KEY`) and never committed.
 - GitHub access uses SSH keys — no HTTPS tokens stored on disk.
-- Agent prompts include explicit instructions not to execute shell commands outside the defined tool set.
+- Agent prompts explicitly prohibit calling `bd`, `git`, or shell commands outside lint/test execution.
 
 ---
 
-## 11. Recommended Build Sequence
-
-Build in this order to get value at each stage:
+## 13. Recommended Build Sequence
 
 | Phase | Deliverable |
 |---|---|
 | **Phase 1: Foundation** | `kshetra.yaml` schema, `bd` wrapper (`beads.ts`), git helpers, `syncBeads`. Manually verify `bd` commands work with `BEADS_DIR` scoping. |
-| **Phase 2: Sthapathi core** | Main loop, task polling, branch creation, Silpi dispatch (hardcoded prompt). First automated bead closure. |
-| **Phase 3: Review loop** | Viharapala integration, round counter, APPROVE/REJECT routing, squash merge. |
-| **Phase 4: shreni CLI** | `shreni start/stop/status/agents/logs`. Sthapathi controllable from terminal. |
-| **Phase 5: Vichara read** | Fastify server, WebSocket, read-only tools (`list_beads`, `get_agent_status`, `search_codebase`). PWA shell. `shreni vichara start` works. |
-| **Phase 6: Vichara write** | `create_bug`, `create_bead` with confirmation flow. Bug filing from phone works. |
-| **Phase 7: E2E agent** | Async post-merge dispatch, test file commits, coverage gap bead creation. |
-| **Phase 8: RAG** | LanceDB indexing, incremental rebuild on merge, `shreni index rebuild` command, semantic codebase search in Vichara. |
-| **Phase 9: Multi-Kshetra** | Kshetra registry, `BEADS_DIR` scoping, cross-project Vichara queries, `shreni init-kshetra` CLI, `shreni skills` commands. |
+| **Phase 2: Sthapathi core** | Main loop, task polling, `bd claim`, branch creation, Silpi dispatch (hardcoded prompt). First automated bead closure with `bd close`. |
+| **Phase 3: Review loop** | Viharapala integration, round counter, APPROVE/REJECT, `bd addNote` per round, squash merge. |
+| **Phase 4: Error handling** | `withRetry`, `handleCycleError`, `recoverKshetra` on startup. `registry.json` and `state.json` persistence. All failure scenarios from Section 5.11 covered. |
+| **Phase 5: shreni CLI** | `shreni start/stop/status/agents/logs/resume`. Sthapathi controllable from terminal. `shreni init-kshetra` including `bd setup claude` and SHRENI INTEGRATION in `CLAUDE.md`. |
+| **Phase 6: Interactive Claude Code** | Verify `SessionStart` hook fires `bd prime`. Test filing a task from Claude Code and confirming Sthapathi picks it up. |
+| **Phase 7: E2E agent** | Async post-merge dispatch, Sthapathi commits test files, Sthapathi files coverage gap beads. |
+| **Phase 8: Multi-Kshetra** | Kshetra registry, `BEADS_DIR` scoping per Kshetra, cross-project status via `shreni status --all`. |
+| **Phase 9: RAG** | LanceDB indexing, incremental rebuild on merge, `shreni index rebuild`. Codebase search available to agents. |
+| **Phase 10: Vichara read** | Fastify server, WebSocket, read-only tools (`list_beads`, `get_agent_status`, `search_codebase`). PWA shell. `shreni vichara start` works. |
+| **Phase 11: Vichara write** | `create_bug`, `create_bead` with confirmation flow. Bug filing from phone works end to end. |
