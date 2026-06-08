@@ -5,7 +5,7 @@ This file provides instructions and context for AI coding agents working on this
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+This project uses **bd (beads)** for issue tracking. The beads database lives at `/Users/navakanth/projects/Shreni-beads` (symlinked as `.beads/` in this repo). Run `bd prime` to see full workflow context and commands.
 
 ### Quick Reference
 
@@ -15,6 +15,8 @@ bd show <id>          # View issue details
 bd update <id> --claim  # Claim work
 bd close <id>         # Complete work
 ```
+
+> **Note:** `bd` auto-discovers the database via the `.beads/` symlink. No `BEADS_DIR` export needed when running from this project directory. If running from outside this repo, set `BEADS_DIR=/Users/navakanth/projects/Shreni-beads`.
 
 ### Rules
 
