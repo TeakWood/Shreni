@@ -26,6 +26,11 @@ function buildStatusPayload(kshetras: KshetraConfig[]) {
 }
 
 export async function createVicharaServer(port = DEFAULT_PORT) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY is not set — export it before running shreni vichara start');
+  }
+
+  const client = new Anthropic();
   const fastify = Fastify({ logger: false });
   await fastify.register(fastifyWebsocket);
 
@@ -54,7 +59,6 @@ export async function createVicharaServer(port = DEFAULT_PORT) {
       }
 
       const kshetras = loadRegistry();
-      const client = new Anthropic();
 
       const safeSend = (data: object) => {
         try {

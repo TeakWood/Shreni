@@ -1,5 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { existsSync, rmSync } from 'fs';
+import { join } from 'path';
 import type { KshetraConfig } from '../kshetra/config.js';
 import { git } from './git.js';
 
@@ -86,9 +88,27 @@ export function bd(kshetra: KshetraConfig) {
   };
 }
 
+// One in-flight sync per beads path — callers that arrive while a sync is running
+// share the same promise instead of racing on the git index.
+const syncInFlight = new Map<string, Promise<void>>();
+
 // syncBeads: commit any local changes, pull, push.
 // Commit before pull so unstaged changes don't block the rebase.
-export async function syncBeads(kshetra: KshetraConfig): Promise<void> {
+export function syncBeads(kshetra: KshetraConfig): Promise<void> {
+  const key = kshetra.beads.path;
+  const existing = syncInFlight.get(key);
+  if (existing) return existing;
+
+  const promise = doSyncBeads(kshetra).finally(() => syncInFlight.delete(key));
+  syncInFlight.set(key, promise);
+  return promise;
+}
+
+async function doSyncBeads(kshetra: KshetraConfig): Promise<void> {
+  // Remove stale lock files left by crashed git processes
+  const indexLock = join(kshetra.beads.path, '.git', 'index.lock');
+  if (existsSync(indexLock)) rmSync(indexLock);
+
   const g = git(kshetra.beads.path);
 
   await g.add('-A');
