@@ -1,36 +1,34 @@
 import { spawn } from 'child_process';
-import { resolve, dirname } from 'path';
+import { resolve } from 'path';
 import { openSync, mkdirSync } from 'fs';
-import { homedir } from 'os';
-import { readPid, writePid, isAlive } from './pid';
-
-export const DAEMON_LOG_PATH = resolve(homedir(), '.shreni', 'daemon.log');
+import { readPid, writePid, isAlive, kshetraDir, workerLogPath } from './pid';
 
 export type StartResult =
-  | { status: 'started'; pid: number }
-  | { status: 'already_running'; pid: number };
+  | { status: 'started'; kshetraId: string; pid: number }
+  | { status: 'already_running'; kshetraId: string; pid: number };
 
-export function startDaemon(
-  daemonScript: string = resolve(__dirname, 'daemon.js'),
+export function startWorker(
+  kshetraId: string,
+  workerScript: string = resolve(__dirname, 'worker.js'),
 ): StartResult {
-  const existing = readPid();
+  const existing = readPid(kshetraId);
   if (existing !== null && isAlive(existing)) {
-    return { status: 'already_running', pid: existing };
+    return { status: 'already_running', kshetraId, pid: existing };
   }
 
-  mkdirSync(dirname(DAEMON_LOG_PATH), { recursive: true });
-  const logFd = openSync(DAEMON_LOG_PATH, 'a');
-  const child = spawn(process.execPath, [daemonScript], {
+  mkdirSync(kshetraDir(kshetraId), { recursive: true });
+  const logFd = openSync(workerLogPath(kshetraId), 'a');
+  const child = spawn(process.execPath, [workerScript, kshetraId], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
   });
 
   if (child.pid === undefined) {
-    throw new Error('Failed to spawn daemon process');
+    throw new Error(`Failed to spawn worker process for "${kshetraId}"`);
   }
 
-  writePid(child.pid);
+  writePid(kshetraId, child.pid);
   child.unref();
 
-  return { status: 'started', pid: child.pid };
+  return { status: 'started', kshetraId, pid: child.pid };
 }

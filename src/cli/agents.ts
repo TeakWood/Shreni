@@ -1,6 +1,5 @@
 import { loadRegistry } from '../kshetra/registry';
-import { getKshetraStatus, formatKshetraStatus } from './status';
-import { readPid, isAlive } from './pid';
+import { getKshetraStatus } from './status';
 import type { KshetraConfig } from '../kshetra/config';
 
 export interface AgentLine {
@@ -16,8 +15,6 @@ export interface AgentLine {
 
 export async function getAgentLines(): Promise<AgentLine[]> {
   const kshetras = loadRegistry();
-  const pid = readPid();
-  const daemonRunning = pid !== null && isAlive(pid);
 
   const lines = await Promise.all(
     kshetras.map(async (k: KshetraConfig): Promise<AgentLine> => {
@@ -25,7 +22,7 @@ export async function getAgentLines(): Promise<AgentLine[]> {
       return {
         kshetraId: k.id,
         kshetraName: k.name,
-        daemonRunning,
+        daemonRunning: info.daemonRunning,
         paused: info.paused,
         beadId: info.activeBead?.id,
         beadTitle: info.activeBead?.title,

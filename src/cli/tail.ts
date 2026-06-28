@@ -1,6 +1,7 @@
 import { openSync, readSync, closeSync, existsSync } from 'fs';
 import { loadRegistry } from '../kshetra/registry';
-import { logPath } from '../sthapathi/activity-log';
+import { logPath, legacyLogPath } from '../sthapathi/activity-log';
+import { readPid, isAlive } from './pid';
 import type { LoggedEvent } from '../sthapathi/activity-log';
 
 const POLL_MS = 500;
@@ -140,9 +141,20 @@ export function runTail(opts: TailOpts): void {
     process.exit(1);
   }
 
-  console.log(`Tailing activity for: ${targets.map(k => k.id).join(', ')}  (Ctrl+C to stop)\n`);
+  console.log(`Tailing activity for: ${targets.map(k => k.id).join(', ')}  (Ctrl+C to stop)`);
+  for (const k of targets) {
+    const pid = readPid(k.id);
+    const state = pid !== null && isAlive(pid) ? `pid ${pid} (running)` : 'stopped';
+    console.log(`  [${k.id}] worker ${state}`);
+  }
+  console.log();
 
-  const stops = targets.map(k => watchFile(logPath(k.id), k.id));
+  // Prefer the new per-kshetra activity log; fall back to the pre-Feature-2 path.
+  const stops = targets.map(k => {
+    const current = logPath(k.id);
+    const path = existsSync(current) ? current : existsSync(legacyLogPath(k.id)) ? legacyLogPath(k.id) : current;
+    return watchFile(path, k.id);
+  });
 
   function shutdown(): void {
     stops.forEach(s => s());

@@ -15,18 +15,25 @@ export type ActivityEvent =
 
 export type LoggedEvent = ActivityEvent & { ts: string };
 
-const logsDir = join(homedir(), '.shreni', 'logs');
+function kshetraDir(kshetraId: string): string {
+  return join(homedir(), '.shreni', 'kshetra', kshetraId);
+}
 
 export function logPath(kshetraId: string): string {
-  return join(logsDir, `${kshetraId}.jsonl`);
+  return join(kshetraDir(kshetraId), 'activity.jsonl');
+}
+
+// Pre-Feature-2 location, kept so `tail` can read older logs.
+export function legacyLogPath(kshetraId: string): string {
+  return join(homedir(), '.shreni', 'logs', `${kshetraId}.jsonl`);
 }
 
 export function emit(event: ActivityEvent): void {
   try {
-    mkdirSync(logsDir, { recursive: true });
+    mkdirSync(kshetraDir(event.kshetra), { recursive: true });
     const entry: LoggedEvent = { ...event, ts: new Date().toISOString() };
     appendFileSync(logPath(event.kshetra), JSON.stringify(entry) + '\n', 'utf8');
   } catch {
-    // Never let logging crash the daemon
+    // Never let logging crash the worker
   }
 }

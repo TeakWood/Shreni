@@ -15,6 +15,7 @@ export interface ActiveBead {
 export interface KshetraStatusInfo {
   kshetra: KshetraConfig;
   daemonRunning: boolean;
+  pid?: number;
   paused: boolean;
   pauseReason?: string;
   pauseMessage?: string;
@@ -58,7 +59,7 @@ function parseAgentRound(notes: string | undefined): { agent?: string; round?: n
 }
 
 export async function getKshetraStatus(kshetra: KshetraConfig): Promise<KshetraStatusInfo> {
-  const pid = readPid();
+  const pid = readPid(kshetra.id);
   const daemonRunning = pid !== null && isAlive(pid);
 
   const state = loadState();
@@ -97,6 +98,7 @@ export async function getKshetraStatus(kshetra: KshetraConfig): Promise<KshetraS
   return {
     kshetra,
     daemonRunning,
+    pid: daemonRunning ? pid : undefined,
     paused,
     pauseReason: ks?.reason,
     pauseMessage: ks?.message,
@@ -122,8 +124,8 @@ export function resolveKshetra(kshetras: KshetraConfig[], cwd: string): KshetraC
 
 export function formatKshetraStatus(info: KshetraStatusInfo): string {
   const lines: string[] = [];
-  const daemonLabel = info.daemonRunning ? 'running' : 'stopped';
-  lines.push(`Kshetra: ${info.kshetra.name} (${info.kshetra.id}) — daemon ${daemonLabel}`);
+  const daemonLabel = info.daemonRunning ? `running (pid ${info.pid})` : 'stopped';
+  lines.push(`Kshetra: ${info.kshetra.name} (${info.kshetra.id}) — worker ${daemonLabel}`);
   lines.push('─'.repeat(50));
 
   if (info.paused) {

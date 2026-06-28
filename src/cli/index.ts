@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { startDaemon } from './start';
-import { stopDaemon } from './stop';
+import { startWorker } from './start';
+import { stopWorker } from './stop';
 import { runStatus } from './status';
+import { loadRegistry } from '../kshetra/registry';
 import { pauseKshetraById, resumeKshetraById } from './pause';
 import { runAgents } from './agents';
 import { runLogs } from './logs';
@@ -23,23 +24,46 @@ const [, , command, ...args] = process.argv;
 
 switch (command) {
   case 'start': {
-    const result = startDaemon();
-    if (result.status === 'already_running') {
-      console.log(`shreni is already running (pid ${result.pid})`);
+    const id = parseFlag(args, '--kshetra');
+    const registry = loadRegistry();
+    const targets = id ? registry.filter(k => k.id === id) : registry;
+    if (registry.length === 0) {
+      console.error('No kshetras registered. Run `shreni register` first.');
+      process.exit(1);
+    } else if (id && targets.length === 0) {
+      console.error(`Kshetra not found: ${id}`);
+      process.exit(1);
     } else {
-      console.log(`shreni started (pid ${result.pid})`);
+      for (const k of targets) {
+        const result = startWorker(k.id);
+        if (result.status === 'already_running') {
+          console.log(`${k.id}: already running (pid ${result.pid})`);
+        } else {
+          console.log(`${k.id}: started (pid ${result.pid})`);
+        }
+      }
     }
     break;
   }
 
   case 'stop': {
-    const result = stopDaemon();
-    if (result.status === 'stopped') {
-      console.log(`shreni stopped (pid ${result.pid})`);
-    } else if (result.status === 'stale_pid_cleared') {
-      console.log('shreni was not running (stale PID file cleared)');
+    const id = parseFlag(args, '--kshetra');
+    const registry = loadRegistry();
+    const targets = id ? registry.filter(k => k.id === id) : registry;
+    if (id && targets.length === 0) {
+      console.error(`Kshetra not found: ${id}`);
+      process.exit(1);
     } else {
-      console.log('shreni is not running');
+      for (const k of targets) {
+        const result = stopWorker(k.id);
+        if (result.status === 'stopped') {
+          console.log(`${k.id}: stopped (pid ${result.pid})`);
+        } else if (result.status === 'stale_pid_cleared') {
+          console.log(`${k.id}: was not running (stale PID file cleared)`);
+        } else {
+          console.log(`${k.id}: not running`);
+        }
+      }
     }
     break;
   }
@@ -220,6 +244,7 @@ switch (command) {
 
   default:
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume|run|sync|init-kshetra|register|verify-hooks|vichara|tail>');
+    console.error('Usage: shreni <start|stop> [--kshetra <id>]');
+    console.error('       shreni <status|agents|logs|pause|resume|run|sync|init-kshetra|register|verify-hooks|vichara|tail>');
     process.exit(1);
 }

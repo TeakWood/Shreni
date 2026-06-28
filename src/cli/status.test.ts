@@ -180,14 +180,14 @@ describe('formatKshetraStatus', () => {
     queueDepth: 0,
   };
 
-  it('shows daemon stopped when not running', () => {
+  it('shows worker stopped when not running', () => {
     const out = formatKshetraStatus({ ...BASE, daemonRunning: false });
-    expect(out).toContain('daemon stopped');
+    expect(out).toContain('worker stopped');
   });
 
-  it('shows daemon running when alive', () => {
-    const out = formatKshetraStatus({ ...BASE, daemonRunning: true });
-    expect(out).toContain('daemon running');
+  it('shows worker running with pid when alive', () => {
+    const out = formatKshetraStatus({ ...BASE, daemonRunning: true, pid: 4242 });
+    expect(out).toContain('worker running (pid 4242)');
   });
 
   it('shows active status when not paused', () => {

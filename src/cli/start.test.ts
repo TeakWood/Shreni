@@ -1,15 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mockReadPid = vi.fn<() => number | null>();
+const mockReadPid = vi.fn<(id: string) => number | null>();
 const mockIsAlive = vi.fn<(pid: number) => boolean>();
-const mockWritePid = vi.fn<(pid: number) => void>();
+const mockWritePid = vi.fn<(id: string, pid: number) => void>();
 
 vi.mock('./pid', () => ({
   readPid: mockReadPid,
   isAlive: mockIsAlive,
   writePid: mockWritePid,
   clearPid: vi.fn(),
-  PID_PATH: '/tmp/shreni.pid',
+  kshetraDir: (id: string) => `/tmp/shreni/kshetra/${id}`,
+  workerLogPath: (id: string) => `/tmp/shreni/kshetra/${id}/worker.log`,
 }));
 
 const mockSpawn = vi.fn();
@@ -19,7 +20,7 @@ const mockOpenSync = vi.fn().mockReturnValue(3);
 const mockMkdirSync = vi.fn();
 vi.mock('fs', () => ({ openSync: mockOpenSync, mkdirSync: mockMkdirSync }));
 
-const { startDaemon } = await import('./start');
+const { startWorker } = await import('./start');
 
 function makeChild(pid: number) {
   return { pid, unref: vi.fn() };
@@ -29,50 +30,50 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('startDaemon', () => {
+describe('startWorker', () => {
   it('returns already_running when process with existing PID is alive', () => {
     mockReadPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(true);
 
-    const result = startDaemon('/path/to/daemon.js');
+    const result = startWorker('sishya', '/path/to/worker.js');
 
-    expect(result).toEqual({ status: 'already_running', pid: 1234 });
+    expect(result).toEqual({ status: 'already_running', kshetraId: 'sishya', pid: 1234 });
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it('spawns daemon and writes PID when no existing process', () => {
+  it('spawns worker and writes PID when no existing process', () => {
     mockReadPid.mockReturnValue(null);
     mockIsAlive.mockReturnValue(false);
     const child = makeChild(5678);
     mockSpawn.mockReturnValue(child);
 
-    const result = startDaemon('/path/to/daemon.js');
+    const result = startWorker('sishya', '/path/to/worker.js');
 
-    expect(result).toEqual({ status: 'started', pid: 5678 });
-    expect(mockWritePid).toHaveBeenCalledWith(5678);
+    expect(result).toEqual({ status: 'started', kshetraId: 'sishya', pid: 5678 });
+    expect(mockWritePid).toHaveBeenCalledWith('sishya', 5678);
     expect(child.unref).toHaveBeenCalled();
   });
 
-  it('spawns daemon when PID file exists but process is dead (stale)', () => {
+  it('spawns worker when PID file exists but process is dead (stale)', () => {
     mockReadPid.mockReturnValue(9999);
     mockIsAlive.mockReturnValue(false);
     const child = makeChild(1001);
     mockSpawn.mockReturnValue(child);
 
-    const result = startDaemon('/path/to/daemon.js');
+    const result = startWorker('sishya', '/path/to/worker.js');
 
-    expect(result).toEqual({ status: 'started', pid: 1001 });
+    expect(result).toEqual({ status: 'started', kshetraId: 'sishya', pid: 1001 });
   });
 
-  it('spawns with detached:true and log file stdio', () => {
+  it('spawns with the kshetra id as argv, detached:true and log file stdio', () => {
     mockReadPid.mockReturnValue(null);
     mockSpawn.mockReturnValue(makeChild(42));
 
-    startDaemon('/path/to/daemon.js');
+    startWorker('sishya', '/path/to/worker.js');
 
     expect(mockSpawn).toHaveBeenCalledWith(
       expect.any(String),
-      ['/path/to/daemon.js'],
+      ['/path/to/worker.js', 'sishya'],
       expect.objectContaining({ detached: true, stdio: ['ignore', 3, 3] }),
     );
   });
@@ -81,6 +82,6 @@ describe('startDaemon', () => {
     mockReadPid.mockReturnValue(null);
     mockSpawn.mockReturnValue({ pid: undefined, unref: vi.fn() });
 
-    expect(() => startDaemon('/path/to/daemon.js')).toThrow('Failed to spawn daemon process');
+    expect(() => startWorker('sishya', '/path/to/worker.js')).toThrow('Failed to spawn worker process for "sishya"');
   });
 });
