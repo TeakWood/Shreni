@@ -1,11 +1,9 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
-import Anthropic from '@anthropic-ai/sdk';
-import type { MessageParam } from '@anthropic-ai/sdk/resources/messages.js';
 import { loadRegistry } from '../kshetra/registry.js';
 import { loadState } from '../kshetra/state.js';
 import { readToken } from './token.js';
-import { VICHARA_TOOLS, executeTool } from './tools.js';
+import { runVicharaTurn } from './agent.js';
 import { buildVicharaSystemPrompt } from './prompt.js';
 import { parseAtMention, resolveAtMentionKshetra } from '../sthapathi/at-mention.js';
 import { INDEX_HTML, MANIFEST_JSON } from './pwa.js';
@@ -25,12 +23,11 @@ function buildStatusPayload(kshetras: KshetraConfig[]) {
   };
 }
 
-export async function createVicharaServer(port = DEFAULT_PORT) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is not set — export it before running shreni vichara start');
-  }
+const VICHARA_MODEL = 'claude-sonnet-4-6';
 
-  const client = new Anthropic();
+export async function createVicharaServer(port = DEFAULT_PORT) {
+  // Auth is delegated to the `claude` CLI (subscription/OAuth), exactly like the
+  // agent provider adapters — no ANTHROPIC_API_KEY is required.
   const fastify = Fastify({ logger: false });
   await fastify.register(fastifyWebsocket);
 
@@ -99,62 +96,21 @@ export async function createVicharaServer(port = DEFAULT_PORT) {
           currentTime: new Date().toISOString(),
         });
 
-        const messages: MessageParam[] = [{ role: 'user', content: chatText }];
+        // Run the turn through the `claude` CLI (subscription auth). The CLI
+        // drives its own agentic loop with native read-only tools scoped to the
+        // active kshetra repo; we forward its stream-json events to the client.
+        const cwd = activeKshetra?.repo.path ?? process.cwd();
 
-        try {
-          let iterations = 0;
-          const MAX_ITERATIONS = 10;
-
-          while (iterations < MAX_ITERATIONS) {
-            iterations++;
-            const response = await client.messages.create({
-              model: 'claude-sonnet-4-6',
-              max_tokens: 4096,
-              system: systemPrompt,
-              tools: VICHARA_TOOLS,
-              messages,
-            });
-
-            messages.push({ role: 'assistant', content: response.content });
-
-            if (response.stop_reason === 'tool_use') {
-              const toolResults: MessageParam['content'] = [];
-
-              for (const block of response.content) {
-                if (block.type !== 'tool_use') continue;
-
-                safeSend({ type: 'tool_use', id: block.id, name: block.name, input: block.input });
-
-                const result = await executeTool(
-                  block.name,
-                  block.input as Record<string, string>,
-                  kshetras,
-                );
-
-                safeSend({ type: 'tool_result', id: block.id, name: block.name });
-
-                (toolResults as Array<{ type: 'tool_result'; tool_use_id: string; content: string }>).push({
-                  type: 'tool_result',
-                  tool_use_id: block.id,
-                  content: result,
-                });
-              }
-
-              messages.push({ role: 'user', content: toolResults });
-              continue;
-            }
-
-            const textBlock = response.content.find(b => b.type === 'text');
-            if (textBlock?.type === 'text') {
-              safeSend({ type: 'text_delta', text: textBlock.text });
-            }
-            break;
-          }
-
-          safeSend({ type: 'done' });
-        } catch (err) {
-          safeSend({ type: 'error', message: (err as Error).message });
-        }
+        await runVicharaTurn(
+          { systemPrompt, userPrompt: chatText, cwd, model: VICHARA_MODEL },
+          {
+            text: t => safeSend({ type: 'text_delta', text: t }),
+            toolUse: (name, input) => safeSend({ type: 'tool_use', name, input }),
+            toolResult: name => safeSend({ type: 'tool_result', name }),
+            error: message => safeSend({ type: 'error', message }),
+            done: () => safeSend({ type: 'done' }),
+          },
+        );
       });
     },
   );

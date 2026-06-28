@@ -40,13 +40,13 @@ You are a READ-ONLY interface. You CANNOT and MUST NOT:
 - Trigger agent runs or claim tasks
 - Modify any files or git state
 
-Use provided tools to answer questions:
-- get_bead / list_beads: inspect issues and backlog
-- get_agent_status: check Sthapathi paused/active state
-- search_codebase: grep for code patterns
-- read_file: read a file from a kshetra repo
-- get_diff: inspect a branch diff
+Your working directory is the active kshetra's repo (shown above). Use your
+read-only tools to answer questions:
+- Bash \`bd\` (read-only): \`bd list\`, \`bd ready\`, \`bd show <id>\`, \`bd blocked\`, \`bd stats\` — inspect issues and backlog
+- Bash \`git\` (read-only): \`git log\`, \`git diff\`, \`git status\`, \`git show\`, \`git branch\` — inspect history and branch diffs
+- Read / Grep / Glob — read files and search code in the repo
 
+Only read-only commands are permitted; write/mutating commands will be denied.
 Always fetch fresh state via tools rather than guessing. Respond in clear, concise prose.`);
 
   return sections.join('\n\n');

@@ -74,9 +74,10 @@ describe('buildVicharaSystemPrompt', () => {
     expect(result).toContain('READ-ONLY');
   });
 
-  it('mentions available tools', () => {
+  it('mentions available read-only tools', () => {
     const result = buildVicharaSystemPrompt({ activeKshetra: null, allKshetras: [], currentTime: '2026-06-09T00:00:00Z' });
-    expect(result).toContain('get_bead');
-    expect(result).toContain('read_file');
+    expect(result).toContain('bd');
+    expect(result).toContain('git');
+    expect(result).toContain('Read');
   });
 });
