@@ -29,6 +29,7 @@ const ConventionsConfigSchema = z.object({
 });
 
 const AgentsConfigSchema = z.object({
+  provider: z.enum(['anthropic', 'gemini', 'openai']).default('anthropic'),
   model: z.string().default('claude-sonnet-4'),
   maxRoundsPerBead: z.number().int().min(1).default(3),
 });
@@ -46,7 +47,7 @@ export const KshetraConfigSchema = z.object({
   beads: BeadsConfigSchema,
   stack: StackConfigSchema,
   conventions: ConventionsConfigSchema.default({ styleGuide: undefined, architecture: undefined }),
-  agents: AgentsConfigSchema.default({ model: 'claude-sonnet-4', maxRoundsPerBead: 3 }),
+  agents: AgentsConfigSchema.default({ provider: 'anthropic', model: 'claude-sonnet-4', maxRoundsPerBead: 3 }),
   priority: PriorityConfigSchema.default({ p0AutoAssign: true, maxConcurrentBeads: 1 }),
 });
 

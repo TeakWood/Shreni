@@ -5,7 +5,7 @@ import type { Task, ParikshakaOutput } from '../sthapathi/types.js';
 // ── module mocks (hoisted) ───────────────────────────────────────────────────
 
 const mockRunClaudeAgent = vi.fn<() => Promise<object>>();
-vi.mock('./runner.js', () => ({ runClaudeAgent: mockRunClaudeAgent }));
+vi.mock('./runner.js', () => ({ runAgent: mockRunClaudeAgent, runClaudeAgent: mockRunClaudeAgent }));
 
 // ── import after mocks ────────────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ const KSHETRA: KshetraConfig = {
   beads: { path: '/projects/sishya-beads', remote: 'git@github.com:TeakWood/sishya-beads.git', mode: 'embedded' },
   stack: { language: 'typescript' },
   conventions: {},
-  agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
+  agents: { provider: 'anthropic', model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
 };
 

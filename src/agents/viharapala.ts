@@ -1,6 +1,6 @@
 import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
 import { ParseError } from '../sthapathi/errors.js';
-import { runClaudeAgent } from './runner.js';
+import { runAgent } from './runner.js';
 
 const VIHARAPALA_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -85,7 +85,8 @@ export async function runViharapala(
   roundHistory: string,
   branch = `bead-${context.task.id}/${context.task.slug}`,
 ): Promise<ViharapalaOutput> {
-  const result = await runClaudeAgent({
+  const result = await runAgent({
+    provider: context.kshetra.agents.provider,
     systemPrompt: buildViharapalaSystemPrompt(context, silpiOut, round, roundHistory, branch),
     userPrompt: `Review the implementation on branch ${branch} for task ${context.task.id}: ${context.task.title}.`,
     cwd: context.kshetra.repo.path,

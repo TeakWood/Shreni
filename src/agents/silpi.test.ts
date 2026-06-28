@@ -5,7 +5,7 @@ import type { AgentContext, Task, SilpiOutput, ViharapalaOutput } from '../sthap
 // ── module mocks (hoisted) ───────────────────────────────────────────────────
 
 const mockRunClaudeAgent = vi.fn<() => Promise<object>>();
-vi.mock('./runner.js', () => ({ runClaudeAgent: mockRunClaudeAgent }));
+vi.mock('./runner.js', () => ({ runAgent: mockRunClaudeAgent, runClaudeAgent: mockRunClaudeAgent }));
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ const KSHETRA: KshetraConfig = {
   },
   stack: { language: 'typescript' },
   conventions: {},
-  agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
+  agents: { provider: 'anthropic', model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
 };
 
@@ -90,7 +90,7 @@ describe('runSilpi', () => {
   });
 
   it('sends a different model when config changes', async () => {
-    const ctx = { ...CONTEXT, kshetra: { ...KSHETRA, agents: { ...KSHETRA.agents, model: 'claude-opus-4-8' } } };
+    const ctx = { ...CONTEXT, kshetra: { ...KSHETRA, agents: { ...KSHETRA.agents, provider: 'anthropic', model: 'claude-opus-4-8' } } };
     await runSilpi(ctx, 1);
     const opts = mockRunClaudeAgent.mock.calls[0][0] as { model: string };
     expect(opts.model).toBe('claude-opus-4-8');

@@ -139,7 +139,7 @@ export function generateKshetraYaml(opts: {
       mode: 'embedded',
     },
     stack: { language: opts.language },
-    agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
+    agents: { provider: 'anthropic', model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
     priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
   };
   return yaml.dump(config, { lineWidth: -1 });

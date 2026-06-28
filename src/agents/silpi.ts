@@ -1,6 +1,6 @@
 import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
 import { ParseError } from '../sthapathi/errors.js';
-import { runClaudeAgent } from './runner.js';
+import { runAgent } from './runner.js';
 
 const SILPI_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -97,7 +97,8 @@ export async function runSilpi(
   feedback?: ViharapalaOutput | null,
   branch = `bead-${context.task.id}/${context.task.slug}`,
 ): Promise<SilpiOutput> {
-  const result = await runClaudeAgent({
+  const result = await runAgent({
+    provider: context.kshetra.agents.provider,
     systemPrompt: buildSilpiSystemPrompt(context, round, branch, feedback),
     userPrompt: `Implement task ${context.task.id}: ${context.task.title}. You are on branch ${branch}. Use your tools to implement, test, lint, and commit.`,
     cwd: context.kshetra.repo.path,

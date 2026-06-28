@@ -1,7 +1,7 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task, ParikshakaOutput } from '../sthapathi/types.js';
 import { ParseError } from '../sthapathi/errors.js';
-import { runClaudeAgent } from './runner.js';
+import { runAgent } from './runner.js';
 
 export interface ParikshakaContext {
   kshetra: KshetraConfig;
@@ -67,7 +67,8 @@ Do NOT implement features — only write tests.
 }
 
 export async function runParikshaka(ctx: ParikshakaContext): Promise<ParikshakaOutput> {
-  const result = await runClaudeAgent({
+  const result = await runAgent({
+    provider: ctx.kshetra.agents.provider,
     systemPrompt: buildParikshakaSystemPrompt(ctx),
     userPrompt: `Analyse the merged diff and write e2e / user-persona tests for task ${ctx.task.id}: ${ctx.task.title}.`,
     cwd: ctx.kshetra.repo.path,
