@@ -12,6 +12,7 @@ import { runRegister } from './register';
 import { verifyHooks } from './verify-hooks';
 import { runList } from './list';
 import { startVichara, stopVichara, statusVichara } from './vichara';
+import { runTail } from './tail';
 
 function parseFlag(argv: string[], flag: string): string | undefined {
   const idx = argv.indexOf(flag);
@@ -210,8 +211,15 @@ switch (command) {
     break;
   }
 
+  case 'tail': {
+    const kshetraId = parseFlag(args, '--kshetra');
+    const all = args.includes('--all');
+    runTail({ kshetraId, all });
+    break;
+  }
+
   default:
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume|run|sync|init-kshetra|register|verify-hooks|vichara>');
+    console.error('Usage: shreni <start|stop|status|agents|logs|pause|resume|run|sync|init-kshetra|register|verify-hooks|vichara|tail>');
     process.exit(1);
 }

@@ -1,7 +1,7 @@
 # Shreni — Product Requirements Document
 
 > Automated Code Development Harness  
-> Version 1.0 · June 2026 · TeakWood  
+> Version 1.1 · June 2026 · TeakWood  
 > Confidential — Internal Use Only
 
 ---
@@ -152,7 +152,15 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 - On max rounds exceeded (default: 3): marks task blocked, sends alert to Vichara.
 - Sthapathi is the **sole caller** of `bd update --claim` and `bd close` in the system.
 
-#### 5.1.2 Silpi↔Viharapala Review Loop
+#### 5.1.2 Beads Auto-Sync
+
+- On daemon startup, Sthapathi syncs all registered Kshetra beads repos before the first poll cycle.
+- A background sync runs every 5 minutes per Kshetra, independent of task activity — ensuring the beads repo stays current even when no tasks are in flight.
+- Sync order: commit any local changes first, then pull-rebase from remote, then push. This prevents `git pull --rebase` from failing on a dirty working tree.
+- Concurrent sync calls for the same Kshetra are deduplicated — a second caller awaits the in-flight sync rather than launching a parallel git operation, preventing index lock conflicts.
+- Stale `.git/index.lock` files (left by crashed git processes) are cleared automatically before each sync attempt.
+
+#### 5.1.3 Silpi↔Viharapala Review Loop
 
 - Sthapathi builds full agent context before each dispatch: `bd prime` output + `bd show` output + RAG chunks + skills.
 - On Silpi completion: Sthapathi records the round note via `bd update --note`, then dispatches Viharapala.
@@ -161,7 +169,7 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 - On Viharapala `REJECT`: increments round counter, re-dispatches Silpi with must-fix list.
 - Sthapathi calls `bd remember` after each session to persist insights returned in agent output.
 
-#### 5.1.3 E2E Agent Dispatch
+#### 5.1.4 E2E Agent Dispatch
 
 - E2E agent is triggered asynchronously after each successful merge — does not block the main loop.
 - E2E agent returns coverage gaps in its output; Sthapathi translates these into `bd create` calls.
@@ -218,7 +226,30 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 - Proactive notifications for: task completions, blocked tasks, E2E coverage gaps, agent errors.
 - Voice input supported for hands-free capture during demos.
 
-### 5.6 Multi-Kshetra Management
+### 5.6 Developer Observability — `shreni tail`
+
+Developers need live visibility into what agents are doing without watching raw daemon logs. `shreni tail` provides a real-time, human-readable stream of agent activity.
+
+- `shreni tail --kshetra <id>` streams agent events for a single Kshetra.
+- `shreni tail --all` streams events across all registered Kshetras simultaneously.
+- Events are written by Sthapathi to a per-Kshetra JSONL log at `~/.shreni/logs/<id>.jsonl` and polled every 500ms.
+- Each event line shows: timestamp, Kshetra, event type, and relevant detail.
+
+**Events streamed:**
+
+| Event | When emitted | What it shows |
+|---|---|---|
+| `TASK` | Task claimed | Bead ID + title |
+| `SILPI R{n} starting…` | Before Silpi API call | Round number |
+| `SILPI R{n}` | After Silpi returns | Confidence score, lint/test status, summary, changed files |
+| `VIHARAPALA R{n} starting…` | Before Viharapala API call | Round number |
+| `VIHARAPALA R{n}` | After Viharapala returns | Verdict (APPROVE/REJECT), overall score, must-fix items |
+| `DONE` | Task approved or blocked | Approved/blocked, total rounds |
+| `ERROR` | Agent or git failure | Bead ID + error message |
+
+The log file is append-only and survives daemon restarts. `shreni tail` prints existing history then follows new events.
+
+### 5.7 Multi-Kshetra Management
 
 - Sthapathi manages N Kshetras concurrently, each with an isolated queue and `bd` instance.
 - `BEADS_DIR` environment variable scopes all `bd` calls to the correct Kshetra database.
@@ -226,7 +257,7 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 - Vichara supports per-project context switching via `@kshetra-name` prefix in chat.
 - Practical ceiling on a single machine: 5–8 active Kshetras before API rate limits and RAM contention become significant.
 
-### 5.7 Bug and Task Capture
+### 5.8 Bug and Task Capture
 
 - **CLI:** `bd create 'title' -p 0 -t bug` — available from any terminal in a registered Kshetra.
 - **Vichara (phone):** tap Bug chip → enter title → select severity → optionally dictate context. Filed in under 30 seconds.
@@ -242,7 +273,7 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 |---|---|---|
 | Agent round-trip latency | < 5 min per round | Silpi + Viharapala for a typical bead |
 | Vichara response time | < 3s first token | Streaming; RAG lookup included |
-| Beads sync delay | < 30s | `git push` after every Sthapathi `bd` write |
+| Beads sync delay | < 5 min | Periodic auto-sync every 5 min; immediate sync on task write |
 | Kshetra isolation | Complete | No cross-contamination of RAG, `bd`, or git context |
 | Local-only operation | 100% | No cloud dependency except GitHub and LLM API |
 | Mobile usability | One-hand, 30s bug capture | PWA optimised for narrow viewports |

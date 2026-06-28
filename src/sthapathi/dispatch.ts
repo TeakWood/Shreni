@@ -8,6 +8,7 @@ import { runSilpi } from '../agents/silpi.js';
 import { runViharapala } from '../agents/viharapala.js';
 import { withRetry } from './retry.js';
 import { ParseError, AgentError } from './errors.js';
+import { emit } from './activity-log.js';
 
 async function readFileOptional(filePath: string): Promise<string> {
   try {
@@ -127,11 +128,26 @@ export async function runSilpiViharapalaLoop(
   let round = 0;
   let feedback: ViharapalaOutput | null = null;
 
+  emit({ type: 'task_claimed', kshetra: kshetra.id, beadId: task.id, title: task.title });
+
   while (round < kshetra.agents.maxRoundsPerBead) {
     round++;
 
+    emit({ type: 'round_start', kshetra: kshetra.id, beadId: task.id, round, agent: 'silpi' });
     const context = await buildAgentContext(kshetra, task);
     const silpiOut = await runSilpi(context, round, feedback);
+
+    emit({
+      type: 'silpi_done',
+      kshetra: kshetra.id,
+      beadId: task.id,
+      round,
+      summary: silpiOut.summary,
+      confidence: silpiOut.confidenceScore,
+      files: silpiOut.filesChanged.map(f => f.path),
+      lintPassed: silpiOut.lintPassed,
+      testsPassed: silpiOut.testsPassed,
+    });
 
     for (const insight of silpiOut.insights) {
       await bdClient.remember(insight);
@@ -152,7 +168,18 @@ export async function runSilpiViharapalaLoop(
 
     await bdClient.addNote(task.id, `Round ${round}: submitted for review`);
 
+    emit({ type: 'round_start', kshetra: kshetra.id, beadId: task.id, round, agent: 'viharapala' });
     feedback = await runViharapala(context, silpiOut, round, context.taskDetails);
+
+    emit({
+      type: 'viharapala_done',
+      kshetra: kshetra.id,
+      beadId: task.id,
+      round,
+      verdict: feedback.verdict,
+      score: feedback.overallScore,
+      mustFix: feedback.mustFix,
+    });
 
     for (const insight of feedback.insights) {
       await bdClient.remember(insight);
@@ -161,9 +188,11 @@ export async function runSilpiViharapalaLoop(
     await bdClient.addNote(task.id, `Round ${round}: ${feedback.verdict}`);
 
     if (feedback.verdict === 'APPROVE') {
+      emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
       return { approved: true, note: `Approved round ${round}` };
     }
   }
 
+  emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: false, rounds: round });
   return { approved: false, note: `Blocked after ${round} rounds` };
 }

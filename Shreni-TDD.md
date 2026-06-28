@@ -1,7 +1,7 @@
 # Shreni — Technical Design Document
 
 > Automated Code Development Harness  
-> Version 1.0 · June 2026 · TeakWood  
+> Version 1.1 · June 2026 · TeakWood  
 > Confidential — Internal Use Only
 
 ---
@@ -71,7 +71,8 @@ TeakWood/shreni/
 │   ├── scheduler.ts    # Per-Kshetra queue management
 │   ├── git.ts          # Branch create, merge, push helpers
 │   ├── beads.ts        # bd CLI wrapper — internal to Sthapathi only
-│   └── dispatch.ts     # Agent session builder + context injector
+│   ├── dispatch.ts     # Agent session builder + context injector
+│   └── activity-log.ts # Per-Kshetra JSONL event log (~/.shreni/logs/<id>.jsonl)
 ├── agents/
 │   ├── silpi.ts        # Coding agent session
 │   ├── viharapala.ts   # Review agent session
@@ -322,16 +323,55 @@ async function buildAgentContext(kshetra: Kshetra, task: Task): Promise<AgentCon
 
 `bd` calls are internal to Sthapathi only. The `beads.ts` wrapper is not used by the `shreni` CLI or Vichara.
 
+**Sync order:** local changes are committed *before* pulling. `git pull --rebase` rejects a dirty working tree, so staging and committing first is required. This also means local beads writes are preserved if the pull-rebase encounters a conflict.
+
+**Concurrency guard:** if two callers (e.g. the periodic sync timer and a per-task sync) hit `syncBeads` for the same Kshetra simultaneously, the second caller receives the same in-flight Promise instead of spawning a parallel git operation. Parallel `git add` on the same repo causes `index.lock` conflicts.
+
+**Stale lock cleanup:** a `.git/index.lock` file left by a previously crashed git process is removed automatically before each sync attempt.
+
+**Periodic sync:** the daemon calls `syncAll()` (syncs all registered Kshetras) on startup and every 5 minutes via `setInterval`. This ensures the beads repo stays current between task runs and protects against data loss if the machine is powered off between tasks.
+
 ```typescript
 // sthapathi/beads.ts — internal module, not exposed outside Sthapathi
 
-async function syncBeads(kshetra: Kshetra): Promise<void> {
-  const p = kshetra.beads.path;
-  await git(p).pull('--rebase', 'origin', 'main');
-  await git(p).add('-A');
-  await git(p).commit(`shreni: sync ${new Date().toISOString()}`);
-  await git(p).push('origin', 'main');
+// Deduplicates concurrent sync calls per beads path
+const syncInFlight = new Map<string, Promise<void>>();
+
+export function syncBeads(kshetra: Kshetra): Promise<void> {
+  const key = kshetra.beads.path;
+  const existing = syncInFlight.get(key);
+  if (existing) return existing;                      // share in-flight sync
+
+  const promise = doSyncBeads(kshetra).finally(() => syncInFlight.delete(key));
+  syncInFlight.set(key, promise);
+  return promise;
 }
+
+async function doSyncBeads(kshetra: Kshetra): Promise<void> {
+  // Clear stale lock before touching git
+  const indexLock = join(kshetra.beads.path, '.git', 'index.lock');
+  if (existsSync(indexLock)) rmSync(indexLock);
+
+  const g = git(kshetra.beads.path);
+  await g.add('-A');                                  // stage local changes first
+  await g.commit(`shreni: sync ${new Date().toISOString()}`);  // no-op if nothing staged
+  await g.pull('--rebase', 'origin', 'main');         // pull-rebase now safe (clean tree)
+  await g.push('origin', 'main');
+}
+
+// daemon.ts — periodic sync for all Kshetras
+const BEADS_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+
+async function syncAll(): Promise<void> {
+  for (const kshetra of kshetras) {
+    try { await syncBeads(kshetra); }
+    catch (err) { log.error(`beads sync failed for "${kshetra.id}":`, err); }
+  }
+}
+
+syncAll();                                            // sync on startup before first poll
+setInterval(syncAll, BEADS_SYNC_INTERVAL_MS);        // periodic background sync
+```
 
 function bd(kshetra: Kshetra) {
   const env = { ...process.env, BEADS_DIR: kshetra.beads.path };
@@ -349,7 +389,34 @@ function bd(kshetra: Kshetra) {
 }
 ```
 
-### 4.5 E2E Agent Dispatch
+### 4.5 Activity Log
+
+Every agent event in the Silpi↔Viharapala loop is written to a per-Kshetra JSONL file at `~/.shreni/logs/<kshetra-id>.jsonl`. Each line is a self-contained JSON object with a `ts` timestamp and typed event fields. The file is append-only and survives daemon restarts.
+
+```typescript
+// sthapathi/activity-log.ts
+
+export type ActivityEvent =
+  | { type: 'task_claimed';    kshetra: string; beadId: string; title: string }
+  | { type: 'round_start';     kshetra: string; beadId: string; round: number; agent: 'silpi' | 'viharapala' }
+  | { type: 'silpi_done';      kshetra: string; beadId: string; round: number; summary: string; confidence: number; files: string[]; lintPassed: boolean; testsPassed: boolean }
+  | { type: 'viharapala_done'; kshetra: string; beadId: string; round: number; verdict: 'APPROVE' | 'REJECT'; score: number; mustFix: string[] }
+  | { type: 'task_done';       kshetra: string; beadId: string; title: string; approved: boolean; rounds: number }
+  | { type: 'beads_synced';    kshetra: string }
+  | { type: 'error';           kshetra: string; beadId?: string; message: string };
+
+export type LoggedEvent = ActivityEvent & { ts: string };
+
+export function emit(event: ActivityEvent): void {
+  // mkdirSync + appendFileSync — never throws, never blocks the daemon
+}
+```
+
+`emit()` is called by `dispatch.ts` at each stage: task claimed, round start (per agent), silpi/viharapala completion, and task done. Errors swallowed — logging must never crash the daemon.
+
+`shreni tail` reads this file using a synchronous polling loop (`readSync` from the last known byte position, every 500ms) and pretty-prints each event. See Section 11.2 for the CLI interface.
+
+### 4.6 E2E Agent Dispatch
 
 ```typescript
 async function runE2EAgent(kshetra: Kshetra, mergedTask: Task): Promise<void> {
@@ -1339,8 +1406,8 @@ The `shreni` CLI controls the harness — Kshetras, agents, workflow, RAG, and V
 
 ```bash
 cd /projects/shreni
-npm install && npm run build
-npm install -g .
+pnpm install && pnpm build
+pnpm install -g .   # or: npm install -g . (engine warning is harmless)
 ```
 
 ### 11.2 Command Reference
@@ -1348,18 +1415,23 @@ npm install -g .
 #### Kshetra Management
 
 ```bash
-shreni init-kshetra --slug sishya --path /projects/sishya
-# 1. Creates TeakWood/sishya-beads on GitHub
-# 2. Clones to /projects/sishya-beads
-# 3. BEADS_DIR=/projects/sishya-beads bd init --stealth
+shreni init-kshetra --slug sishya --path /projects/sishya [--beads-path /projects/sishya-issues]
+# 1. Creates TeakWood/sishya-beads on GitHub     ← skipped if --beads-path exists on disk
+# 2. Clones to /projects/sishya-beads             ← skipped if --beads-path exists on disk
+# 3. BEADS_DIR=... bd init --stealth              ← skipped if embeddeddolt/ already present
 # 4. Creates symlink: /projects/sishya/.beads → /projects/sishya-beads
+#    (fails with clear message if .beads already exists as a directory, not a symlink)
 # 5. Appends .beads to /projects/sishya/.gitignore
-# 6. BEADS_DIR=/projects/sishya-beads bd setup claude
+# 6. BEADS_DIR=... bd setup claude
 #    (installs SessionStart/PreCompact hooks for interactive Claude Code)
-# 7. Generates .shreni/kshetra.yaml from template
+# 7. Generates kshetra.yaml from template
 # 8. Appends SHRENI INTEGRATION section to CLAUDE.md
 # 9. Builds initial RAG index
 # 10. Registers Kshetra with Sthapathi
+
+# --beads-path: use an existing local beads repo instead of creating a new one.
+# When the path exists, steps 1-3 are skipped; the remote URL is read from the
+# existing repo's git origin for inclusion in kshetra.yaml.
 
 shreni register /projects/sishya   # register already-initialised project
 shreni list                        # all registered Kshetras + status
@@ -1386,6 +1458,11 @@ shreni agents                      # what each agent is doing right now
 shreni logs --kshetra sishya
 shreni logs --kshetra sishya --bead bd-f3a2
 shreni logs --all
+
+# Live streaming of agent events (task claimed, silpi/viharapala rounds, verdicts)
+shreni tail --kshetra sishya       # stream events for one Kshetra
+shreni tail --all                  # stream events for all Kshetras
+# Reads ~/.shreni/logs/<id>.jsonl — prints history then follows new events (Ctrl+C to stop)
 ```
 
 #### RAG Index
