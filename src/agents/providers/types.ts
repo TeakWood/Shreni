@@ -46,6 +46,13 @@ export interface ProviderAdapter {
   createParser(opts: AgentRunnerOpts, emit: AdapterEmit): StreamParser;
 }
 
+// Shared: let users point an adapter at a specific binary (e.g. a downloaded
+// CLI not on PATH) via an env override, falling back to the PATH name.
+export function resolveBin(envVar: string, defaultBin: string): string {
+  const override = process.env[envVar];
+  return override && override.trim() ? override.trim() : defaultBin;
+}
+
 // Shared: trim a tool input down to one salient field for the activity log.
 export function toolDetail(name: string, input: Record<string, unknown>): string {
   let raw: string;

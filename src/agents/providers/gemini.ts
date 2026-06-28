@@ -1,5 +1,5 @@
 import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser } from './types.js';
-import { extractLastJsonObject } from './types.js';
+import { extractLastJsonObject, resolveBin } from './types.js';
 
 // Google — the `gemini` CLI in non-interactive (headless) mode.
 //   gemini -m <model> -y -o json -p "<prompt>"
@@ -21,7 +21,7 @@ export const geminiAdapter: ProviderAdapter = {
   buildSpawn(opts: AgentRunnerOpts) {
     const prompt = `${opts.systemPrompt}\n\n=== TASK ===\n${opts.userPrompt}`;
     return {
-      bin: 'gemini',
+      bin: resolveBin('SHRENI_GEMINI_BIN', 'gemini'),
       args: ['-m', opts.model, '-y', '-o', 'json', '-p', prompt],
     };
   },

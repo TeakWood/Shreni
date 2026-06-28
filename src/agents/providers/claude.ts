@@ -1,5 +1,5 @@
 import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser } from './types.js';
-import { toolDetail } from './types.js';
+import { resolveBin, toolDetail } from './types.js';
 
 // Anthropic — the `claude` CLI in print mode with stream-json output. This is
 // the reference adapter: validated against `claude --help`.
@@ -8,7 +8,7 @@ export const claudeAdapter: ProviderAdapter = {
 
   buildSpawn(opts: AgentRunnerOpts) {
     return {
-      bin: 'claude',
+      bin: resolveBin('SHRENI_CLAUDE_BIN', 'claude'),
       args: [
         '-p',
         '--output-format', 'stream-json',

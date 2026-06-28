@@ -174,25 +174,59 @@ describe('codexAdapter', () => {
     expect(spec.bin).toBe('codex');
     expect(spec.args).toContain('exec');
     expect(spec.args).toContain('--json');
+    expect(spec.args).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(spec.args).toContain('gpt-5');
   });
 
-  it('captures assistant text and recovers JSON from the last message', () => {
+  it('captures agent_message text and recovers JSON from the last message', () => {
     const { emit, texts } = recordingEmit();
     const parser = codexAdapter.createParser({ ...BASE_OPTS, provider: 'openai' }, emit);
-    parser.onLine(JSON.stringify({ type: 'item.completed', item: { role: 'assistant', text: 'final {"ok":true}' } }));
+    parser.onLine(JSON.stringify({ type: 'thread.started', thread_id: 't1' }));
+    parser.onLine(JSON.stringify({ type: 'turn.started' }));
+    parser.onLine(JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'final {"ok":true}' } }));
+    parser.onLine(JSON.stringify({ type: 'turn.completed', usage: {} }));
     const res = parser.finalize(0, '');
     expect(res.structuredOutput).toEqual({ ok: true });
     expect(texts.length).toBeGreaterThan(0);
   });
 
-  it('counts command/tool events', () => {
+  it('counts command_execution events once (on item.started)', () => {
     const { emit, tools } = recordingEmit();
     const parser = codexAdapter.createParser({ ...BASE_OPTS, provider: 'openai' }, emit);
-    parser.onLine(JSON.stringify({ type: 'command.executed', item: { command: 'pnpm build', name: 'shell' } }));
-    parser.onLine(JSON.stringify({ type: 'item.completed', item: { role: 'assistant', text: '{"ok":true}' } }));
+    parser.onLine(JSON.stringify({ type: 'item.started', item: { id: 'i0', type: 'command_execution', command: '/bin/zsh -lc "pnpm build"', status: 'in_progress' } }));
+    parser.onLine(JSON.stringify({ type: 'item.completed', item: { id: 'i0', type: 'command_execution', command: '/bin/zsh -lc "pnpm build"', exit_code: 0, status: 'completed' } }));
+    parser.onLine(JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: '{"ok":true}' } }));
     parser.finalize(0, '');
     expect(tools.length).toBe(1);
     expect(tools[0].tool).toBe('shell');
+    expect(tools[0].detail).toContain('pnpm build');
+  });
+
+  it('throws on a top-level error event (so the dispatcher can retry)', () => {
+    const { emit } = recordingEmit();
+    const parser = codexAdapter.createParser({ ...BASE_OPTS, provider: 'openai' }, emit);
+    parser.onLine(JSON.stringify({ type: 'error', message: 'rate limit exceeded' }));
+    expect(() => parser.finalize(1, '')).toThrow('rate limit exceeded');
+  });
+
+  it('throws on turn.failed with the nested error message', () => {
+    const { emit } = recordingEmit();
+    const parser = codexAdapter.createParser({ ...BASE_OPTS, provider: 'openai' }, emit);
+    parser.onLine(JSON.stringify({ type: 'turn.failed', error: { message: 'model not supported' } }));
+    expect(() => parser.finalize(1, '')).toThrow('model not supported');
+  });
+});
+
+describe('resolveBin override', () => {
+  it('honours SHRENI_CODEX_BIN when set', () => {
+    const prev = process.env.SHRENI_CODEX_BIN;
+    process.env.SHRENI_CODEX_BIN = '/custom/path/codex';
+    try {
+      const spec = codexAdapter.buildSpawn({ ...BASE_OPTS, provider: 'openai' });
+      expect(spec.bin).toBe('/custom/path/codex');
+    } finally {
+      if (prev === undefined) delete process.env.SHRENI_CODEX_BIN;
+      else process.env.SHRENI_CODEX_BIN = prev;
+    }
   });
 });

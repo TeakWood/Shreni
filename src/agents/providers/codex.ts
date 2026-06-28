@@ -1,28 +1,38 @@
 import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser } from './types.js';
-import { extractLastJsonObject, toolDetail } from './types.js';
+import { extractLastJsonObject, resolveBin, toolDetail } from './types.js';
 
 // OpenAI — the `codex` CLI in non-interactive exec mode.
-//   codex exec --json --dangerously-bypass-approvals-and-sandbox -m <model> "<prompt>"
-// Notes / best-effort caveats (codex CLI not installed in this env; flags from
-// the published CLI docs, verify with `codex exec --help` before relying on it):
-//   * `exec` is the non-interactive subcommand; cwd is set by the dispatcher.
-//   * `--json` emits JSONL events; shapes vary by version, so parsing is
-//     defensive — we surface any assistant text and command/tool events we can
-//     recognise and keep the last assistant message as the result text.
-//   * Full autonomy flag lets it run shell/file tools without prompting.
-//   * No structured-output flag — the model is told (via the shared agent system
-//     prompts) to emit JSON only, recovered from the final assistant message.
+//   codex exec --json --dangerously-bypass-approvals-and-sandbox \
+//              --skip-git-repo-check -m <model> "<prompt>"
+// Verified against `codex exec --help` and live JSONL output (CLI installed
+// locally). If codex isn't on PATH, set SHRENI_CODEX_BIN to its full path.
+//
+// Event stream (`--json` prints JSONL); the shapes we rely on:
+//   {"type":"thread.started","thread_id":"..."}
+//   {"type":"turn.started"}
+//   {"type":"item.started","item":{"type":"command_execution","command":"...","status":"in_progress"}}
+//   {"type":"item.completed","item":{"type":"command_execution","command":"...","exit_code":0,"status":"completed"}}
+//   {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+//   {"type":"turn.completed","usage":{...}}
+//   {"type":"error","message":"..."}                       (top-level failure)
+//   {"type":"turn.failed","error":{"message":"..."}}
+//   {"type":"item.completed","item":{"type":"error","message":"..."}}
+//
+// No inline structured-output flag is used (codex has --output-schema <FILE>,
+// but we keep parity with the other adapters): the shared agent system prompts
+// require a JSON-only final message, recovered from the last agent_message.
 export const codexAdapter: ProviderAdapter = {
   name: 'openai',
 
   buildSpawn(opts: AgentRunnerOpts) {
     const prompt = `${opts.systemPrompt}\n\n=== TASK ===\n${opts.userPrompt}`;
     return {
-      bin: 'codex',
+      bin: resolveBin('SHRENI_CODEX_BIN', 'codex'),
       args: [
         'exec',
         '--json',
         '--dangerously-bypass-approvals-and-sandbox',
+        '--skip-git-repo-check',
         '-m', opts.model,
         prompt,
       ],
@@ -32,46 +42,57 @@ export const codexAdapter: ProviderAdapter = {
   createParser(opts: AgentRunnerOpts, emit: AdapterEmit): StreamParser {
     let lastAssistantText: string | null = null;
     let toolCallCount = 0;
-    let rawBuf = '';
+    let errorMessage: string | null = null;
 
     return {
       onLine(line: string): void {
-        rawBuf += line + '\n';
         let ev: Record<string, unknown>;
         try {
           ev = JSON.parse(line) as Record<string, unknown>;
         } catch {
+          return; // non-JSON noise (e.g. "Reading additional input from stdin...")
+        }
+
+        const type = String(ev['type'] ?? '');
+
+        if (type === 'error') {
+          errorMessage = String(ev['message'] ?? 'unknown error');
+          return;
+        }
+        if (type === 'turn.failed') {
+          const err = (ev['error'] ?? {}) as Record<string, unknown>;
+          errorMessage = String(err['message'] ?? 'turn failed');
           return;
         }
 
-        // Defensive: codex event shapes differ across versions. Look for an
-        // assistant/agent message and for command/tool executions.
-        const type = String(ev['type'] ?? ev['kind'] ?? '');
-        const item = (ev['item'] ?? ev['msg'] ?? ev) as Record<string, unknown>;
+        if (type === 'item.started' || type === 'item.completed') {
+          const item = (ev['item'] ?? {}) as Record<string, unknown>;
+          const itemType = String(item['type'] ?? '');
 
-        const role = String(item['role'] ?? '');
-        const text =
-          typeof item['text'] === 'string' ? (item['text'] as string)
-          : typeof item['content'] === 'string' ? (item['content'] as string)
-          : typeof ev['text'] === 'string' ? (ev['text'] as string)
-          : null;
-
-        if ((role === 'assistant' || type.includes('message') || type.includes('agent')) && text && text.trim()) {
-          lastAssistantText = text;
-          emit.text((text.split('\n').find(l => l.trim()) ?? text).slice(0, 120));
-        }
-
-        const command = item['command'] ?? item['cmd'] ?? ev['command'];
-        if (type.includes('command') || type.includes('tool') || type.includes('exec') || command) {
-          toolCallCount++;
-          const name = String(item['name'] ?? ev['name'] ?? 'shell');
-          emit.toolCall(name, toolDetail(name, item));
+          if (itemType === 'agent_message' && type === 'item.completed') {
+            const text = typeof item['text'] === 'string' ? (item['text'] as string) : '';
+            if (text.trim()) {
+              lastAssistantText = text;
+              emit.text((text.split('\n').find(l => l.trim()) ?? text).slice(0, 120));
+            }
+          } else if (itemType === 'command_execution' && type === 'item.started') {
+            // Count once, on start, so started+completed isn't double-counted.
+            toolCallCount++;
+            emit.toolCall('shell', toolDetail('shell', item));
+          } else if (itemType === 'error') {
+            errorMessage = String(item['message'] ?? 'item error');
+          }
         }
       },
 
       finalize(exitCode: number | null, stderrTail: string) {
-        const source = lastAssistantText ?? rawBuf;
-        const structuredOutput = extractLastJsonObject(source);
+        // Surface codex errors so the dispatcher's transient-retry logic can act
+        // on rate-limit / overloaded / 5xx messages.
+        if (errorMessage) {
+          throw new Error(`${opts.agentName}: codex error — ${errorMessage}`);
+        }
+
+        const structuredOutput = extractLastJsonObject(lastAssistantText ?? '');
 
         if (structuredOutput == null && exitCode !== 0) {
           throw new Error(
