@@ -86,15 +86,14 @@ export function bd(kshetra: KshetraConfig) {
   };
 }
 
-// syncBeads: pull latest, commit any local changes, push.
-// Used before every bd read and after every bd write.
+// syncBeads: commit any local changes, pull, push.
+// Commit before pull so unstaged changes don't block the rebase.
 export async function syncBeads(kshetra: KshetraConfig): Promise<void> {
   const g = git(kshetra.beads.path);
-
-  await g.pull('--rebase', 'origin', 'main');
 
   await g.add('-A');
   await g.commit(`shreni: sync ${new Date().toISOString()}`);
 
+  await g.pull('--rebase', 'origin', 'main');
   await g.push('origin', 'main');
 }

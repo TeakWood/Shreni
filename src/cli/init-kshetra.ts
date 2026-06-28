@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import {
   writeFileSync, appendFileSync, symlinkSync,
-  existsSync, mkdirSync, readFileSync,
+  existsSync, mkdirSync, readFileSync, readlinkSync,
 } from 'fs';
 import { resolve, join, dirname, basename } from 'path';
 import { homedir } from 'os';
@@ -16,6 +16,7 @@ export interface InitKshetraOpts {
   path: string;
   org?: string;
   language?: string;
+  beadsPath?: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -40,19 +41,27 @@ async function exec(cmd: string, args: string[], opts: { cwd?: string; env?: Nod
 
 export async function createGitHubRepo(org: string, slug: string): Promise<string> {
   const repoName = `${slug}-beads`;
-  await exec('gh', ['repo', 'create', `${org}/${repoName}`, '--private', '--confirm'], {});
-  return `git@github.com:${org}/${repoName}.git`;
+  const remote = `git@github.com:${org}/${repoName}.git`;
+  try {
+    await exec('gh', ['repo', 'view', `${org}/${repoName}`], {});
+    return remote; // already exists
+  } catch {
+    await exec('gh', ['repo', 'create', `${org}/${repoName}`, '--private', '--confirm'], {});
+    return remote;
+  }
 }
 
 // ── Step 2: Clone beads repo ──────────────────────────────────────────────────
 
 export async function cloneBeadsRepo(remoteUrl: string, localPath: string): Promise<void> {
+  if (existsSync(localPath)) return;
   await exec('git', ['clone', remoteUrl, localPath]);
 }
 
 // ── Step 3: bd init --stealth ─────────────────────────────────────────────────
 
 export async function initBeadsDb(beadsPath: string): Promise<void> {
+  if (existsSync(join(beadsPath, '.dolt')) || existsSync(join(beadsPath, 'embeddeddolt'))) return;
   await exec('bd', ['init', '--stealth'], {
     cwd: beadsPath,
     env: { ...process.env, BEADS_DIR: beadsPath },
@@ -63,7 +72,22 @@ export async function initBeadsDb(beadsPath: string): Promise<void> {
 
 export function createBeadsSymlink(repoPath: string, beadsPath: string): void {
   const symlinkPath = join(repoPath, '.beads');
-  symlinkSync(resolve(beadsPath), symlinkPath);
+  const target = resolve(beadsPath);
+  try {
+    const current = readlinkSync(symlinkPath);
+    if (resolve(current) === target) return;
+    throw new Error(`.beads symlink exists but points to "${current}" instead of "${target}"`);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EINVAL') {
+      throw new Error(
+        `.beads already exists as a directory at "${symlinkPath}". ` +
+        `Remove it first: rm -rf "${symlinkPath}"`
+      );
+    }
+    if (code !== 'ENOENT') throw err;
+    symlinkSync(target, symlinkPath);
+  }
 }
 
 // ── Step 5: Update .gitignore ─────────────────────────────────────────────────
@@ -183,15 +207,28 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   const org = opts.org ?? 'TeakWood';
   const language = opts.language ?? 'typescript';
   const repoPath = resolve(opts.path);
-  const beadsPath = resolve(join(dirname(repoPath), `${basename(repoPath)}-beads`));
+  const beadsPath = opts.beadsPath
+    ? resolve(opts.beadsPath)
+    : resolve(join(dirname(repoPath), `${basename(repoPath)}-beads`));
 
   const log = (step: number, msg: string) => console.log(`[${step}/10] ${msg}`);
 
-  log(1, `Creating GitHub repo ${org}/${opts.slug}-beads...`);
-  const beadsRemote = await createGitHubRepo(org, opts.slug);
+  let beadsRemote: string;
+  if (opts.beadsPath && existsSync(beadsPath)) {
+    log(1, `Using existing beads repo at ${beadsPath} — skipping GitHub create`);
+    log(2, `Using existing beads repo at ${beadsPath} — skipping clone`);
+    try {
+      beadsRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: beadsPath });
+    } catch {
+      beadsRemote = '';
+    }
+  } else {
+    log(1, `Creating GitHub repo ${org}/${opts.slug}-beads...`);
+    beadsRemote = await createGitHubRepo(org, opts.slug);
 
-  log(2, `Cloning beads repo to ${beadsPath}...`);
-  await cloneBeadsRepo(beadsRemote, beadsPath);
+    log(2, `Cloning beads repo to ${beadsPath}...`);
+    await cloneBeadsRepo(beadsRemote, beadsPath);
+  }
 
   log(3, 'Initialising beads database (stealth mode)...');
   await initBeadsDb(beadsPath);

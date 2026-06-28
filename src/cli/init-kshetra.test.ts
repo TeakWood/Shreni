@@ -27,6 +27,9 @@ const mockSymlinkSync = vi.fn();
 const mockExistsSync = vi.fn<(p: string) => boolean>().mockReturnValue(false);
 const mockMkdirSync = vi.fn();
 const mockReadFileSync = vi.fn<() => string>().mockReturnValue('');
+const mockReadlinkSync = vi.fn<(p: string) => string>().mockImplementation(() => {
+  throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+});
 vi.mock('fs', () => ({
   writeFileSync: mockWriteFileSync,
   appendFileSync: mockAppendFileSync,
@@ -34,6 +37,7 @@ vi.mock('fs', () => ({
   existsSync: mockExistsSync,
   mkdirSync: mockMkdirSync,
   readFileSync: mockReadFileSync,
+  readlinkSync: mockReadlinkSync,
 }));
 
 const mockRegisterKshetra = vi.fn();
@@ -67,19 +71,34 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockExistsSync.mockReturnValue(false);
   mockReadFileSync.mockReturnValue('');
+  mockReadlinkSync.mockImplementation(() => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  });
   resolveExec('');
 });
 
 // ── Step 1: createGitHubRepo ──────────────────────────────────────────────────
 
 describe('createGitHubRepo', () => {
-  it('calls gh repo create with org/slug-beads --private --confirm', async () => {
-    resolveExec('');
+  it('calls gh repo create when the remote repo does not yet exist', async () => {
+    mockExecFile
+      .mockRejectedValueOnce(Object.assign(new Error('not found'), { exitCode: 1 }))
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });
     const url = await createGitHubRepo('TeakWood', 'myapp');
     expect(mockExecFile).toHaveBeenCalledWith(
       'gh',
       ['repo', 'create', 'TeakWood/myapp-beads', '--private', '--confirm'],
       expect.any(Object),
+    );
+    expect(url).toBe('git@github.com:TeakWood/myapp-beads.git');
+  });
+
+  it('skips gh repo create and returns URL when remote repo already exists', async () => {
+    resolveExec('');
+    const url = await createGitHubRepo('TeakWood', 'myapp');
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+    expect(mockExecFile).not.toHaveBeenCalledWith(
+      'gh', expect.arrayContaining(['create']), expect.any(Object),
     );
     expect(url).toBe('git@github.com:TeakWood/myapp-beads.git');
   });
@@ -96,6 +115,12 @@ describe('cloneBeadsRepo', () => {
       ['clone', 'git@github.com:TeakWood/myapp-beads.git', '/repos/myapp-beads'],
       expect.any(Object),
     );
+  });
+
+  it('skips git clone when local path already exists', async () => {
+    mockExistsSync.mockReturnValue(true);
+    await cloneBeadsRepo('git@github.com:TeakWood/myapp-beads.git', '/repos/myapp-beads');
+    expect(mockExecFile).not.toHaveBeenCalled();
   });
 });
 
@@ -114,6 +139,12 @@ describe('initBeadsDb', () => {
       }),
     );
   });
+
+  it('skips bd init when .dolt directory already exists', async () => {
+    mockExistsSync.mockImplementation((p: string) => p.endsWith('.dolt'));
+    await initBeadsDb('/repos/myapp-beads');
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
 });
 
 // ── Step 4: createBeadsSymlink ────────────────────────────────────────────────
@@ -125,6 +156,20 @@ describe('createBeadsSymlink', () => {
       '/repos/myapp-beads',
       join('/repos/myapp', '.beads'),
     );
+  });
+
+  it('skips symlinkSync when symlink already points to the correct target', () => {
+    mockReadlinkSync.mockReturnValue('/repos/myapp-beads');
+    createBeadsSymlink('/repos/myapp', '/repos/myapp-beads');
+    expect(mockSymlinkSync).not.toHaveBeenCalled();
+  });
+
+  it('throws when symlink exists but points to a different path', () => {
+    mockReadlinkSync.mockReturnValue('/repos/other-beads');
+    expect(() => createBeadsSymlink('/repos/myapp', '/repos/myapp-beads')).toThrow(
+      /\.beads symlink exists but points to/,
+    );
+    expect(mockSymlinkSync).not.toHaveBeenCalled();
   });
 });
 
@@ -308,9 +353,9 @@ describe('registerWithSthapathi', () => {
 
 describe('initKshetra', () => {
   beforeEach(() => {
-    // gh repo create, git clone, bd init, git remote get-url, bd setup claude all succeed
+    // gh repo view (exists→skip create), git clone, bd init, bd setup claude, git remote
     mockExecFile
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })   // gh repo create
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })   // gh repo view → repo exists
       .mockResolvedValueOnce({ stdout: '', stderr: '' })   // git clone
       .mockResolvedValueOnce({ stdout: '', stderr: '' })   // bd init
       .mockResolvedValueOnce({ stdout: '', stderr: '' })   // bd setup claude
@@ -348,5 +393,56 @@ describe('initKshetra', () => {
     await initKshetra({ slug: 'myapp', path: '/repos/myapp', org: 'Acme' });
     const ghCall = mockExecFile.mock.calls[0];
     expect(ghCall?.[1]).toContain('Acme/myapp-beads');
+  });
+
+  it('skips clone, bd init, and symlink creation when beads already fully initialized', async () => {
+    mockExistsSync.mockImplementation((p: string) => {
+      if (p === '/repos/myapp-beads') return true;
+      if (p.endsWith('.dolt')) return true;
+      if (p.endsWith('.gitignore')) return true;
+      if (p.endsWith('CLAUDE.md')) return true;
+      if (p.endsWith('index.json')) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((p: unknown) => {
+      const s = p as string;
+      if (s.endsWith('.gitignore')) return '.beads\nnode_modules\n';
+      if (s.endsWith('CLAUDE.md')) return '## SHRENI INTEGRATION\nalready here\n';
+      return '';
+    });
+    mockReadlinkSync.mockReturnValue('/repos/myapp-beads');
+    mockExecFile.mockReset()
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })  // gh repo view → exists
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })  // bd setup claude
+      .mockResolvedValueOnce({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' }); // git remote
+
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+
+    expect(mockExecFile).toHaveBeenCalledTimes(3);
+    expect(mockSymlinkSync).not.toHaveBeenCalled();
+    expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', expect.stringContaining('kshetra.yaml'));
+  });
+
+  it('derives default beads path as sibling <repo>-beads when --beads-path is omitted', async () => {
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+    expect(mockSymlinkSync).toHaveBeenCalledWith(
+      '/repos/myapp-beads',
+      expect.stringContaining('.beads'),
+    );
+  });
+
+  it('uses custom beads path when beadsPath option is provided', async () => {
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', beadsPath: '/custom/beads-store' });
+    expect(mockSymlinkSync).toHaveBeenCalledWith(
+      '/custom/beads-store',
+      expect.stringContaining('.beads'),
+    );
+    const bdInitCall = mockExecFile.mock.calls.find(
+      (c) => c[0] === 'bd' && (c[1] as string[]).includes('init'),
+    );
+    expect(bdInitCall?.[2]).toMatchObject({
+      cwd: '/custom/beads-store',
+      env: expect.objectContaining({ BEADS_DIR: '/custom/beads-store' }),
+    });
   });
 });

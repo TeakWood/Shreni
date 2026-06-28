@@ -126,11 +126,12 @@ switch (command) {
     const path = parseFlag(args, '--path');
     const org = parseFlag(args, '--org');
     const language = parseFlag(args, '--language');
+    const beadsPath = parseFlag(args, '--beads-path');
     if (!slug || !path) {
-      console.error('Usage: shreni init-kshetra --slug <id> --path <repo-path> [--org <org>] [--language <lang>]');
+      console.error('Usage: shreni init-kshetra --slug <id> --path <repo-path> [--org <org>] [--language <lang>] [--beads-path <path>]');
       process.exit(1);
     } else {
-      initKshetra({ slug, path, org, language }).catch((err: unknown) => {
+      initKshetra({ slug, path, org, language, beadsPath: beadsPath ?? undefined }).catch((err: unknown) => {
         console.error((err as Error).message);
         process.exit(1);
       });

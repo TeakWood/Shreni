@@ -160,5 +160,5 @@ export async function createVicharaServer(port = DEFAULT_PORT) {
 
 export async function startVicharaServer(port = DEFAULT_PORT): Promise<void> {
   const { fastify } = await createVicharaServer(port);
-  await fastify.listen({ port, host: '127.0.0.1' });
+  await fastify.listen({ port, host: '0.0.0.0' });
 }
