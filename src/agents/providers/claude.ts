@@ -12,6 +12,9 @@ export const claudeAdapter: ProviderAdapter = {
       args: [
         '-p',
         '--output-format', 'stream-json',
+        // --verbose is mandatory when combining --print with stream-json output;
+        // the claude CLI rejects the pair otherwise and exits 1 with no result.
+        '--verbose',
         '--permission-mode', 'bypassPermissions',
         '--system-prompt', opts.systemPrompt,
         '--no-session-persistence',

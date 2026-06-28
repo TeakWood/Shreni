@@ -92,6 +92,8 @@ describe('claudeAdapter.buildSpawn', () => {
     expect(spec.bin).toBe('claude');
     expect(spec.args).toContain('-p');
     expect(spec.args).toContain('stream-json');
+    // stream-json under --print is rejected without --verbose.
+    expect(spec.args).toContain('--verbose');
     expect(spec.args).toContain('bypassPermissions');
     expect(spec.args).toContain('SYSTEM');
     expect(spec.args[spec.args.length - 1]).toBe('USER');
