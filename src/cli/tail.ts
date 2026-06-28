@@ -34,6 +34,20 @@ function fmt(ev: LoggedEvent): string | null {
       return `${tag} VIHARAPALA R${ev.round} ${verdict} score=${ev.score}${fixes}`;
     }
 
+    case 'agent_text': {
+      const firstLine = (ev.text.split('\n').find(l => l.trim()) ?? ev.text).trim();
+      if (!firstLine) return null;
+      const truncated = firstLine.length > 110 ? firstLine.slice(0, 107) + '…' : firstLine;
+      const aLabel = ev.agent === 'silpi' ? 'SILPI     ' : ev.agent === 'viharapala' ? 'VIHARAPALA' : 'PARIKSHAKA';
+      return `${tag} ${aLabel} > ${truncated}`;
+    }
+
+    case 'agent_tool_call': {
+      const aLabel = ev.agent === 'silpi' ? 'SILPI     ' : ev.agent === 'viharapala' ? 'VIHARAPALA' : 'PARIKSHAKA';
+      const detail = ev.detail ? ` ${ev.detail}` : '';
+      return `${tag} ${aLabel} ⚙ ${ev.tool}:${detail}`;
+    }
+
     case 'task_done': {
       const status = ev.approved ? '✓ APPROVED' : '✗ BLOCKED ';
       return `${tag} DONE       ${ev.beadId} ${status} (${ev.rounds} round${ev.rounds === 1 ? '' : 's'})`;

@@ -1,7 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task, ParikshakaOutput } from '../sthapathi/types.js';
 import { ParseError } from '../sthapathi/errors.js';
+import { runClaudeAgent } from './runner.js';
 
 export interface ParikshakaContext {
   kshetra: KshetraConfig;
@@ -11,16 +11,37 @@ export interface ParikshakaContext {
   personas?: string;
 }
 
-export function buildParikshakaSystemPrompt(ctx: ParikshakaContext): string {
+const PARIKSHAKA_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    testFilesAdded: { type: 'array', items: { type: 'string' } },
+    coverageGaps: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          feature: { type: 'string' },
+          description: { type: 'string' },
+          priority: { type: 'number' },
+        },
+        required: ['feature', 'description', 'priority'],
+      },
+    },
+  },
+  required: ['testFilesAdded', 'coverageGaps'],
+};
+
+function buildParikshakaSystemPrompt(ctx: ParikshakaContext): string {
   const sections: string[] = [];
 
-  sections.push(`You are Parikshaka, the test agent for the ${ctx.kshetra.name} project.`);
+  sections.push(
+    `You are Parikshaka, the test agent for the ${ctx.kshetra.name} project.\n` +
+      `You have real tools available: Bash, Read, Write, Edit. Use them to write test files.`,
+  );
 
   if (ctx.personas) sections.push(`== PERSONAS ==\n${ctx.personas}`);
 
-  const testList = ctx.existingTestFiles.length
-    ? ctx.existingTestFiles.join('\n')
-    : '(none)';
+  const testList = ctx.existingTestFiles.length ? ctx.existingTestFiles.join('\n') : '(none)';
   sections.push(`== EXISTING TEST FILES ==\n${testList}`);
 
   sections.push(`== MERGED DIFF ==\n${ctx.mergedDiff || '(empty diff)'}`);
@@ -28,52 +49,41 @@ export function buildParikshakaSystemPrompt(ctx: ParikshakaContext): string {
   sections.push(`== TASK ==\n${ctx.task.id}: ${ctx.task.title}`);
 
   sections.push(`== ROLE BOUNDARY ==
-You are a pure test author — write test files and identify coverage gaps.
-Do NOT call bd, git, or any other commands. Sthapathi handles all coordination.
-Do not implement features, only write tests.
+You are a pure test author. Do NOT call bd commands. Do NOT commit or push. Sthapathi handles that.
+Do NOT implement features — only write tests.
 
 == INSTRUCTIONS ==
-1. Analyse the merged diff and existing test files.
-2. Write any new test files needed to cover the merged changes.
-3. Identify coverage gaps that need further tasks.
-4. Respond ONLY with a valid JSON ParikshakaOutput object — no markdown fences, no explanation:
-{
-  "testFilesAdded": ["path/to/test1.ts"],
-  "coverageGaps": [
-    { "feature": "string", "description": "string", "priority": 1 }
-  ]
-}
-priority is 0-4 (0=critical, 4=backlog).`);
+1. Use Read to understand the existing codebase and test patterns.
+2. Analyse the merged diff to understand what changed.
+3. Write any new test files needed using Write or Edit tools.
+4. Use Bash to run the tests and verify they pass.
+5. Identify any coverage gaps that need separate tasks.
+6. After completing all work, your FINAL response MUST be ONLY a valid JSON ParikshakaOutput object.
+   — No markdown fences, no explanation, no other text.
+   — List test files you added/modified in \`testFilesAdded\`.
+   — \`coverageGaps[].priority\` is 0-4 (0=critical, 4=backlog).`);
 
   return sections.join('\n\n');
 }
 
 export async function runParikshaka(ctx: ParikshakaContext): Promise<ParikshakaOutput> {
-  const client = new Anthropic();
-
-  const response = await client.messages.create({
+  const result = await runClaudeAgent({
+    systemPrompt: buildParikshakaSystemPrompt(ctx),
+    userPrompt: `Analyse the merged diff and write e2e / user-persona tests for task ${ctx.task.id}: ${ctx.task.title}.`,
+    cwd: ctx.kshetra.repo.path,
+    agentName: 'parikshaka',
+    kshetraId: ctx.kshetra.id,
+    beadId: ctx.task.id,
     model: ctx.kshetra.agents.model,
-    max_tokens: 8000,
-    system: buildParikshakaSystemPrompt(ctx),
-    messages: [
-      {
-        role: 'user',
-        content: 'Analyse the diff and write tests. Return ONLY a JSON ParikshakaOutput object.',
-      },
-    ],
+    jsonSchema: PARIKSHAKA_OUTPUT_SCHEMA,
   });
 
-  const textBlock = response.content.find(b => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('Parikshaka: no text block in Claude response');
+  if (!result.structuredOutput) {
+    throw new ParseError(
+      `Parikshaka: no structured output — resultText: ${(result.resultText ?? '').slice(0, 200)}`,
+      null,
+    );
   }
 
-  let output: ParikshakaOutput;
-  try {
-    output = JSON.parse(textBlock.text) as ParikshakaOutput;
-  } catch (err) {
-    throw new ParseError(`Parikshaka: invalid JSON — ${(err as Error).message}`, err);
-  }
-
-  return output;
+  return result.structuredOutput as ParikshakaOutput;
 }

@@ -8,6 +8,7 @@ const mockBdPrime = vi.fn<() => Promise<string>>();
 const mockBdShow = vi.fn<(id: string) => Promise<string>>();
 const mockBdAddNote = vi.fn<() => Promise<string>>();
 const mockBdRemember = vi.fn<() => Promise<string>>();
+const mockBdFlag = vi.fn<() => Promise<string>>();
 
 vi.mock('./beads.js', () => ({
   bd: vi.fn(() => ({
@@ -15,6 +16,7 @@ vi.mock('./beads.js', () => ({
     show: mockBdShow,
     addNote: mockBdAddNote,
     remember: mockBdRemember,
+    flag: mockBdFlag,
   })),
 }));
 
@@ -23,6 +25,15 @@ vi.mock('../agents/silpi.js', () => ({ runSilpi: mockRunSilpi }));
 
 const mockRunViharapala = vi.fn<() => Promise<ViharapalaOutput>>();
 vi.mock('../agents/viharapala.js', () => ({ runViharapala: mockRunViharapala }));
+
+const mockCreateTaskBranch = vi.fn<() => Promise<string>>();
+vi.mock('./branch.js', () => ({
+  createTaskBranch: mockCreateTaskBranch,
+  branchName: vi.fn((task: { id: string; slug: string }) => `bead-${task.id}/${task.slug}`),
+}));
+
+const mockSquashMergeAndClose = vi.fn<() => Promise<void>>();
+vi.mock('./merge.js', () => ({ squashMergeAndClose: mockSquashMergeAndClose }));
 
 // fs mock to avoid real disk reads
 vi.mock('fs/promises', () => ({
@@ -106,8 +117,11 @@ beforeEach(() => {
   mockBdShow.mockResolvedValue('task details output');
   mockBdAddNote.mockResolvedValue('');
   mockBdRemember.mockResolvedValue('');
+  mockBdFlag.mockResolvedValue('');
   mockRunSilpi.mockResolvedValue(SILPI_PASS);
   mockRunViharapala.mockResolvedValue(VIHARAPALA_APPROVE);
+  mockCreateTaskBranch.mockResolvedValue('bead-proj-42/fix-auth');
+  mockSquashMergeAndClose.mockResolvedValue(undefined);
 });
 
 // ── buildAgentContext ─────────────────────────────────────────────────────────

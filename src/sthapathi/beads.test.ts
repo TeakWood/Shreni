@@ -146,11 +146,11 @@ describe('syncBeads', () => {
     await syncBeads(KSHETRA);
 
     const calls = execFileMock.mock.calls.map((c: unknown[]) => (c as [string, string[]])[1]);
-    expect(calls[0]).toEqual(['pull', '--rebase', 'origin', 'main']);
-    expect(calls[1]).toEqual(['add', '-A']);
-    expect(calls[2][0]).toBe('commit');
-    expect(calls[2][1]).toBe('-m');
-    expect(calls[2][2]).toMatch(/^shreni: sync \d{4}-/); // ISO timestamp
+    expect(calls[0]).toEqual(['add', '-A']);
+    expect(calls[1][0]).toBe('commit');
+    expect(calls[1][1]).toBe('-m');
+    expect(calls[1][2]).toMatch(/^shreni: sync \d{4}-/); // ISO timestamp
+    expect(calls[2]).toEqual(['pull', '--rebase', 'origin', 'main']);
     expect(calls[3]).toEqual(['push', 'origin', 'main']);
   });
 

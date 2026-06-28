@@ -9,6 +9,8 @@ import { runViharapala } from '../agents/viharapala.js';
 import { withRetry } from './retry.js';
 import { ParseError, AgentError } from './errors.js';
 import { emit } from './activity-log.js';
+import { createTaskBranch, branchName } from './branch.js';
+import { squashMergeAndClose } from './merge.js';
 
 async function readFileOptional(filePath: string): Promise<string> {
   try {
@@ -76,12 +78,13 @@ export async function runSilpiSafe(
   task: Task,
   context: AgentContext,
   round: number,
+  branch: string,
   feedback?: ViharapalaOutput | null,
 ): Promise<SilpiOutput> {
   const bdClient = bd(kshetra);
   await bdClient.addNote(task.id, `Round ${round}: dispatching Silpi`);
   try {
-    const output = await withRetry(`Silpi r${round}`, () => runSilpi(context, round, feedback));
+    const output = await withRetry(`Silpi r${round}`, () => runSilpi(context, round, feedback, branch));
     await bdClient.addNote(task.id, `Round ${round}: Silpi submitted`);
     return output;
   } catch (err) {
@@ -100,12 +103,13 @@ export async function runViharapalaSafe(
   context: AgentContext,
   silpiOut: SilpiOutput,
   round: number,
+  branch: string,
 ): Promise<ViharapalaOutput> {
   const bdClient = bd(kshetra);
   await bdClient.addNote(task.id, `Round ${round}: dispatching Viharapala`);
   try {
     const output = await withRetry(`Viharapala r${round}`, () =>
-      runViharapala(context, silpiOut, round, context.taskDetails),
+      runViharapala(context, silpiOut, round, context.taskDetails, branch),
     );
     await bdClient.addNote(task.id, `Round ${round}: ${output.verdict}`);
     return output;
@@ -122,20 +126,25 @@ export async function runViharapalaSafe(
 export async function runSilpiViharapalaLoop(
   kshetra: KshetraConfig,
   task: Task,
-  _branch: string,
+  _branchParam: string,
 ): Promise<{ approved: boolean; note: string }> {
   const bdClient = bd(kshetra);
   let round = 0;
   let feedback: ViharapalaOutput | null = null;
+  let lastSilpiOut: SilpiOutput | null = null;
 
   emit({ type: 'task_claimed', kshetra: kshetra.id, beadId: task.id, title: task.title });
+
+  // Create the bead branch; workers operate on this branch for the whole lifecycle.
+  const branch = await createTaskBranch(task, kshetra);
 
   while (round < kshetra.agents.maxRoundsPerBead) {
     round++;
 
     emit({ type: 'round_start', kshetra: kshetra.id, beadId: task.id, round, agent: 'silpi' });
     const context = await buildAgentContext(kshetra, task);
-    const silpiOut = await runSilpi(context, round, feedback);
+    const silpiOut = await runSilpi(context, round, feedback, branch);
+    lastSilpiOut = silpiOut;
 
     emit({
       type: 'silpi_done',
@@ -169,7 +178,7 @@ export async function runSilpiViharapalaLoop(
     await bdClient.addNote(task.id, `Round ${round}: submitted for review`);
 
     emit({ type: 'round_start', kshetra: kshetra.id, beadId: task.id, round, agent: 'viharapala' });
-    feedback = await runViharapala(context, silpiOut, round, context.taskDetails);
+    feedback = await runViharapala(context, silpiOut, round, context.taskDetails, branch);
 
     emit({
       type: 'viharapala_done',
@@ -189,10 +198,13 @@ export async function runSilpiViharapalaLoop(
 
     if (feedback.verdict === 'APPROVE') {
       emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
+      // Squash-merge the bead branch into main, close the task, fire Parikshaka
+      await squashMergeAndClose(task, kshetra, silpiOut);
       return { approved: true, note: `Approved round ${round}` };
     }
   }
 
   emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: false, rounds: round });
+  await bdClient.flag(task.id, `Blocked after ${round} rounds — Viharapala kept rejecting.`);
   return { approved: false, note: `Blocked after ${round} rounds` };
 }

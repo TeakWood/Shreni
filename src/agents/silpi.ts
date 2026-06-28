@@ -1,16 +1,53 @@
-import Anthropic from '@anthropic-ai/sdk';
 import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
-import { bd } from '../sthapathi/beads.js';
 import { ParseError } from '../sthapathi/errors.js';
+import { runClaudeAgent } from './runner.js';
+
+const SILPI_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    filesChanged: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          diff: { type: 'string' },
+        },
+        required: ['path', 'diff'],
+      },
+    },
+    testFiles: { type: 'array', items: { type: 'string' } },
+    summary: { type: 'string' },
+    confidenceScore: { type: 'number' },
+    questionsForReviewer: { type: 'array', items: { type: 'string' } },
+    lintPassed: { type: 'boolean' },
+    testsPassed: { type: 'boolean' },
+    insights: { type: 'array', items: { type: 'string' } },
+  },
+  required: [
+    'filesChanged',
+    'testFiles',
+    'summary',
+    'confidenceScore',
+    'questionsForReviewer',
+    'lintPassed',
+    'testsPassed',
+    'insights',
+  ],
+};
 
 function buildSilpiSystemPrompt(
   context: AgentContext,
   round: number,
+  branch: string,
   feedback?: ViharapalaOutput | null,
 ): string {
   const sections: string[] = [];
 
-  sections.push(`You are Silpi, a coding agent for the ${context.kshetra.name} project.`);
+  sections.push(
+    `You are Silpi, a coding agent for the ${context.kshetra.name} project.\n` +
+      `You have real tools available: Bash, Read, Write, Edit. Use them to implement the task.`,
+  );
 
   const skills = [context.universalSkills, context.projectSkills, context.scopedSkills]
     .filter(Boolean)
@@ -19,42 +56,37 @@ function buildSilpiSystemPrompt(
 
   if (context.projectMemory) sections.push(`== PROJECT MEMORY ==\n${context.projectMemory}`);
 
-  sections.push(`== TASK ==\nRound: ${round}\n${context.taskDetails}`);
+  sections.push(`== TASK ==\nRound: ${round}\nBranch: ${branch}\n${context.taskDetails}`);
 
   if (feedback?.mustFix?.length) {
     const list = feedback.mustFix.map(f => `- ${f}`).join('\n');
-    sections.push(`== PRIOR FEEDBACK (Round ${round}) ==\nThe previous round was rejected. You MUST fix:\n${list}`);
+    sections.push(
+      `== PRIOR FEEDBACK (Round ${round}) ==\n` +
+        `The previous round was rejected. You MUST fix ALL of the following:\n${list}`,
+    );
   }
 
   if (context.conventions) sections.push(`== CONVENTIONS ==\n${context.conventions}`);
-
   if (context.architecture) sections.push(`== ARCHITECTURE ==\n${context.architecture}`);
-
   if (context.ragChunks) sections.push(`== RELEVANT CODE ==\n${context.ragChunks}`);
 
   sections.push(`== ROLE BOUNDARY ==
-Your job is to write code and return a SilpiOutput JSON object.
-You do NOT call bd commands or manage task state — Sthapathi handles all of that.
-Any project insights you discover should go in the \`insights\` field; Sthapathi will persist them.
-Do NOT call bd, git, or any shell commands outside of running lint and tests on the code you write.
-You are a pure coding agent — never call the issue tracker. Sthapathi handles all coordination.
+You are a pure coding agent. Sthapathi handles all task-state and git operations EXCEPT your implementation commits.
+Do NOT call \`bd\` commands. Do NOT push to remote.
 
 == INSTRUCTIONS ==
-1. Implement the task to satisfy all acceptance criteria.
-2. Write unit tests. Run lint and tests.
-3. If tests fail, fix them before submitting.
-4. Respond ONLY with a valid JSON SilpiOutput object — no markdown fences, no explanation:
-{
-  "filesChanged": [{"path": "string", "diff": "string"}],
-  "testFiles": ["string"],
-  "summary": "string",
-  "confidenceScore": 0,
-  "questionsForReviewer": ["string"],
-  "lintPassed": true,
-  "testsPassed": true,
-  "insights": ["string"]
-}
-confidenceScore is 0-100.`);
+1. Use Read to understand the existing codebase structure and patterns.
+2. Implement the task fully using Write and Edit tools.
+3. Write unit tests covering the new behaviour.
+4. Run the project's quality gates (check CLAUDE.md for commands) using Bash — ALL must pass.
+5. If tests or lint fail, fix them before proceeding.
+6. Commit all changes: \`git add -A && git commit -m "${context.task.id}: <brief description>"\`
+7. Get the diff of your commit: \`git show --stat HEAD && git diff HEAD~1 HEAD\`
+8. After completing all work, your FINAL response MUST be ONLY a valid JSON SilpiOutput object.
+   — No markdown fences, no explanation, no other text.
+   — Use the git diff output to populate \`filesChanged[].diff\`.
+   — Set \`lintPassed\` and \`testsPassed\` based on what actually happened when you ran them.
+   — \`confidenceScore\` is 0-100.`);
 
   return sections.join('\n\n');
 }
@@ -63,38 +95,25 @@ export async function runSilpi(
   context: AgentContext,
   round: number,
   feedback?: ViharapalaOutput | null,
+  branch = `bead-${context.task.id}/${context.task.slug}`,
 ): Promise<SilpiOutput> {
-  const client = new Anthropic();
-
-  const response = await client.messages.create({
+  const result = await runClaudeAgent({
+    systemPrompt: buildSilpiSystemPrompt(context, round, branch, feedback),
+    userPrompt: `Implement task ${context.task.id}: ${context.task.title}. You are on branch ${branch}. Use your tools to implement, test, lint, and commit.`,
+    cwd: context.kshetra.repo.path,
+    agentName: 'silpi',
+    kshetraId: context.kshetra.id,
+    beadId: context.task.id,
     model: context.kshetra.agents.model,
-    max_tokens: 16000,
-    system: buildSilpiSystemPrompt(context, round, feedback),
-    messages: [
-      {
-        role: 'user',
-        content: 'Implement the task as described in the system prompt. Return ONLY a JSON SilpiOutput object.',
-      },
-    ],
+    jsonSchema: SILPI_OUTPUT_SCHEMA,
   });
 
-  const textBlock = response.content.find(b => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('Silpi: no text block in Claude response');
+  if (!result.structuredOutput) {
+    throw new ParseError(
+      `Silpi: no structured output in result — resultText: ${(result.resultText ?? '').slice(0, 200)}`,
+      null,
+    );
   }
 
-  let output: SilpiOutput;
-  try {
-    output = JSON.parse(textBlock.text) as SilpiOutput;
-  } catch (err) {
-    throw new ParseError(`Silpi: invalid JSON in response — ${(err as Error).message}`, err);
-  }
-
-  const note =
-    `Round ${round}: confidence=${output.confidenceScore} ` +
-    `lint=${output.lintPassed} tests=${output.testsPassed} — ` +
-    output.summary.slice(0, 120);
-  await bd(context.kshetra).addNote(context.task.id, note);
-
-  return output;
+  return result.structuredOutput as SilpiOutput;
 }

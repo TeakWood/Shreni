@@ -2,25 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task, ParikshakaOutput } from '../sthapathi/types.js';
 
-// ── module mocks ──────────────────────────────────────────────────────────────
+// ── module mocks (hoisted) ───────────────────────────────────────────────────
 
-const mockCreate = vi.fn<(params: object) => Promise<object>>();
-vi.mock('@anthropic-ai/sdk', () => {
-  class MockAnthropic {
-    messages = { create: mockCreate };
-  }
-  return { default: MockAnthropic };
-});
-
-vi.mock('../sthapathi/errors.js', () => ({
-  ParseError: class ParseError extends Error {
-    constructor(message: string, public cause?: unknown) { super(message); }
-  },
-}));
+const mockRunClaudeAgent = vi.fn<() => Promise<object>>();
+vi.mock('./runner.js', () => ({ runClaudeAgent: mockRunClaudeAgent }));
 
 // ── import after mocks ────────────────────────────────────────────────────────
 
-const { runParikshaka, buildParikshakaSystemPrompt } = await import('./parikshaka.js');
+const { runParikshaka } = await import('./parikshaka.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -48,7 +37,7 @@ const VALID_OUTPUT: ParikshakaOutput = {
   coverageGaps: [{ feature: 'refresh', description: 'Test token refresh flow', priority: 2 }],
 };
 
-function makeCtx(overrides = {}) {
+function makeCtx(overrides: Record<string, unknown> = {}) {
   return {
     kshetra: KSHETRA,
     task: TASK,
@@ -58,87 +47,92 @@ function makeCtx(overrides = {}) {
   };
 }
 
-function apiResponse(output: unknown) {
-  mockCreate.mockResolvedValue({
-    content: [{ type: 'text', text: JSON.stringify(output) }],
-  });
+function makeRunnerResult(output: ParikshakaOutput) {
+  return { structuredOutput: output, resultText: null, toolCallCount: 4 };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockRunClaudeAgent.mockResolvedValue(makeRunnerResult(VALID_OUTPUT));
+});
 
-// ── buildParikshakaSystemPrompt ───────────────────────────────────────────────
+// ── buildParikshakaSystemPrompt (via runner capture) ──────────────────────────
 
 describe('buildParikshakaSystemPrompt', () => {
-  it('includes the kshetra name', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx());
-    expect(prompt).toContain('Sishya');
+  it('includes the kshetra name', async () => {
+    await runParikshaka(makeCtx());
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).toContain('Sishya');
   });
 
-  it('includes existing test files', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx());
-    expect(prompt).toContain('src/login.test.ts');
+  it('includes existing test files', async () => {
+    await runParikshaka(makeCtx());
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).toContain('src/login.test.ts');
   });
 
-  it('shows (none) when no test files exist', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx({ existingTestFiles: [] }));
-    expect(prompt).toContain('(none)');
+  it('shows (none) when no test files exist', async () => {
+    await runParikshaka(makeCtx({ existingTestFiles: [] }));
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).toContain('(none)');
   });
 
-  it('includes the merged diff', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx());
-    expect(prompt).toContain('--- src/auth.ts');
+  it('includes the merged diff', async () => {
+    await runParikshaka(makeCtx());
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).toContain('--- src/auth.ts');
   });
 
-  it('includes the task id and title', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx());
-    expect(prompt).toContain('proj-42');
-    expect(prompt).toContain('Fix auth');
+  it('includes the task id and title', async () => {
+    await runParikshaka(makeCtx());
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).toContain('proj-42');
+    expect(opts.systemPrompt).toContain('Fix auth');
   });
 
-  it('includes personas when provided', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx({ personas: 'admin: can do everything' }));
-    expect(prompt).toContain('admin: can do everything');
+  it('includes personas when provided', async () => {
+    await runParikshaka(makeCtx({ personas: 'admin: can do everything' }));
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).toContain('admin: can do everything');
   });
 
-  it('omits PERSONAS section when not provided', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx({ personas: undefined }));
-    expect(prompt).not.toContain('== PERSONAS ==');
+  it('omits PERSONAS section when not provided', async () => {
+    await runParikshaka(makeCtx({ personas: undefined }));
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).not.toContain('== PERSONAS ==');
   });
 
-  it('contains the role boundary prohibiting bd calls', () => {
-    const prompt = buildParikshakaSystemPrompt(makeCtx());
-    expect(prompt).toContain('Do NOT call bd');
+  it('contains the role boundary prohibiting bd calls', async () => {
+    await runParikshaka(makeCtx());
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+    expect(opts.systemPrompt).toContain('Do NOT call bd');
   });
 });
 
 // ── runParikshaka ─────────────────────────────────────────────────────────────
 
 describe('runParikshaka', () => {
-  it('calls Claude with the kshetra model', async () => {
-    apiResponse(VALID_OUTPUT);
+  it('calls runner with the kshetra model', async () => {
     await runParikshaka(makeCtx());
-    expect(mockCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ model: 'claude-sonnet-4-6' }),
-    );
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { model: string };
+    expect(opts.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('sets agentName to parikshaka', async () => {
+    await runParikshaka(makeCtx());
+    const opts = mockRunClaudeAgent.mock.calls[0][0] as { agentName: string };
+    expect(opts.agentName).toBe('parikshaka');
   });
 
   it('returns parsed ParikshakaOutput on success', async () => {
-    apiResponse(VALID_OUTPUT);
     const result = await runParikshaka(makeCtx());
     expect(result.testFilesAdded).toEqual(['src/auth.e2e.ts']);
     expect(result.coverageGaps).toHaveLength(1);
     expect(result.coverageGaps[0].priority).toBe(2);
   });
 
-  it('throws ParseError when Claude returns invalid JSON', async () => {
-    mockCreate.mockResolvedValue({
-      content: [{ type: 'text', text: 'not json' }],
-    });
-    await expect(runParikshaka(makeCtx())).rejects.toThrow('Parikshaka: invalid JSON');
-  });
-
-  it('throws when Claude response has no text block', async () => {
-    mockCreate.mockResolvedValue({ content: [] });
-    await expect(runParikshaka(makeCtx())).rejects.toThrow('no text block');
+  it('throws ParseError when runner returns no structured output', async () => {
+    mockRunClaudeAgent.mockResolvedValue({ structuredOutput: null, resultText: 'some text', toolCallCount: 0 });
+    await expect(runParikshaka(makeCtx())).rejects.toThrow('no structured output');
   });
 });
