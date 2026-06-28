@@ -130,12 +130,15 @@ describe('claudeAdapter parser', () => {
 // ── gemini adapter ─────────────────────────────────────────────────────────────
 
 describe('geminiAdapter', () => {
-  it('folds the system prompt into the prompt and runs json yolo mode', () => {
+  it('folds the system prompt into the -p prompt and runs json yolo mode', () => {
     const spec = geminiAdapter.buildSpawn({ ...BASE_OPTS, provider: 'gemini' });
     expect(spec.bin).toBe('gemini');
     expect(spec.args).toContain('-y');
     expect(spec.args).toContain('json');
-    const prompt = spec.args[spec.args.length - 1];
+    // headless mode requires -p <prompt> (a bare positional goes interactive)
+    const pIdx = spec.args.indexOf('-p');
+    expect(pIdx).toBeGreaterThanOrEqual(0);
+    const prompt = spec.args[pIdx + 1];
     expect(prompt).toContain('SYSTEM');
     expect(prompt).toContain('USER');
   });
@@ -143,9 +146,16 @@ describe('geminiAdapter', () => {
   it('recovers structured output from the json wrapper response field', () => {
     const { emit } = recordingEmit();
     const parser = geminiAdapter.createParser({ ...BASE_OPTS, provider: 'gemini' }, emit);
-    parser.onLine(JSON.stringify({ response: 'here is the result {"ok":true}', stats: {} }));
+    parser.onLine(JSON.stringify({ session_id: 'x', response: 'here is the result {"ok":true}', stats: {} }));
     const res = parser.finalize(0, '');
     expect(res.structuredOutput).toEqual({ ok: true });
+  });
+
+  it('surfaces a gemini wrapper error so the dispatcher can retry', () => {
+    const { emit } = recordingEmit();
+    const parser = geminiAdapter.createParser({ ...BASE_OPTS, provider: 'gemini' }, emit);
+    parser.onLine(JSON.stringify({ session_id: 'x', error: { type: 'Error', message: 'rate limit exceeded', code: 429 } }));
+    expect(() => parser.finalize(1, '')).toThrow('rate limit exceeded');
   });
 
   it('throws on non-zero exit with no parseable JSON', () => {

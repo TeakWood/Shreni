@@ -1,17 +1,20 @@
 import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser } from './types.js';
 import { extractLastJsonObject } from './types.js';
 
-// Google — the `gemini` CLI in non-interactive mode.
-//   gemini -m <model> -y -o json "<prompt>"
-// Notes / best-effort caveats (gemini CLI not installed in this env; flags from
-// the published CLI docs, verify with `gemini --help` before relying on it):
-//   * No `--system-prompt` flag, so the system prompt is folded into the prompt.
-//   * `-y` (--yolo) auto-approves tool actions (Bash/file edits).
-//   * `-o json` buffers a single JSON wrapper { response, stats } at the end
-//     rather than streaming tool calls, so per-tool activity is not surfaced;
-//     we emit a single completion line instead.
-//   * No structured-output flag — the model is told (via the shared agent
-//     system prompts) to emit JSON only, which we recover from `response`.
+// Google — the `gemini` CLI in non-interactive (headless) mode.
+//   gemini -m <model> -y -o json -p "<prompt>"
+// Verified against `gemini --help` (CLI installed locally):
+//   * `-p/--prompt <text>` is REQUIRED for headless mode; a bare positional
+//     query launches interactive mode instead.
+//   * `-y` (--yolo) auto-approves all tool actions (Bash/file edits).
+//   * No `--system-prompt` flag, so the system prompt is folded into `-p`.
+//   * `-o json` returns a single wrapper object at the end:
+//       success -> { session_id, response: "<text>", stats: {...} }
+//       error   -> { session_id, error: { type, message, code } }
+//     We surface `error.message` (so the dispatcher can retry transients) and
+//     recover the structured output JSON from `response`.
+//   * `-o stream-json` also exists and would give richer per-tool streaming;
+//     left as a future enhancement (its event shape isn't pinned down here).
 export const geminiAdapter: ProviderAdapter = {
   name: 'gemini',
 
@@ -19,11 +22,11 @@ export const geminiAdapter: ProviderAdapter = {
     const prompt = `${opts.systemPrompt}\n\n=== TASK ===\n${opts.userPrompt}`;
     return {
       bin: 'gemini',
-      args: ['-m', opts.model, '-y', '-o', 'json', prompt],
+      args: ['-m', opts.model, '-y', '-o', 'json', '-p', prompt],
     };
   },
 
-  createParser(opts: AgentRunnerOpts, emit: AdapterEmit): StreamParser {
+  createParser(opts: AgentRunnerOpts, _emit: AdapterEmit): StreamParser {
     let buf = '';
 
     return {
@@ -32,9 +35,19 @@ export const geminiAdapter: ProviderAdapter = {
       },
 
       finalize(exitCode: number | null, stderrTail: string) {
-        const wrapper = extractLastJsonObject(buf) as { response?: unknown } | null;
-        // Gemini's json mode wraps the answer under `response`; if the wrapper is
-        // absent, treat the whole buffer as the response text.
+        const wrapper = extractLastJsonObject(buf) as
+          | { response?: unknown; error?: { message?: unknown } }
+          | null;
+
+        // Surface gemini's own error so the dispatcher's transient-retry logic
+        // can inspect the message (rate limit / overloaded / etc.).
+        if (wrapper && wrapper.error) {
+          const message = typeof wrapper.error.message === 'string' ? wrapper.error.message : 'unknown error';
+          throw new Error(`${opts.agentName}: gemini error — ${message}`);
+        }
+
+        // json mode wraps the answer under `response`; if absent, fall back to
+        // the raw buffer.
         const responseText =
           wrapper && typeof wrapper.response === 'string' ? wrapper.response : buf;
 
@@ -47,7 +60,7 @@ export const geminiAdapter: ProviderAdapter = {
           );
         }
 
-        emit.text('[gemini run complete]');
+        _emit.text('[gemini run complete]');
         return {
           structuredOutput,
           resultText: typeof responseText === 'string' ? responseText : null,
