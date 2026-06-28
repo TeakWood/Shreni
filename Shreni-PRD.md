@@ -200,25 +200,43 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 
 ### 5.5 Vichara — Conversational Interface
 
+Vichara runs as a **`claude` CLI agentic loop**, not a custom function-tool
+server. Each chat turn spawns the `claude` CLI in print mode (`stream-json`)
+scoped to the active Kshetra repo; the model drives its own loop with native
+tools (`Read`/`Grep`/`Glob`) plus an **allowlist** of read-only `bd` and `git`
+subcommands. The read/write boundary is enforced by the CLI `--allowedTools`
+allowlist — i.e. by the harness — rather than by prompt instructions alone, so
+anything not allowlisted (file edits, `git commit`/`push`, `bd close`) is denied
+outright. Auth is the CLI's own subscription/OAuth session; **no
+`ANTHROPIC_API_KEY` is required**.
+
 #### 5.5.1 Access Surfaces
 
 - **Mobile PWA:** installable to phone home screen, accessible via Tailscale. Optimised for one-hand use.
 - **Browser:** same PWA accessible from any browser on the Tailscale network.
 - **CLI:** `shreni` CLI for terminal-first interactions.
 
-#### 5.5.2 Ask Mode
+#### 5.5.2 Ask Mode (read-only — Phase 10, shipped)
 
-- Answer natural language questions about the codebase using RAG over project files.
+The default and only mode until Phase 11. Vichara answers using its read-only
+toolset (native `Read`/`Grep`/`Glob` over the repo, plus read-only `bd`/`git`):
+
+- Answer natural language questions about the codebase by reading and searching project files (RAG augments this where indexed).
 - Answer questions about agent state: what is Silpi working on, what's blocked, recent completions.
 - Answer questions about task history: what changed in `bead-042`, why was `bead-031` blocked.
 - Cross-Kshetra queries: what needs attention across all projects.
 
-#### 5.5.3 Act Mode
+#### 5.5.3 Act Mode (write — Phase 11)
 
-- File bug beads: title, severity (P0/P1/P2), context, optional screenshot — confirmed before write.
+Write capability is added by **extending the allowlist** with specific filing
+subcommands (`bd create`, add-note, flag) — never custom function tools, and
+never `bd update --claim` / `bd close`, which stay Sthapathi-only. The agent
+proposes the change in chat and **confirms before executing** the `bd` write:
+
+- File bug beads: title, severity (P0/P1/P2), context, optional screenshot — agent proposes, user confirms, then `bd create -t bug`.
 - Create feature tasks: Vichara proposes a decomposed bead list, user confirms before filing.
-- Update task status, add comments, flag blockers.
-- P0 bugs: acted on immediately, confirmation shown after.
+- Add comments and flag blockers on existing beads (no claim/close).
+- P0 bugs: filed immediately, confirmation shown after.
 
 #### 5.5.4 Ambient Status
 

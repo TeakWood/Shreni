@@ -48,7 +48,7 @@ This is the most important design constraint in the system:
 | Caller | Permitted `bd` operations |
 |---|---|
 | **Sthapathi** | All — `ready`, `claim`, `show`, `prime`, `note`, `remember`, `close`, `create` (E2E gaps), `flag` |
-| **Vichara** | `create`, `dep add`, `show`, `ready` (read + file only) |
+| **Vichara** | Phase 10: read-only (`list`, `ready`, `show`, `blocked`, `stats`, `search`, …). Phase 11 adds `create` + note/flag via allowlist (never `claim`/`close`). Runs `bd` directly through the CLI agentic loop's allowlist — not the `beads.ts` wrapper. |
 | **Interactive Claude Code** | `create`, `dep add`, `show`, `ready`, `prime` (read + file only) |
 | **Silpi** | None — receives `bd` output as injected context, never calls `bd` |
 | **Viharapala** | None — receives `bd` output as injected context, never calls `bd` |
@@ -1263,54 +1263,79 @@ git merge                          # ❌ Sthapathi owns merges
 |---|---|
 | HTTP / WebSocket server | Fastify + `@fastify/websocket` |
 | Streaming to client | WebSocket — SSE-style token streaming |
-| LLM calls | Anthropic SDK (`claude-sonnet-4`) |
+| LLM calls | `claude` CLI agentic loop — print mode + `stream-json`, spawned per turn |
+| LLM auth | CLI subscription/OAuth session — **no `ANTHROPIC_API_KEY`** |
 | RAG index | LanceDB (local, no server) |
 | Embedding model | `voyage-code-3` via Anthropic API |
 | PWA frontend | React + Tailwind, Vite build |
-| Auth | Shared secret token (Tailscale-only, not public) |
+| WS auth | Shared secret token (Tailscale-only, not public) |
 | Mobile connectivity | Tailscale — machine accessible as `shreni.local` |
 
 ### 8.2 Tool Registry
 
-Write tools route through Sthapathi's internal API — Vichara never calls `bd update --claim` or `bd close`.
+Vichara has **no custom function tools**. The `claude` CLI drives its own
+agentic loop with native tools and an `--allowedTools` allowlist; the read/write
+boundary is enforced by that allowlist (the harness), not by which tools we
+define. Writes never route through a Sthapathi internal API — the agent shells
+out to `bd` directly — but `bd update --claim` and `bd close` are never
+allowlisted, so state transitions stay Sthapathi-only.
 
-| Tool | Type | Description |
-|---|---|---|
-| `get_bead` | Read | Fetch full task details by `bd` ID |
-| `list_beads` | Read | List beads with status/severity/tag filters, any Kshetra |
-| `get_agent_status` | Read | Current Sthapathi state: active task, round, agent |
-| `search_codebase` | Read | Semantic RAG search over Kshetra files |
-| `read_file` | Read | Read a specific file by path |
-| `get_diff` | Read | Get git diff for a bead branch |
-| `create_bead` | Write | `bd create` — new task bead (requires confirmation) |
-| `create_bug` | Write | `bd create -t bug` — P0 bypasses confirmation |
-| `add_comment` | Write | `bd update --note` — add note to existing bead |
-| `flag_bead` | Write | `bd update --block` — mark bead blocked with reason |
+The allowlist lives in `vichara/agent.ts` as `VICHARA_ALLOWED_TOOLS`.
+
+**Phase 10 — read-only (shipped):**
+
+| Tool / command | Purpose |
+|---|---|
+| `Read`, `Grep`, `Glob` | Read and search files in the active Kshetra repo |
+| `Bash(bd list/ready/show/blocked/stats/search/memories/stale/orphans:*)` | Inspect issues and backlog (read-only subcommands only) |
+| `Bash(git log/diff/status/show/branch:*)` | Inspect history and branch diffs |
+| `Bash(ls/cat:*)` | Filesystem inspection |
+
+> Note: the allowlist scopes individual `bd` subcommands, **not** `Bash(bd:*)` —
+> a coarse `bd` allow would let `bd create`/`update`/`close` through and break
+> the read-only boundary.
+
+**Phase 11 — write (planned):** extend `VICHARA_ALLOWED_TOOLS` with filing
+subcommands only, gated by in-chat confirmation:
+
+| Command added | Purpose |
+|---|---|
+| `bd create` (incl. `-t bug`) | File new task / bug bead — agent proposes, user confirms (P0 bug files immediately, confirms after) |
+| add-note subcommand | Add a comment to an existing bead |
+| flag/block subcommand | Flag a bead as blocked with reason |
+
+> `--claim` and `--close` are deliberately excluded from any allowlist pattern.
 
 ### 8.3 Context Injection Per Request
 
+`buildVicharaSystemPrompt` (in `vichara/prompt.ts`) builds the `--system-prompt`
+passed to the CLI each turn. It injects the registered Kshetras with live
+paused/active state, the active project + stack, and the role boundary. The
+boundary text is belt-and-suspenders — the real enforcement is the
+`--allowedTools` allowlist — and instructs the agent to fetch fresh state via
+its read-only tools rather than guessing.
+
 ```typescript
-function buildVicharaSystemPrompt(kshetra: Kshetra | null): string {
-  const agentState = sthapathi.getState();
-  return `
-You are Vichara, the project assistant for Shreni.
-
-Current time: ${new Date().toISOString()}
-Active Kshetras: ${activeKshetras.map(k => k.name).join(', ')}
-${kshetra ? `Active project: ${kshetra.name}` : 'Cross-project mode'}
-
-Agent state:
-${agentState.map(s => `  ${s.kshetra}: ${s.status} — ${s.activeBead ?? 'idle'}`).join('\n')}
-
-Recent completions (last 5): ${recentCompletions(kshetra)}
-
-Role boundary: You file tasks and answer questions. You never claim
-or close tasks — those are Sthapathi's operations. For P0 bugs: act
-immediately, confirm after. For all other writes: confirm before acting.
-When asked about code: use search_codebase first.
-  `;
+function buildVicharaSystemPrompt(ctx: VicharaContext): string {
+  // ctx = { activeKshetra, allKshetras, currentTime }
+  // sections:
+  //   - "You are Vichara, the read-only observer interface…" + current time
+  //   - == REGISTERED KSHETRAS ==  (each with active/paused state + repo path)
+  //   - == ACTIVE PROJECT ==       (id, name, stack, path) when a Kshetra is active
+  //   - == ROLE BOUNDARY ==        read-only; never create/update/close beads,
+  //                                 never trigger runs, never modify files/git.
+  //                                 Lists the read-only bd/git + Read/Grep/Glob tools.
+  return sections.join('\n\n');
 }
 ```
+
+The turn itself is executed by `runVicharaTurn(opts, events)` in
+`vichara/agent.ts`, which spawns the CLI (`buildVicharaSpawnArgs`) and maps
+`stream-json` lines to `text` / `toolUse` / `toolResult` / `error` / `done`
+events forwarded over the WebSocket. Spawn flags of note:
+`-p --output-format stream-json --verbose`, `--no-session-persistence`,
+`--setting-sources ''` (ignore user/project settings), `--permission-mode
+default`, and `--allowedTools <VICHARA_ALLOWED_TOOLS>`.
 
 ### 8.4 PWA — Mobile UI Spec
 
@@ -1532,5 +1557,5 @@ bd dolt push / pull              # sync beads database
 | **Phase 7: E2E agent** | Async post-merge dispatch, Sthapathi commits test files, Sthapathi files coverage gap beads. |
 | **Phase 8: Multi-Kshetra** | Kshetra registry, `BEADS_DIR` scoping per Kshetra, cross-project status via `shreni status --all`. |
 | **Phase 9: RAG** | LanceDB indexing, incremental rebuild on merge, `shreni index rebuild`. Codebase search available to agents. |
-| **Phase 10: Vichara read** | Fastify server, WebSocket, read-only tools (`list_beads`, `get_agent_status`, `search_codebase`). PWA shell. `shreni vichara start` works. |
-| **Phase 11: Vichara write** | `create_bug`, `create_bead` with confirmation flow. Bug filing from phone works end to end. |
+| **Phase 10: Vichara read** | Fastify server, WebSocket, `claude` CLI agentic loop with read-only allowlist (`Read`/`Grep`/`Glob` + read-only `bd`/`git`). PWA shell. `shreni vichara start` works. |
+| **Phase 11: Vichara write** | Extend the allowlist with `bd create` + note/flag, gated by in-chat confirmation flow. Bug filing from phone works end to end. |
