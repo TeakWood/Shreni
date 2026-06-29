@@ -92,6 +92,37 @@ describe('git() helper', () => {
     expect(await g.branchExists('no-such-branch')).toBe(false);
   });
 
+  it('currentBranch() returns the checked-out branch name', async () => {
+    const g = git(repoDir);
+    expect(await g.currentBranch()).toBe('main');
+    await execFileAsync('git', ['checkout', '-b', 'feature'], { cwd: repoDir });
+    expect(await g.currentBranch()).toBe('feature');
+  });
+
+  it('headSha() resolves a ref to its sha and matches rev-parse', async () => {
+    const g = git(repoDir);
+    expect(await g.headSha('main')).toBe(await gitCmd('rev-parse', 'main'));
+  });
+
+  it('forceBranch() moves a branch ref without checking it out', async () => {
+    const g = git(repoDir);
+    const base = await gitCmd('rev-parse', 'main');
+    await execFileAsync('git', ['checkout', '-b', 'work'], { cwd: repoDir });
+    writeFileSync(join(repoDir, 'c.txt'), 'c');
+    await g.add('-A');
+    await g.commit('on work');
+    const workTip = await gitCmd('rev-parse', 'work');
+
+    // point main at work's tip while staying on 'work'
+    await g.forceBranch('main', workTip);
+    expect(await g.currentBranch()).toBe('work');
+    expect(await gitCmd('rev-parse', 'main')).toBe(workTip);
+
+    // and rewind it back
+    await g.forceBranch('main', base);
+    expect(await gitCmd('rev-parse', 'main')).toBe(base);
+  });
+
   it('isAncestor() returns true when first is ancestor of second', async () => {
     const g = git(repoDir);
     const firstCommit = await gitCmd('rev-parse', 'HEAD');

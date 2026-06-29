@@ -148,7 +148,8 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 - P0 priority tasks preempt the current queue position and are dispatched immediately.
 - Exactly one task is active per Kshetra at any time (`maxConcurrentBeads: 1`).
 - On task pickup: creates a git branch `bead-{id}/{slug}` from `main` in the Kshetra repo.
-- On task completion: squash-merges branch to `main`, deletes branch, calls `bd close`.
+- **Branch-isolation guardrail:** after each agent run, Sthapathi verifies HEAD is still on the bead branch and `main` has not moved. An agent that checks out `main` or commits outside the squash-merge flow cannot land work on `main` — the cycle aborts, stray commits are preserved on a `shreni-salvage/<id>` branch, `main` is restored to origin, and the bead is flagged for a human.
+- On task completion: squash-merges branch to `main`, deletes branch, calls `bd close`. This squash-merge is the **only** sanctioned path for changes to reach `main`.
 - On max rounds exceeded (default: 3): marks task blocked, sends alert to Vichara. The block reason distinguishes "the task's own tests/lint kept failing" from "Viharapala kept rejecting" — these are different failure modes and must not be conflated.
 - Sthapathi is the **sole caller** of `bd update --claim` and `bd close` in the system.
 

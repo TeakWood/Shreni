@@ -45,6 +45,21 @@ vi.mock('./health.js', () => ({
 const mockSetHealthBaseline = vi.fn<() => void>();
 vi.mock('../kshetra/state.js', () => ({ setHealthBaseline: () => mockSetHealthBaseline() }));
 
+class FakeOffBranchError extends Error {
+  constructor(message: string, public readonly detail: { branch: string; expectedMain: string; actualHead: string; actualMain: string }) {
+    super(message);
+    this.name = 'OffBranchError';
+  }
+}
+const mockAssertOnBranch = vi.fn<() => Promise<void>>();
+const mockRecoverOffBranch = vi.fn<() => Promise<string | null>>();
+vi.mock('./guard.js', () => ({
+  captureGuard: vi.fn(async () => ({ branch: 'bead-proj-42/fix-auth', mainSha: 'main-sha' })),
+  assertOnBranch: () => mockAssertOnBranch(),
+  recoverOffBranch: () => mockRecoverOffBranch(),
+  OffBranchError: FakeOffBranchError,
+}));
+
 // fs mock to avoid real disk reads
 vi.mock('fs/promises', () => ({
   readFile: vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' })),
@@ -134,6 +149,8 @@ beforeEach(() => {
   mockSquashMergeAndClose.mockResolvedValue(undefined);
   mockIsHealthBead.mockReturnValue(false);
   mockMeasureHealth.mockResolvedValue({ green: true, failCount: 0, baseline: 0, sha: 'sha' });
+  mockAssertOnBranch.mockResolvedValue(undefined);
+  mockRecoverOffBranch.mockResolvedValue('shreni-salvage/proj-42');
 });
 
 const HEALTH_TASK: Task = {
@@ -266,6 +283,38 @@ describe('runSilpiViharapalaLoop', () => {
     expect(mockRunViharapala).not.toHaveBeenCalled();
     expect(mockBdFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining("own tests/lint kept failing"));
     expect(result.note).toContain('tests');
+  });
+
+  // ── off-branch guardrail (Shreni-beads-ybf) ──────────────────────────────
+
+  it('aborts before review when the agent leaves the bead branch', async () => {
+    mockAssertOnBranch.mockRejectedValue(
+      new FakeOffBranchError('HEAD is on "main", expected bead branch "bead-proj-42/fix-auth"', {
+        branch: 'bead-proj-42/fix-auth', expectedMain: 'main-sha', actualHead: 'main', actualMain: 'stray',
+      }),
+    );
+    const result = await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    expect(result.approved).toBe(false);
+    expect(result.note).toContain('off-branch');
+    expect(mockRunViharapala).not.toHaveBeenCalled();   // never reaches review
+    expect(mockSquashMergeAndClose).not.toHaveBeenCalled();
+  });
+
+  it('recovers and flags the bead with the salvage ref when work lands on main', async () => {
+    mockAssertOnBranch.mockRejectedValue(
+      new FakeOffBranchError('main moved from aaaaaaaa to bbbbbbbb outside the squash-merge flow', {
+        branch: 'bead-proj-42/fix-auth', expectedMain: 'aaaa', actualHead: 'bead-proj-42/fix-auth', actualMain: 'bbbb',
+      }),
+    );
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    expect(mockRecoverOffBranch).toHaveBeenCalledTimes(1);
+    expect(mockBdFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining('shreni-salvage/proj-42'));
+    expect(mockBdFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining('main restored to origin'));
+  });
+
+  it('rethrows non-OffBranch errors from the guard', async () => {
+    mockAssertOnBranch.mockRejectedValue(new Error('git exploded'));
+    await expect(runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth')).rejects.toThrow('git exploded');
   });
 
   it('skips Viharapala when lint/tests fail and re-dispatches Silpi', async () => {

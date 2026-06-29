@@ -90,6 +90,18 @@ export function git(kshetraOrPath: KshetraConfig | string) {
       return stdout.trim();
     },
 
+    // Current branch name, or 'HEAD' when detached.
+    async currentBranch(): Promise<string> {
+      const { stdout } = await run(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath);
+      return stdout.trim();
+    },
+
+    // Move a branch ref to point at <ref> without checking it out. Used to
+    // restore main / salvage stray commits during off-branch recovery.
+    async forceBranch(name: string, ref: string): Promise<void> {
+      await run(['branch', '-f', name, ref], repoPath);
+    },
+
     async branchExists(branch: string): Promise<boolean> {
       try {
         await run(['rev-parse', '--verify', branch], repoPath);

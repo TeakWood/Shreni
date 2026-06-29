@@ -352,6 +352,39 @@ async function runSilpiViharapalaLoop(
 }
 ```
 
+### 4.2a Branch-Isolation Guardrail
+
+The safety model assumes agents only ever commit to their bead branch, and that changes reach `main` solely through `squashMergeAndClose`. Nothing enforced that: an agent that ran `git checkout main` and committed there landed unreviewed, out-of-scope work directly on `main` (incident `sishya-le3y`). The orchestrator never noticed.
+
+Sthapathi now **verifies the invariant around every agent run** rather than trusting the agent. Right after `createTaskBranch`, it snapshots the sanctioned state (on the bead branch, `main` at origin); after each Silpi round it asserts nothing drifted.
+
+```typescript
+// sthapathi/guard.ts
+export async function captureGuard(kshetra, branch): Promise<BranchGuard> {
+  return { branch, mainSha: await git(kshetra).headSha(kshetra.repo.mainBranch) };
+}
+
+export async function assertOnBranch(kshetra, guard): Promise<void> {
+  const [head, mainSha] = await Promise.all([
+    git(kshetra).currentBranch(),                  // HEAD must still be the bead branch
+    git(kshetra).headSha(kshetra.repo.mainBranch), // main must not have moved
+  ]);
+  if (head !== guard.branch || mainSha !== guard.mainSha) {
+    throw new OffBranchError(/* reason + detail */);
+  }
+}
+```
+
+On a violation the cycle aborts **before review or merge** — so off-branch work can never reach the squash-merge flow — and recovers without losing the agent's commits:
+
+```typescript
+// after each runSilpi(), in both the review loop and the health-repair loop:
+const offBranch = await guardAfterAgent(kshetra, task, guard, round);
+if (offBranch) return offBranch;   // aborts; bead is flagged
+```
+
+`recoverOffBranch` returns HEAD to the bead branch, then — if `main` diverged — preserves the stray commits on a `shreni-salvage/<task.id>` branch and force-resets `main` back to origin. The bead is flagged `[needs-human]` with the salvage ref named, so the invariant (`main == origin`, all changes via squash-merge) is restored automatically while the work is kept for manual triage. This satisfies the rule: **an agent cannot land commits on `main` outside the squash-merge flow.**
+
 ### 4.3 Agent Context Builder
 
 Sthapathi builds the full context before each agent dispatch. Agents receive `bd` output as data — they never call `bd` themselves.

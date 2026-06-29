@@ -13,6 +13,7 @@ import { createTaskBranch, branchName } from './branch.js';
 import { squashMergeAndClose } from './merge.js';
 import { isHealthBead, measureHealth } from './health.js';
 import { setHealthBaseline } from '../kshetra/state.js';
+import { captureGuard, assertOnBranch, recoverOffBranch, OffBranchError, type BranchGuard } from './guard.js';
 
 async function readFileOptional(filePath: string): Promise<string> {
   try {
@@ -125,6 +126,32 @@ export async function runViharapalaSafe(
   }
 }
 
+// Verify the agent stayed on the bead branch and left main untouched. On a
+// violation, salvage any stray commits, restore main, flag the bead, and return
+// an abort result for the caller to return immediately. Returns null when clean.
+async function guardAfterAgent(
+  kshetra: KshetraConfig,
+  task: Task,
+  guard: BranchGuard,
+  round: number,
+): Promise<{ approved: boolean; note: string } | null> {
+  try {
+    await assertOnBranch(kshetra, guard);
+    return null;
+  } catch (err) {
+    if (!(err instanceof OffBranchError)) throw err;
+    const salvage = await recoverOffBranch(kshetra, task, guard);
+    const salvageNote = salvage ? ` Stray commits preserved on "${salvage}".` : '';
+    emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: false, rounds: round });
+    await bd(kshetra).flag(
+      task.id,
+      `Aborted round ${round}: agent left the bead branch — ${err.message}. ` +
+        `main restored to origin.${salvageNote} Investigate manually.`,
+    );
+    return { approved: false, note: `Aborted: off-branch (${err.detail.actualHead})` };
+  }
+}
+
 export async function runSilpiViharapalaLoop(
   kshetra: KshetraConfig,
   task: Task,
@@ -146,6 +173,9 @@ export async function runSilpiViharapalaLoop(
 
   // Create the bead branch; workers operate on this branch for the whole lifecycle.
   const branch = await createTaskBranch(task, kshetra);
+  // Snapshot the sanctioned starting point (on-branch, main at origin) so each
+  // round can prove the agent didn't commit to main or wander off-branch.
+  const guard = await captureGuard(kshetra, branch);
 
   while (round < kshetra.agents.maxRoundsPerBead) {
     round++;
@@ -154,6 +184,9 @@ export async function runSilpiViharapalaLoop(
     const context = await buildAgentContext(kshetra, task);
     const silpiOut = await runSilpi(context, round, feedback, branch);
     lastSilpiOut = silpiOut;
+
+    const offBranch = await guardAfterAgent(kshetra, task, guard, round);
+    if (offBranch) return offBranch;
 
     emit({
       type: 'silpi_done',
@@ -240,6 +273,7 @@ export async function runHealthRepairLoop(
 
   emit({ type: 'task_claimed', kshetra: kshetra.id, beadId: task.id, title: task.title });
   const branch = await createTaskBranch(task, kshetra);
+  const guard = await captureGuard(kshetra, branch);
 
   // Failures on the branch before any repair work — the bar each round must beat.
   let prevFailCount = (await measureHealth(kshetra)).failCount;
@@ -255,6 +289,9 @@ export async function runHealthRepairLoop(
     for (const insight of silpiOut.insights) {
       await bdClient.remember(insight);
     }
+
+    const offBranch = await guardAfterAgent(kshetra, task, guard, round);
+    if (offBranch) return offBranch;
 
     const health = await measureHealth(kshetra);
     emit({
