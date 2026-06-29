@@ -35,6 +35,16 @@ vi.mock('./branch.js', () => ({
 const mockSquashMergeAndClose = vi.fn<() => Promise<void>>();
 vi.mock('./merge.js', () => ({ squashMergeAndClose: mockSquashMergeAndClose }));
 
+const mockIsHealthBead = vi.fn<(t: Task) => boolean>();
+const mockMeasureHealth = vi.fn<() => Promise<{ green: boolean; failCount: number; baseline: number; sha: string }>>();
+vi.mock('./health.js', () => ({
+  isHealthBead: (t: Task) => mockIsHealthBead(t),
+  measureHealth: () => mockMeasureHealth(),
+}));
+
+const mockSetHealthBaseline = vi.fn<() => void>();
+vi.mock('../kshetra/state.js', () => ({ setHealthBaseline: () => mockSetHealthBaseline() }));
+
 // fs mock to avoid real disk reads
 vi.mock('fs/promises', () => ({
   readFile: vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' })),
@@ -122,7 +132,17 @@ beforeEach(() => {
   mockRunViharapala.mockResolvedValue(VIHARAPALA_APPROVE);
   mockCreateTaskBranch.mockResolvedValue('bead-proj-42/fix-auth');
   mockSquashMergeAndClose.mockResolvedValue(undefined);
+  mockIsHealthBead.mockReturnValue(false);
+  mockMeasureHealth.mockResolvedValue({ green: true, failCount: 0, baseline: 0, sha: 'sha' });
 });
+
+const HEALTH_TASK: Task = {
+  id: 'proj-health',
+  slug: 'restore-green',
+  title: '[shreni-health] Restore green test suite',
+  status: 'pending',
+  priority: 0,
+};
 
 // ── buildAgentContext ─────────────────────────────────────────────────────────
 
@@ -234,6 +254,20 @@ describe('runSilpiViharapalaLoop', () => {
     expect(mockRunViharapala).toHaveBeenCalledTimes(3);
   });
 
+  it('blocked message attributes to the reviewer when Viharapala kept rejecting', async () => {
+    mockRunViharapala.mockResolvedValue(VIHARAPALA_REJECT);
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    expect(mockBdFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining('Viharapala kept rejecting'));
+  });
+
+  it('blocked message attributes to the task when its own tests kept failing', async () => {
+    mockRunSilpi.mockResolvedValue(SILPI_FAIL);
+    const result = await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    expect(mockRunViharapala).not.toHaveBeenCalled();
+    expect(mockBdFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining("own tests/lint kept failing"));
+    expect(result.note).toContain('tests');
+  });
+
   it('skips Viharapala when lint/tests fail and re-dispatches Silpi', async () => {
     mockRunSilpi
       .mockResolvedValueOnce(SILPI_FAIL)
@@ -279,5 +313,43 @@ describe('runSilpiViharapalaLoop', () => {
     const result = await runSilpiViharapalaLoop(kshetra, TASK, 'bead-proj-42/fix-auth');
     expect(result.approved).toBe(false);
     expect(mockRunSilpi).toHaveBeenCalledOnce();
+  });
+});
+// ── health repair loop ──────────────────────────────────────────────────────
+
+describe('runSilpiViharapalaLoop — health repair beads', () => {
+  beforeEach(() => {
+    mockIsHealthBead.mockImplementation((t: Task) => t.title.startsWith('[shreni-health]'));
+  });
+
+  it('merges and resets the baseline when the suite reaches green', async () => {
+    // pre-repair measure (red), then post-Silpi measure (green)
+    mockMeasureHealth
+      .mockResolvedValueOnce({ green: false, failCount: 3, baseline: 0, sha: 's' })
+      .mockResolvedValueOnce({ green: true, failCount: 0, baseline: 0, sha: 's' });
+    const result = await runSilpiViharapalaLoop(KSHETRA, HEALTH_TASK, 'b');
+    expect(result.approved).toBe(true);
+    expect(mockSquashMergeAndClose).toHaveBeenCalledOnce();
+    expect(mockSetHealthBaseline).toHaveBeenCalled();
+    expect(mockRunViharapala).not.toHaveBeenCalled();
+  });
+
+  it('keeps going while failures strictly decrease', async () => {
+    mockMeasureHealth
+      .mockResolvedValueOnce({ green: false, failCount: 5, baseline: 0, sha: 's' }) // start
+      .mockResolvedValueOnce({ green: false, failCount: 3, baseline: 0, sha: 's' }) // r1 progress
+      .mockResolvedValueOnce({ green: true, failCount: 0, baseline: 0, sha: 's' }); // r2 green
+    const result = await runSilpiViharapalaLoop(KSHETRA, HEALTH_TASK, 'b');
+    expect(result.approved).toBe(true);
+    expect(mockRunSilpi).toHaveBeenCalledTimes(2);
+  });
+
+  it('quarantines remaining failures and flags for a human when it stalls', async () => {
+    mockMeasureHealth.mockResolvedValue({ green: false, failCount: 4, baseline: 0, sha: 's' });
+    const result = await runSilpiViharapalaLoop(KSHETRA, HEALTH_TASK, 'b');
+    expect(result.approved).toBe(false);
+    expect(mockSquashMergeAndClose).not.toHaveBeenCalled();
+    expect(mockSetHealthBaseline).toHaveBeenCalled();
+    expect(mockBdFlag).toHaveBeenCalledWith('proj-health', expect.stringContaining('[needs-human]'));
   });
 });

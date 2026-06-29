@@ -3,6 +3,7 @@ import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
+import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
 
 export class PreFlightError extends Error {
   constructor(
@@ -103,6 +104,26 @@ export async function pickup(kshetra: KshetraConfig): Promise<Task | null> {
     }
     throw err;
   }
+
+  // Health gate: a fresh feature task only starts when the base suite is green
+  // (modulo the accepted baseline). preFlightCheck has put us on a clean, pulled
+  // main, so this measures the right tree. A red base does not start the task —
+  // it queues a P0 repair bead instead, which is exempt from this gate. This
+  // runs at the pickup boundary only, never mid-loop, so it can't interfere with
+  // an in-flight Silpi↔Viharapala round.
+  if (!isHealthBead(task)) {
+    const health = await checkHealth(kshetra);
+    if (!health.green) {
+      const created = await ensureHealthBead(kshetra, health.failCount);
+      console.warn(
+        `[shreni pickup:${kshetra.id}] base suite red ` +
+          `(${health.failCount} failing > baseline ${health.baseline}); ` +
+          `deferring ${task.id}, ${created ? 'queued' : 'awaiting'} health repair`,
+      );
+      return null;
+    }
+  }
+
   await bd(kshetra).claim(task.id);
   return task;
 }

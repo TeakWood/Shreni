@@ -149,8 +149,19 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 - Exactly one task is active per Kshetra at any time (`maxConcurrentBeads: 1`).
 - On task pickup: creates a git branch `bead-{id}/{slug}` from `main` in the Kshetra repo.
 - On task completion: squash-merges branch to `main`, deletes branch, calls `bd close`.
-- On max rounds exceeded (default: 3): marks task blocked, sends alert to Vichara.
+- On max rounds exceeded (default: 3): marks task blocked, sends alert to Vichara. The block reason distinguishes "the task's own tests/lint kept failing" from "Viharapala kept rejecting" — these are different failure modes and must not be conflated.
 - Sthapathi is the **sole caller** of `bd update --claim` and `bd close` in the system.
+
+#### 5.1.1a Green-Base Health Gate
+
+The Silpi↔Viharapala test gate compares against the **full** suite, so it is only meaningful when `main` is green to begin with. Sthapathi enforces "green main" as a precondition rather than working around a red one:
+
+- **At the pickup boundary only** (never mid-loop), before claiming a feature task, Sthapathi runs the configured test suite on the freshly-pulled `main`. The result is cached by `main`'s HEAD sha — since `main` only moves on merge, the suite runs at most once per merge, not once per 30s poll.
+- "Green" means **no failures beyond an accepted baseline** of known-failing tests (default baseline: 0 — fully green). This baseline is the escape valve that keeps genuinely-unfixable tests from wedging all work.
+- If the base is red beyond the baseline, the feature task is **not** claimed. Instead Sthapathi ensures a single P0 `[shreni-health]` "restore green suite" repair bead exists and defers feature work until the suite is green again.
+- The repair bead is **exempt** from this gate (it is the thing that restores green) and is gated on "failures must strictly decrease" instead of "tests pass." On reaching zero it merges and resets the baseline to 0.
+- If the repair bead cannot reach zero within max rounds, Sthapathi **quarantines** the remaining failures (bumps the accepted baseline to the current count) and flags the bead `[needs-human]`. Feature work then resumes against the new baseline, so an intractable suite degrades to "proceed, minus these known failures" rather than deadlocking the whole Kshetra.
+- The health gate runs **only** at pickup / on restart-with-no-WIP — it never interrupts an in-flight Silpi↔Viharapala round. Resuming WIP after a restart goes through the recovery path, which bypasses the gate by construction.
 
 #### 5.1.2 Beads Auto-Sync
 
@@ -165,6 +176,7 @@ These hooks have no role in Sthapathi's automated workflow. Sthapathi calls `bd 
 - Sthapathi builds full agent context before each dispatch: `bd prime` output + `bd show` output + RAG chunks + skills.
 - On Silpi completion: Sthapathi records the round note via `bd update --note`, then dispatches Viharapala.
 - On Viharapala completion: Sthapathi records the verdict via `bd update --note`.
+- The pre-Viharapala test gate assumes a green base (guaranteed by §5.1.1a), so a failing suite at this point is attributable to the task's own diff — not pre-existing unrelated failures.
 - On Viharapala `APPROVE`: proceeds to merge flow.
 - On Viharapala `REJECT`: increments round counter, re-dispatches Silpi with must-fix list.
 - Sthapathi calls `bd remember` after each session to persist insights returned in agent output.

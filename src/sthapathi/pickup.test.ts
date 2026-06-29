@@ -23,6 +23,16 @@ vi.mock('./git.js', () => ({
   GitError: class GitError extends Error { constructor(public readonly code: string, message: string) { super(message); } },
 }));
 
+const mockCheckHealth = vi.fn<() => Promise<{ green: boolean; failCount: number; baseline: number; sha: string }>>();
+const mockEnsureHealthBead = vi.fn<() => Promise<boolean>>();
+const mockIsHealthBead = vi.fn<(t: Task) => boolean>();
+
+vi.mock('./health.js', () => ({
+  checkHealth: () => mockCheckHealth(),
+  ensureHealthBead: () => mockEnsureHealthBead(),
+  isHealthBead: (t: Task) => mockIsHealthBead(t),
+}));
+
 // ── imports after mocks ──────────────────────────────────────────────────────
 
 const { parseReadyOutput, pickNext, preFlightCheck, pickup, PreFlightError } =
@@ -61,6 +71,9 @@ beforeEach(() => {
   mockBranchExists.mockResolvedValue(false);
   mockCheckout.mockResolvedValue(undefined);
   mockPull.mockResolvedValue(undefined);
+  mockCheckHealth.mockResolvedValue({ green: true, failCount: 0, baseline: 0, sha: 'sha' });
+  mockEnsureHealthBead.mockResolvedValue(true);
+  mockIsHealthBead.mockReturnValue(false);
 });
 
 // ── parseReadyOutput ──────────────────────────────────────────────────────────
@@ -278,5 +291,36 @@ describe('pickup', () => {
     mockClaim.mockImplementation(async () => { callOrder.push('claim'); return ''; });
     await pickup(KSHETRA);
     expect(callOrder.indexOf('status')).toBeLessThan(callOrder.indexOf('claim'));
+  });
+
+  // ── health gate ──────────────────────────────────────────────────────────
+
+  it('does not claim a feature task when the base suite is red', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([ISSUE]));
+    mockCheckHealth.mockResolvedValue({ green: false, failCount: 3, baseline: 0, sha: 'sha' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await pickup(KSHETRA);
+    expect(result).toBeNull();
+    expect(mockClaim).not.toHaveBeenCalled();
+    expect(mockEnsureHealthBead).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('claims normally when the base suite is green', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([ISSUE]));
+    mockCheckHealth.mockResolvedValue({ green: true, failCount: 0, baseline: 0, sha: 'sha' });
+    const result = await pickup(KSHETRA);
+    expect(result?.id).toBe('proj-123');
+    expect(mockClaim).toHaveBeenCalledWith('proj-123');
+    expect(mockEnsureHealthBead).not.toHaveBeenCalled();
+  });
+
+  it('a health bead bypasses the gate and is claimed even when the suite is red', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([ISSUE]));
+    mockIsHealthBead.mockReturnValue(true);
+    const result = await pickup(KSHETRA);
+    expect(result?.id).toBe('proj-123');
+    expect(mockClaim).toHaveBeenCalledWith('proj-123');
+    expect(mockCheckHealth).not.toHaveBeenCalled();
   });
 });

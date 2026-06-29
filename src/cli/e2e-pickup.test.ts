@@ -37,6 +37,13 @@ vi.mock('../sthapathi/git.js', () => ({
   GitError: class GitError extends Error { constructor(public readonly code: string, message: string) { super(message); } },
 }));
 
+// Health gate stubbed green so the pickup cycle proceeds to claim.
+vi.mock('../sthapathi/health.js', () => ({
+  checkHealth: vi.fn(async () => ({ green: true, failCount: 0, baseline: 0, sha: 'sha' })),
+  ensureHealthBead: vi.fn(async () => true),
+  isHealthBead: vi.fn(() => false),
+}));
+
 // ── import after mocks ────────────────────────────────────────────────────────
 
 const { pickup } = await import('../sthapathi/pickup.js');

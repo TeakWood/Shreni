@@ -208,6 +208,11 @@ interface KshetraState {
   queueDepth: number;
   lastCompletedAt: string | null;
   lastError: string | null;
+  // Accepted count of known-failing tests for the health gate (§4.1a). The base
+  // suite is "green enough" when current failures <= this. Default 0 (fully
+  // green); bumped by quarantine when a repair bead can't reach zero. Persisted
+  // in ~/.shreni/state.json alongside pause state.
+  healthBaseline: number;
 }
 ```
 
@@ -245,14 +250,62 @@ async function runCycle(kshetra: Kshetra): Promise<void> {
 }
 ```
 
+### 4.1a Green-Base Health Gate
+
+The pre-Viharapala test gate (§4.2) checks the **whole** suite, so it is only meaningful when `main` is green. Rather than baseline-diff every task's self-reported result, Sthapathi makes the invariant true: it guarantees a green base before a feature loop starts, so any failure observed during the loop is attributable to that task's diff.
+
+**Why a gate, not per-task diffing.** `testsPassed` is self-reported by the Silpi LLM (`sthapathi/dispatch.ts` → `silpi.ts` system prompt). Diffing an LLM's self-assessment against a remembered baseline is fragile. A deterministic suite run by Sthapathi on a known tree is trustworthy, and it sits naturally at the scheduler's existing pickup boundary — so it never interferes mid-loop.
+
+```typescript
+// sthapathi/health.ts
+export async function checkHealth(kshetra: Kshetra): Promise<HealthStatus> {
+  const sha = await git(kshetra).headSha();          // cache key — main moves only on merge
+  const baseline = getHealthBaseline(kshetra);       // accepted known-failing count
+  if (cached(kshetra, sha, baseline)) return cache;  // no re-run while main is unchanged
+  const { passed, failCount } = await runTestSuite(kshetra);  // configured stack.testRunner
+  // green = fully passing OR failures within the accepted baseline
+  const green = passed || (failCount >= 0 && failCount <= baseline);
+  return store(kshetra, { green, failCount, baseline, sha });
+}
+```
+
+The gate lives in `pickup()`, after `preFlightCheck` (which puts us on a clean, pulled `main`) and **before** `bd claim`:
+
+```typescript
+// sthapathi/pickup.ts
+if (!isHealthBead(task)) {
+  const health = await checkHealth(kshetra);
+  if (!health.green) {
+    await ensureHealthBead(kshetra, health.failCount);  // idempotent P0 [shreni-health] bead
+    return null;                                        // defer feature work; don't claim
+  }
+}
+await bd(kshetra).claim(task.id);
+```
+
+**Repair loop.** A `[shreni-health]` bead is dispatched through a dedicated path in `runSilpiViharapalaLoop` (`runHealthRepairLoop`). It is exempt from the green precondition and gated on "failures must strictly decrease":
+
+- Measure failures on the branch before round 1 — that's the bar to beat.
+- After each Silpi round, re-measure (`measureHealth`, cache-bypassing since the tree changed). Green → squash-merge, `setHealthBaseline(0)`, done. Fewer failures → record progress, continue. No progress → continue (counts toward max rounds).
+- On exhausting max rounds without green → **quarantine**: `setHealthBaseline(remainingFailures)` so feature work can resume against the new baseline, and `flag` the bead `[needs-human]`. This is the key safety property: an intractable suite degrades to "proceed minus known failures," never a whole-Kshetra deadlock.
+
+**Restart / WIP.** The gate is only in the pickup path. In-flight tasks resume through the recovery path (§5.7), which bypasses the gate by construction — consistent with "never interfere with a loop mid-turn."
+
 ### 4.2 Silpi↔Viharapala Loop
 
 ```typescript
 async function runSilpiViharapalaLoop(
   kshetra: Kshetra, task: Task, branch: string
 ): Promise<{ approved: boolean; note: string }> {
+  // [shreni-health] beads run a different loop — see §4.1a (gated on
+  // "failures must decrease", not Viharapala approval).
+  if (isHealthBead(task)) return runHealthRepairLoop(kshetra, task);
+
   let round = 0;
   let feedback: ViharapalaOutput | null = null;
+  // Why the latest round failed — so the terminal block reason distinguishes
+  // "task's own tests failed" from "reviewer rejected".
+  let lastRejectSource: 'tests' | 'reviewer' | null = null;
 
   while (round < kshetra.agents.maxRoundsPerBead) {
     round++;
@@ -266,8 +319,11 @@ async function runSilpiViharapalaLoop(
       await bd(kshetra).remember(insight);
     }
 
+    // The base is green (guaranteed by §4.1a), so a failing suite here is the
+    // task's own diff — not pre-existing unrelated failures.
     if (!silpiOut.testsPassed || !silpiOut.lintPassed) {
       await bd(kshetra).addNote(task.id, `Round ${round}: lint/tests failed`);
+      lastRejectSource = 'tests';
       feedback = { verdict: 'REJECT', mustFix: ['Tests or lint failed'], insights: [] };
       continue;
     }
@@ -286,7 +342,12 @@ async function runSilpiViharapalaLoop(
     if (feedback.verdict === 'APPROVE') {
       return { approved: true, note: `Approved round ${round}` };
     }
+    lastRejectSource = 'reviewer';
   }
+  const cause = lastRejectSource === 'tests'
+    ? "task's own tests/lint kept failing"
+    : 'Viharapala kept rejecting';
+  await bd(kshetra).flag(task.id, `Blocked after ${round} rounds — ${cause}.`);
   return { approved: false, note: `Blocked after ${round} rounds` };
 }
 ```

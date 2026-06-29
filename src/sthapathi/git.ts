@@ -85,6 +85,11 @@ export function git(kshetraOrPath: KshetraConfig | string) {
       return branch;
     },
 
+    async headSha(ref = 'HEAD'): Promise<string> {
+      const { stdout } = await run(['rev-parse', ref], repoPath);
+      return stdout.trim();
+    },
+
     async branchExists(branch: string): Promise<boolean> {
       try {
         await run(['rev-parse', '--verify', branch], repoPath);

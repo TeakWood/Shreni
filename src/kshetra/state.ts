@@ -11,6 +11,10 @@ interface KshetraState {
   message?: string;
   pausedAt?: string;
   requiresManualResume?: boolean;
+  // Accepted count of known-failing tests. The health gate treats the suite as
+  // green when current failures are <= this. Bumped (quarantine) when a repair
+  // task can't reach zero, so unrelated failures never wedge the whole Kshetra.
+  healthBaseline?: number;
 }
 
 interface State {
@@ -39,6 +43,7 @@ export function pauseKshetra(
 ): void {
   const state = loadState();
   state.kshetras[kshetra.id] = {
+    ...state.kshetras[kshetra.id],
     paused: true,
     reason: opts.reason,
     message: opts.message,
@@ -50,7 +55,22 @@ export function pauseKshetra(
 
 export function resumeKshetra(kshetra: KshetraConfig): void {
   const state = loadState();
-  state.kshetras[kshetra.id] = { paused: false };
+  state.kshetras[kshetra.id] = { ...state.kshetras[kshetra.id], paused: false };
+  saveState(state);
+}
+
+// Accepted count of known-failing tests for the health gate. Defaults to 0
+// (suite must be fully green) until quarantine bumps it.
+export function getHealthBaseline(kshetra: KshetraConfig): number {
+  return loadState().kshetras[kshetra.id]?.healthBaseline ?? 0;
+}
+
+export function setHealthBaseline(kshetra: KshetraConfig, count: number): void {
+  const state = loadState();
+  state.kshetras[kshetra.id] = {
+    ...(state.kshetras[kshetra.id] ?? { paused: false }),
+    healthBaseline: count,
+  };
   saveState(state);
 }
 
@@ -64,7 +84,7 @@ export function clearCooldownPauses(): void {
   const state = loadState();
   for (const [id, s] of Object.entries(state.kshetras)) {
     if (s.paused && !s.requiresManualResume) {
-      state.kshetras[id] = { paused: false };
+      state.kshetras[id] = { ...s, paused: false };
     }
   }
   saveState(state);
