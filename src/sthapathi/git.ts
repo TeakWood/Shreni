@@ -183,9 +183,15 @@ export function git(kshetraOrPath: KshetraConfig | string) {
       await this.commit(message);
     },
 
-    async deleteBranch(branch: string, remote = false): Promise<void> {
-      await run(['branch', '-d', branch], repoPath);
-      if (remote) {
+    async deleteBranch(
+      branch: string,
+      opts: { remote?: boolean; force?: boolean } = {},
+    ): Promise<void> {
+      // -D (force) is required to remove a branch holding commits that were
+      // never merged — e.g. cleaning up after a failed cycle where the agent
+      // committed partial work we are discarding. -d alone refuses those.
+      await run(['branch', opts.force ? '-D' : '-d', branch], repoPath);
+      if (opts.remote) {
         await run(['push', 'origin', '--delete', branch], repoPath);
       }
     },

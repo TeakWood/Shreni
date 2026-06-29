@@ -94,7 +94,13 @@ export async function pickup(kshetra: KshetraConfig): Promise<Task | null> {
   try {
     await preFlightCheck(task, kshetra);
   } catch (err) {
-    if (err instanceof PreFlightError) return null;
+    if (err instanceof PreFlightError) {
+      // Surface the rejection — otherwise a leftover branch or persistently
+      // dirty tree wedges the worker silently, returning null on every poll
+      // with no clue why nothing is progressing.
+      console.warn(`[shreni pickup:${kshetra.id}] preflight rejected ${task.id}: ${err.message}`);
+      return null;
+    }
     throw err;
   }
   await bd(kshetra).claim(task.id);

@@ -132,6 +132,26 @@ describe('git() helper', () => {
     expect(await g.branchExists('to-delete')).toBe(false);
   });
 
+  it('deleteBranch() refuses an unmerged branch without force', async () => {
+    const g = git(repoDir);
+    await execFileAsync('git', ['checkout', '-b', 'unmerged'], { cwd: repoDir });
+    writeFileSync(join(repoDir, 'wip.ts'), 'partial work');
+    await g.commitFile('wip.ts', 'wip: partial');
+    await g.checkout('main');
+    await expect(g.deleteBranch('unmerged')).rejects.toThrow(GitError);
+    expect(await g.branchExists('unmerged')).toBe(true);
+  });
+
+  it('deleteBranch({ force: true }) removes an unmerged branch', async () => {
+    const g = git(repoDir);
+    await execFileAsync('git', ['checkout', '-b', 'unmerged'], { cwd: repoDir });
+    writeFileSync(join(repoDir, 'wip.ts'), 'partial work');
+    await g.commitFile('wip.ts', 'wip: partial');
+    await g.checkout('main');
+    await g.deleteBranch('unmerged', { force: true });
+    expect(await g.branchExists('unmerged')).toBe(false);
+  });
+
   it('throws GitError on invalid git commands', async () => {
     const g = git(repoDir);
     await expect(g.checkout('no-such-branch')).rejects.toThrow(GitError);

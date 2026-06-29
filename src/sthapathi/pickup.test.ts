@@ -254,6 +254,16 @@ describe('pickup', () => {
     expect(mockClaim).not.toHaveBeenCalled();
   });
 
+  it('logs a warning naming the bead and reason when preflight rejects', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockReady.mockResolvedValue(JSON.stringify([ISSUE]));
+    mockBranchExists.mockResolvedValue(true); // leftover branch → preflight rejects
+    await pickup(KSHETRA);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('proj-123'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('branch already exists'));
+    warn.mockRestore();
+  });
+
   it('rethrows non-PreFlightError exceptions from preFlightCheck', async () => {
     mockReady.mockResolvedValue(JSON.stringify([ISSUE]));
     mockStatus.mockRejectedValue(new Error('git crash'));

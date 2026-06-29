@@ -2,7 +2,8 @@ import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import { bd, syncBeads, BeadsError } from './beads.js';
 import { pauseKshetra } from '../kshetra/state.js';
-import { GitError } from './git.js';
+import { git, GitError } from './git.js';
+import { branchName } from './branch.js';
 
 export class ParseError extends Error {
   constructor(message: string, public readonly cause?: unknown) {
@@ -41,6 +42,27 @@ function classifyError(err: unknown): ErrorClass {
   return 'UNKNOWN';
 }
 
+// The bead branch is created at the start of every cycle but only deleted on
+// the success path (squashMergeAndClose). On a terminal failure we abandon the
+// branch here so it can't linger and silently wedge the next pickup() — a
+// leftover branch makes preFlightCheck throw on every poll. Best-effort: a
+// cleanup failure must never mask the original cycle error. NOT called for
+// GIT_FAILED / merge conflicts, where the branch is deliberately kept for
+// human inspection.
+export async function cleanupBranch(kshetra: KshetraConfig, task: Task): Promise<void> {
+  const g = git(kshetra);
+  const branch = branchName(task);
+  try {
+    if (!(await g.branchExists(branch))) return;
+    // Must be off the branch to delete it; force-delete since the abandoned
+    // branch may hold partial commits we are discarding.
+    await g.checkout(kshetra.repo.mainBranch);
+    await g.deleteBranch(branch, { force: true });
+  } catch (err) {
+    console.warn(`[shreni:${kshetra.id}] failed to clean up branch ${branch}: ${(err as Error).message}`);
+  }
+}
+
 // Stub — notifies a human via Vichara (not yet implemented)
 export async function notifyVichara(
   _kshetra: KshetraConfig,
@@ -61,6 +83,9 @@ export async function handleCycleError(
     case 'API_DOWN':
       if (task) {
         await bdClient.addNote(task.id, `Paused: API unavailable — ${err.message}. Will retry.`);
+        // The retry re-picks the task and creates a fresh branch, so drop the
+        // current one — otherwise preFlightCheck would reject the retry.
+        await cleanupBranch(kshetra, task);
       }
       pauseKshetra(kshetra, {
         reason: 'api_down',
@@ -74,6 +99,7 @@ export async function handleCycleError(
       if (task) {
         await bdClient.flag(task.id, `Agent failed: ${err.message}`);
         await syncBeads(kshetra);
+        await cleanupBranch(kshetra, task);
       }
       await notifyVichara(kshetra, task, 'agent_failed');
       break;
@@ -82,6 +108,7 @@ export async function handleCycleError(
       if (task) {
         await bdClient.flag(task.id, `Malformed output after retries: ${err.message}`);
         await syncBeads(kshetra);
+        await cleanupBranch(kshetra, task);
       }
       await notifyVichara(kshetra, task, 'agent_failed');
       break;
@@ -112,6 +139,7 @@ export async function handleCycleError(
       if (task) {
         await bdClient.flag(task.id, `Unexpected error: ${err.message}`);
         await syncBeads(kshetra);
+        await cleanupBranch(kshetra, task);
       }
       await notifyVichara(kshetra, task, 'unknown_error');
   }

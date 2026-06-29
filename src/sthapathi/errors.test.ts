@@ -25,7 +25,30 @@ vi.mock('./beads.js', () => ({
   syncBeads: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { handleCycleError, ParseError, AgentError } = await import('./errors.js');
+// Mock git so branch cleanup doesn't touch a real repo
+const mockBranchExists = vi.fn<() => Promise<boolean>>();
+const mockCheckout = vi.fn<() => Promise<void>>();
+const mockDeleteBranch = vi.fn<() => Promise<void>>();
+
+vi.mock('./git.js', () => ({
+  GitError: class GitError extends Error {
+    constructor(
+      public readonly code: string,
+      message: string,
+      public readonly cause?: unknown,
+    ) {
+      super(message);
+      this.name = 'GitError';
+    }
+  },
+  git: vi.fn(() => ({
+    branchExists: mockBranchExists,
+    checkout: mockCheckout,
+    deleteBranch: mockDeleteBranch,
+  })),
+}));
+
+const { handleCycleError, cleanupBranch, ParseError, AgentError } = await import('./errors.js');
 const { GitError } = await import('./git.js');
 const { BeadsError } = await import('./beads.js');
 const { loadState } = await import('../kshetra/state.js');
@@ -48,6 +71,9 @@ const TASK = {
 
 beforeEach(() => {
   mkdirSync(join(dir, '.shreni'), { recursive: true });
+  mockBranchExists.mockReset().mockResolvedValue(true);
+  mockCheckout.mockReset().mockResolvedValue(undefined);
+  mockDeleteBranch.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -136,5 +162,62 @@ describe('handleCycleError', () => {
 
     const state = loadState();
     expect(state.kshetras['sishya']?.paused).toBeFalsy();
+  });
+
+  it('force-deletes the bead branch on AGENT_FAILED', async () => {
+    await handleCycleError(KSHETRA, TASK, new AgentError('API_FAILURE', { task: TASK, round: 1 }));
+    expect(mockCheckout).toHaveBeenCalledWith('main');
+    expect(mockDeleteBranch).toHaveBeenCalledWith('bead-bead-abc/fix-bug', { force: true });
+  });
+
+  it('force-deletes the bead branch on MALFORMED_OUTPUT', async () => {
+    await handleCycleError(KSHETRA, TASK, new AgentError('MALFORMED_OUTPUT', { task: TASK, round: 2 }));
+    expect(mockDeleteBranch).toHaveBeenCalledWith('bead-bead-abc/fix-bug', { force: true });
+  });
+
+  it('deletes the bead branch on UNKNOWN errors', async () => {
+    await handleCycleError(KSHETRA, TASK, new Error('something unexpected'));
+    expect(mockDeleteBranch).toHaveBeenCalledWith('bead-bead-abc/fix-bug', { force: true });
+  });
+
+  it('deletes the bead branch on API_DOWN so the retry can recreate it', async () => {
+    const apiErr = Object.assign(new Error('service unavailable'), { status: 503 });
+    await handleCycleError(KSHETRA, TASK, apiErr);
+    expect(mockDeleteBranch).toHaveBeenCalledWith('bead-bead-abc/fix-bug', { force: true });
+  });
+
+  it('KEEPS the branch on GIT_FAILED (for human inspection)', async () => {
+    await handleCycleError(KSHETRA, TASK, new GitError('GIT_ERROR', 'Push rejected'));
+    expect(mockDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('does not attempt branch cleanup when there is no task (BD_FAILED)', async () => {
+    const bdErr = new (BeadsError as unknown as { new(msg: string): Error })('bd create failed');
+    await handleCycleError(KSHETRA, null, bdErr);
+    expect(mockDeleteBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe('cleanupBranch', () => {
+  it('skips deletion when the branch does not exist', async () => {
+    mockBranchExists.mockResolvedValue(false);
+    await cleanupBranch(KSHETRA, TASK);
+    expect(mockDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('checks out main before deleting (cannot delete the current branch)', async () => {
+    const order: string[] = [];
+    mockCheckout.mockImplementation(async () => { order.push('checkout'); });
+    mockDeleteBranch.mockImplementation(async () => { order.push('delete'); });
+    await cleanupBranch(KSHETRA, TASK);
+    expect(order).toEqual(['checkout', 'delete']);
+  });
+
+  it('swallows cleanup failures so they never mask the original cycle error', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockDeleteBranch.mockRejectedValue(new Error('branch is checked out elsewhere'));
+    await expect(cleanupBranch(KSHETRA, TASK)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('failed to clean up branch'));
+    warn.mockRestore();
   });
 });
