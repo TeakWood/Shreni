@@ -36,6 +36,8 @@ Developer machine
 
 **Key design constraint:** Sthapathi is the sole caller of `bd update --claim` and `bd close`. Agents (Silpi, Viharapala, E2E) never call `bd` directly — they receive task context as injected prompt data. Interactive Claude Code sessions can file tasks (`bd create`) but cannot claim or close them.
 
+> For a deeper walkthrough — the worker lifecycle and phase machine, the git workflow, the provider abstraction, and the watchdog/self-heal resilience machinery — see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Prerequisites
 
 - **Node.js** ≥ 20 and **pnpm** (`npm install -g pnpm`)
