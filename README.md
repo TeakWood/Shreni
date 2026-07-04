@@ -110,9 +110,16 @@ stack:
   linter: eslint
 
 agents:
-  model: claude-sonnet-4
+  provider: claude          # supported provider; codex / gemini are experimental
+  model: claude-sonnet-4-6
   maxRoundsPerBead: 3
 ```
+
+> **Agent providers.** **Claude** (`claude`) is the supported, default provider.
+> Adapters for **Codex** (`codex`) and **Gemini** (`gemini`) are wired but
+> **experimental** — draft and not verified end-to-end — and ship with no default
+> model, so they require an explicit `agents.model`. `shreni init-kshetra` warns
+> you if you pick one. If you want a reliable first run, use Claude.
 
 File your first task:
 

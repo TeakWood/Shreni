@@ -3,6 +3,7 @@ import {
   providerInstructionFile,
   providerDefaultModel,
   providerRequiresExplicitModel,
+  providerIsExperimental,
   providerBin,
   providerFromCliName,
   PROVIDER_CLI_NAMES,
@@ -50,6 +51,19 @@ describe('providerRequiresExplicitModel', () => {
   it('requires an explicit model for Codex and Gemini (OQ1)', () => {
     expect(providerRequiresExplicitModel('openai')).toBe(true);
     expect(providerRequiresExplicitModel('gemini')).toBe(true);
+  });
+});
+
+describe('providerIsExperimental', () => {
+  it('marks Claude as supported (not experimental)', () => {
+    expect(providerIsExperimental('anthropic')).toBe(false);
+  });
+  it('marks Codex and Gemini as experimental', () => {
+    expect(providerIsExperimental('openai')).toBe(true);
+    expect(providerIsExperimental('gemini')).toBe(true);
+  });
+  it('gives every provider an explicit experimental flag', () => {
+    for (const p of ALL) expect(typeof PROVIDER_REGISTRY[p].experimental).toBe('boolean');
   });
 });
 

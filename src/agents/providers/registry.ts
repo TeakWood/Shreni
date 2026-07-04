@@ -23,6 +23,11 @@ export interface ProviderInfo {
   // where to read more (§3.5 hard gate).
   installCmd: string;
   docsUrl: string;
+  // True when the adapter is draft/untested. The Claude adapter is the supported
+  // path; Codex/Gemini are wired but unverified end-to-end, so init warns before
+  // using one — a first-run user must not be silently dropped onto an unfinished
+  // provider (the BYO-subscription promise depends on the first run working).
+  experimental: boolean;
 }
 
 export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
@@ -34,6 +39,7 @@ export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
     defaultModel: 'claude-sonnet-4-6',
     installCmd: 'npm install -g @anthropic-ai/claude-code',
     docsUrl: 'https://docs.anthropic.com/en/docs/claude-code/overview',
+    experimental: false,
   },
   openai: {
     cliName: 'codex',
@@ -44,6 +50,7 @@ export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
     defaultModel: null,
     installCmd: 'npm install -g @openai/codex',
     docsUrl: 'https://github.com/openai/codex',
+    experimental: true,
   },
   gemini: {
     cliName: 'gemini',
@@ -54,6 +61,7 @@ export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
     defaultModel: null,
     installCmd: 'npm install -g @google/gemini-cli',
     docsUrl: 'https://github.com/google-gemini/gemini-cli',
+    experimental: true,
   },
 };
 
@@ -99,6 +107,13 @@ export function providerDefaultModel(provider: Provider): string | null {
 // (or require) agents.model rather than fall back (OQ1).
 export function providerRequiresExplicitModel(provider: Provider): boolean {
   return providerInfo(provider).defaultModel === null;
+}
+
+// True for providers whose adapter is draft/untested (Codex/Gemini). Init warns
+// before using one so a first-run user isn't silently dropped onto an unfinished
+// path; the Claude adapter is the supported default.
+export function providerIsExperimental(provider: Provider): boolean {
+  return providerInfo(provider).experimental;
 }
 
 // Resolve the CLI binary for a provider, honouring its SHRENI_*_BIN override.

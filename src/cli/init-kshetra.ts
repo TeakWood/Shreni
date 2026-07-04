@@ -13,6 +13,7 @@ import type { Provider } from '../agents/providers/types';
 import {
   providerFromCliName,
   providerDefaultModel,
+  providerIsExperimental,
   PROVIDER_REGISTRY,
 } from '../agents/providers/registry';
 import { checkProviderInstalled, promptProvider, commandExists } from './provider-preflight';
@@ -442,6 +443,12 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   }
   const providerLabel = `${PROVIDER_REGISTRY[agents.provider].cliName} (${agents.model})`;
   console.log(`Provider: ${providerLabel} — CLI found at "${preflight.bin}".`);
+  if (providerIsExperimental(agents.provider)) {
+    console.warn(
+      `  ⚠ ${PROVIDER_REGISTRY[agents.provider].cliName} is EXPERIMENTAL — its adapter is draft and ` +
+        `not verified end-to-end. Claude is the supported provider; expect rough edges on this one.`,
+    );
+  }
 
   // Detect the ecosystem from marker files (pure read); an explicit --language
   // overrides the detected language but keeps any detected packageManager/commands.

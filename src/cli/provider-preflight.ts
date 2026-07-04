@@ -2,7 +2,7 @@ import { existsSync } from 'fs';
 import { delimiter, isAbsolute, join } from 'path';
 import { createInterface } from 'readline';
 import type { Provider } from '../agents/providers/types.js';
-import { PROVIDER_REGISTRY, PROVIDER_CLI_NAMES, providerBin } from '../agents/providers/registry.js';
+import { PROVIDER_REGISTRY, providerBin } from '../agents/providers/registry.js';
 
 // The default provider when init is run without --provider and the operator just
 // hits Enter at the prompt (§3.5).
@@ -14,9 +14,14 @@ export const DEFAULT_PROVIDER_CLI_NAME = PROVIDER_REGISTRY.anthropic.cliName;
 export async function promptProvider(): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
+    // Flag experimental providers with a trailing * so the operator sees the
+    // caveat before choosing (they still type the plain name).
+    const infos = Object.values(PROVIDER_REGISTRY);
+    const names = infos.map(i => (i.experimental ? `${i.cliName}*` : i.cliName));
+    const legend = infos.some(i => i.experimental) ? '; * = experimental' : '';
     const answer = await new Promise<string>(res =>
       rl.question(
-        `Agent provider [${PROVIDER_CLI_NAMES.join('/')}] (default ${DEFAULT_PROVIDER_CLI_NAME}): `,
+        `Agent provider [${names.join('/')}] (default ${DEFAULT_PROVIDER_CLI_NAME}${legend}): `,
         res,
       ),
     );
