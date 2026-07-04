@@ -114,9 +114,8 @@ export async function recoverKshetra(
 // the phase machine forbids (the jhl regression), and (b) let a base that went red
 // *after* admission strand an otherwise-in-progress bead. runSilpiViharapalaLoop
 // routes [shreni-health] beads to the repair loop internally, so this single
-// entrypoint resumes both feature and repair work. See
-// the Sthapathi workflow design §4.2 and Shreni-beads-hqu (design: "WIP resumes
-// via the recovery path, bypassing the gate").
+// entrypoint resumes both feature and repair work. See the Sthapathi workflow
+// design §4.2: WIP resumes via the recovery path, bypassing the gate.
 export async function scheduleResume(
   kshetra: KshetraConfig,
   task: Task,

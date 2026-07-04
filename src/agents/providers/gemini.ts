@@ -28,7 +28,7 @@ export const geminiAdapter: ProviderAdapter = {
   buildSpawn(opts: AgentRunnerOpts) {
     const prompt = `${opts.systemPrompt}\n\n=== TASK ===\n${opts.userPrompt}`;
 
-    // Tool restriction (Shreni-beads-g5u). The gemini CLI has no per-tool deny
+    // Tool restriction. The gemini CLI has no per-tool deny
     // list (`--allowed-tools` is deprecated), so the equivalent of
     // opts.disallowedTools is the approval mode:
     //   - read-only agents (Parikshaka passes Write/Edit here) run under

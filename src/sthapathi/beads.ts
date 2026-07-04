@@ -130,7 +130,7 @@ async function doSyncBeads(kshetra: KshetraConfig): Promise<void> {
   await g.commit(`shreni: sync ${new Date().toISOString()}`);
 
   // Beads sync must be resilient: a transient git hiccup must NOT propagate and
-  // abort the caller's cycle (it used to abort pickup — Shreni-beads-9lg). Benign
+  // abort the caller's cycle (it used to abort pickup). Benign
   // conditions ("Already up to date", "no candidate for rebasing") are success;
   // anything else is logged and swallowed — the local sync commit persists and a
   // later cycle reconciles. (See the Sthapathi workflow design §4.7.)

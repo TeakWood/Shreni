@@ -202,7 +202,7 @@ export function isKshetraManuallyPaused(kshetra: KshetraConfig): boolean {
 // reconciled by definition, so clear it. A deliberate user pause (reason:
 // 'manual', via `shreni pause`) is preserved — a restart must not silently
 // un-pause work a human paused on purpose. Returns whether it cleared anything.
-// See Shreni-beads-at8.
+//
 export function clearStuckPauseOnRecover(kshetra: KshetraConfig): boolean {
   const state = loadState();
   const s = state.kshetras[kshetra.id];

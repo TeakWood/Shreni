@@ -10,7 +10,7 @@ export type ResumeResult =
   // normal (api_down/git_failed/bd_failed/manual) pause cleared
   | { status: 'resumed'; id: string }
   // reason:'stuck' pause cleared while its worker is alive — the worker's resume
-  // watcher will abort the hung agent and RECOVER in-process (Shreni-beads-se0)
+  // watcher will abort the hung agent and RECOVER in-process
   | { status: 'resumed_self_heal'; id: string }
   // reason:'stuck' pause cleared but no worker is running to self-heal — the
   // pause is gone, but the bead recovers on the next `shreni start` (startup
@@ -37,9 +37,8 @@ export function resumeKshetraById(id: string): ResumeResult {
   // A reason:'stuck' pause means a live worker's watchdog tripped on a hung
   // agent. Clearing the pause is now MEANINGFUL: the running worker watches for
   // this transition and self-heals in-process — aborts the hung agent, RECOVERs,
-  // and re-arms (Shreni-beads-se0, which supersedes the interim refuse-guard
-  // -x4e). We still clear the pause the same way; the only branch is the message
-  // we hand back, keyed on whether a worker is actually alive to do the heal.
+  // and re-arms. We still clear the pause the same way; the only branch is the
+  // message we hand back, keyed on whether a worker is actually alive to do the heal.
   const wasStuck = loadState().kshetras[id]?.reason === 'stuck';
   resumeKshetra(kshetra);
 

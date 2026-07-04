@@ -144,10 +144,9 @@ export function resolveKshetra(kshetras: KshetraConfig[], cwd: string): KshetraC
 // The resume hint depends on WHY it paused. A reason:'stuck' pause means a live
 // worker is hung on an agent; `shreni resume` now triggers an in-process
 // self-heal — the worker aborts the hung agent, RECOVERs, and re-arms
-// (Shreni-beads-se0) — so plain resume recovers it. If no worker is running the
+// — so plain resume recovers it. If no worker is running the
 // resume command itself redirects to `shreni start`. All other pause reasons
-// (api_down/git_failed/bd_failed/manual) also clear with plain resume. See
-// Shreni-beads-uv7 (interim stop/start hint) → superseded by -se0.
+// (api_down/git_failed/bd_failed/manual) also clear with plain resume.
 export function resumeHint(reason: string | undefined, kshetraId: string): string {
   if (reason === 'stuck') {
     return `Requires manual resume: shreni resume --kshetra ${kshetraId} (worker self-heals the hung agent)`;

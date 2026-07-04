@@ -14,7 +14,7 @@ export interface AgentRunnerOpts {
   // analysis agent). Hard-enforced by adapters with a deny list (claude); other
   // adapters fall back to the prompt-level boundary.
   disallowedTools?: string[];
-  // Cancellation handle for in-process self-heal (Shreni-beads-se0). When the
+  // Cancellation handle for in-process self-heal. When the
   // worker aborts a hung run, the dispatcher SIGKILLs the provider subprocess and
   // rejects with AgentAbortedError; the retry loop also stops honoring transient
   // backoff. Absent for normal runs, which never cancel.

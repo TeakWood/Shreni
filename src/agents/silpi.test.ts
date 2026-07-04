@@ -157,7 +157,7 @@ describe('runSilpi', () => {
 
   // Native execution loads the repo CLAUDE.md, whose SHRENI INTEGRATION block is
   // interactive-only. Silpi's injected prompt must override it so Silpi still
-  // implements (Shreni-beads-9q3.2).
+  // implements.
   it('overrides the repo interactive-only "do not implement" rule', async () => {
     await runSilpi(CONTEXT, 1);
     const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };

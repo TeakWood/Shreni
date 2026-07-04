@@ -74,7 +74,7 @@ describe('evaluateStuck', () => {
 
   it('does NOT trip when idle by design (empty queue) despite a stale heartbeat', () => {
     // Same stale-heartbeat SELECTING input trips without idleNoWork, but an empty
-    // ready queue means "nothing to do", not "hung" (Shreni-beads-vwa).
+    // ready queue means "nothing to do", not "hung".
     const stale = { ...base, phase: 'SELECTING' as const, heartbeatAgeMs: STUCK_THRESHOLD_MS * 2 };
     expect(evaluateStuck(stale).stuck).toBe(true);
     expect(evaluateStuck({ ...stale, idleNoWork: true }).stuck).toBe(false);
@@ -168,7 +168,7 @@ describe('runWatchdogOnce', () => {
     expect(mockNotifyOperator).not.toHaveBeenCalled();
   });
 
-  it('does NOT escalate an idle empty-queue Kshetra even with a stale heartbeat (Shreni-beads-vwa)', async () => {
+  it('does NOT escalate an idle empty-queue Kshetra even with a stale heartbeat', async () => {
     // Worker idle in SELECTING, heartbeat long stale, but the ready queue is empty.
     mockStatSync.mockReturnValue({ mtimeMs: 0 });
     const now = STUCK_THRESHOLD_MS + 60_000;

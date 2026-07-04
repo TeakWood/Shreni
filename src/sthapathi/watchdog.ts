@@ -6,7 +6,7 @@ import { heartbeatPath, logPath } from './activity-log.js';
 import { notifyOperator } from './errors.js';
 
 // Defaults per the Sthapathi workflow design §4.4 / D1. Made configurable
-// per-Kshetra later (Shreni-beads-bjo).
+// per-Kshetra later.
 export const STUCK_THRESHOLD_MS = 20 * 60 * 1000; // 20m of no liveness while busy
 export const MAX_OUTCOME_REPEAT = 5; // same non-advancing outcome this many times
 
@@ -21,7 +21,7 @@ export interface StuckInput {
   lastOutcome?: string;
   // The worker has nothing to do: the ready queue is empty AND no task is in
   // flight (see runWatchdogOnce). Inactivity here is idle-by-design, not a hang —
-  // a stale heartbeat while merely idle must never trip (Shreni-beads-vwa).
+  // a stale heartbeat while merely idle must never trip.
   idleNoWork?: boolean;
   thresholds?: { stuckMs?: number; maxRepeat?: number };
 }
@@ -86,7 +86,7 @@ export function evaluateStuck(input: StuckInput): StuckVerdict {
 
   // Idle by design: an empty ready queue with nothing in flight. "No activity"
   // here means "nothing to do", not "hung" — never trip, so the watchdog never
-  // escalates an idle worker to Phalaka (Shreni-beads-vwa). A genuine
+  // escalates an idle worker to Phalaka. A genuine
   // hang while WORKING/PREPARING, or a repeat-stall with ready work waiting, is
   // not idle (idleNoWork is false there) and still trips below.
   if (input.idleNoWork) return { stuck: false };

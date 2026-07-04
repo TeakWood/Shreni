@@ -25,7 +25,7 @@ export class BeadsReadError extends Error {
   }
 }
 
-// Bead ids are like `Shreni-beads-9g3` or `Shreni-beads-9sk.6`. Validate before
+// Bead ids are like `myapp-beads-9g3` or `myapp-beads-9sk.6`. Validate before
 // passing to `bd show` so a path/arg-injection attempt can't reach the subprocess.
 const BEAD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 

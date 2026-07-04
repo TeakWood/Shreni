@@ -66,7 +66,7 @@ async function runTaskSafely(
 
 // The single in-flight run's cancellation handle + a promise that resolves once
 // it has fully unwound, plus a gate the self-heal holds while RECOVER runs so no
-// poll cycle mutates the work tree underneath it (Shreni-beads-se0).
+// poll cycle mutates the work tree underneath it.
 let activeRun: ActiveRun | undefined;
 let healing = false;
 
@@ -75,7 +75,7 @@ const hooks = {
     // While a self-heal is in flight, no cycle may proceed to PREPARE (which
     // checks out main / mutates the tree) and race recoverKshetra. selectNext is
     // read-only and runs first in the cycle, so returning null here idles the
-    // cycle before any mutation. See Shreni-beads-se0.
+    // cycle before any mutation.
     if (healing) return null;
     if (isKshetraManuallyPaused(k)) return null;
     return selectNext(k);
@@ -124,7 +124,7 @@ async function startup(): Promise<void> {
   const resumable = await recoverKshetra(kshetra!);
   // RECOVER has just reconciled the drift a stuck pause escalated over, so a
   // leftover auto-escalated stuck pause is now stale — clear it, or the fresh
-  // worker comes up paused and idle, flying the old banner (Shreni-beads-at8).
+  // worker comes up paused and idle, flying the old banner.
   // A deliberate user pause is left intact.
   if (clearStuckPauseOnRecover(kshetra!)) {
     console.log(`[shreni worker:${kshetraId}] cleared stale stuck pause after recovery`);
@@ -156,7 +156,7 @@ const WATCHDOG_INTERVAL_MS = 60 * 1000;
 const watchdogTimer = setInterval(() => {
   // hasReadyWork: probe the RAW ready queue (pickup's selectNext, not the
   // pause-gated hook) so the watchdog can tell "idle, nothing to do" from "hung"
-  // and never escalate an empty-queue Kshetra to Phalaka (Shreni-beads-vwa).
+  // and never escalate an empty-queue Kshetra to Phalaka.
   runWatchdogOnce(kshetra!, () => scheduler.getPhase(kshetra!.id), Date.now(), {
     hasReadyWork: async () => (await selectNext(kshetra!)) !== null,
   }).catch((err: unknown) => console.error(`[shreni worker:${kshetraId}] watchdog failed:`, err));
@@ -172,7 +172,7 @@ const heartbeatTimer = setInterval(() => {
   if (scheduler.getPhase(kshetra!.id) !== 'IDLE') touchHeartbeat(kshetra!.id);
 }, HEARTBEAT_INTERVAL_MS);
 
-// Resume watcher (Shreni-beads-se0): `shreni resume` runs in a SEPARATE process
+// Resume watcher: `shreni resume` runs in a SEPARATE process
 // and can only flip state.json — it cannot reach into this worker to cancel the
 // hung agent. So we poll for the stuck-paused -> resumed transition and, when we
 // see it with a run still in flight, self-heal in-process: abort the hung agent,

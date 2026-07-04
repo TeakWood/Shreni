@@ -60,7 +60,7 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
     } catch (err) {
       lastErr = err as Error;
       // A self-heal abort is terminal — never retry it (the run is being
-      // cancelled on purpose so the worker can RECOVER). See Shreni-beads-se0.
+      // cancelled on purpose so the worker can RECOVER).
       if (lastErr instanceof AgentAbortedError || opts.signal?.aborted) throw lastErr;
       const msg = lastErr.message;
       if (looksTransient(msg) && attempt < MAX_ATTEMPTS) {
@@ -110,7 +110,7 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
 
     const parser = adapter.createParser(opts, adapterEmit);
 
-    // Cancellation for self-heal (Shreni-beads-se0): SIGKILL the hung provider
+    // Cancellation for self-heal: SIGKILL the hung provider
     // subprocess the instant the signal aborts, and reject so the loop unwinds.
     // SIGKILL (not TERM) because the hang is, by definition, unresponsive; the
     // work tree is reconciled by recoverKshetra afterward, so nothing is lost to

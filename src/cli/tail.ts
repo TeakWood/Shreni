@@ -174,7 +174,7 @@ export function runTail(opts: TailOpts): void {
   // Best-effort ready-queue snapshot: an idle worker with an empty queue produces
   // no activity, so tailing an empty log looks the same as a hang. Surface the
   // real reason — "no tasks in queue" — so idleness reads as idle, not stuck
-  // (Shreni-beads-vwa). Skipped while a bead is in flight (its activity streams
+  //. Skipped while a bead is in flight (its activity streams
   // below anyway). Fire-and-forget so streaming starts immediately.
   void reportQueueState(targets);
 

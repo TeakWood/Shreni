@@ -319,7 +319,7 @@ describe('runSilpiViharapalaLoop', () => {
     expect(result.note).toContain('tests');
   });
 
-  // ── off-branch guardrail (Shreni-beads-ybf) ──────────────────────────────
+  // ── off-branch guardrail ──────────────────────────────
 
   it('aborts before review when the agent leaves the bead branch', async () => {
     mockAssertOnBranch.mockRejectedValue(
@@ -422,7 +422,7 @@ describe('runSilpiViharapalaLoop', () => {
     expect(mockRunSilpi).toHaveBeenCalledOnce();
   });
 
-  // ── baseline-aware test gate (Shreni-beads-qra) ─────────────────────────────
+  // ── baseline-aware test gate ─────────────────────────────
 
   it('merges a clean diff when failCount is within the health baseline', async () => {
     // Live repro (myapp-le3y): a clean migration with N pre-existing unrelated
@@ -450,7 +450,7 @@ describe('runSilpiViharapalaLoop', () => {
     expect(mockBdFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining("own tests/lint kept failing"));
   });
 
-  // ── self-heal abort (Shreni-beads-se0) ──────────────────────────────────────
+  // ── self-heal abort ──────────────────────────────────────
 
   it('throws AgentAbortedError and dispatches no agent when the signal is pre-aborted', async () => {
     const controller = new AbortController();

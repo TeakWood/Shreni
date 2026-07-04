@@ -5,7 +5,7 @@ import { touchHeartbeat as defaultTouchHeartbeat } from './activity-log.js';
 import { recoverKshetra as defaultRecover } from './recover.js';
 
 // A handle to the worker's single in-flight run, so a cross-process resume can
-// cancel it and drive an in-process RECOVER (Shreni-beads-se0). `done` resolves
+// cancel it and drive an in-process RECOVER. `done` resolves
 // when the run has fully unwound (the scheduler's WORK cycle has returned and
 // set phase back to IDLE), which self-heal must await BEFORE reconciling git.
 export interface ActiveRun {
@@ -44,7 +44,7 @@ export interface SelfHealDeps {
 }
 
 // In-process recovery of a hung (reason:'stuck') worker after `shreni resume`
-// cleared its pause. Ordering is load-bearing (Shreni-beads-se0):
+// cleared its pause. Ordering is load-bearing:
 //   1. refresh liveness FIRST (heartbeat file mtime + clear the stall counters)
 //      so the watchdog can't re-trip mid-heal;
 //   2. abort the hung provider subprocess (SIGKILL via the run's signal);

@@ -46,7 +46,7 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
   // Kshetra is an immediate no-op. Crucially, SELECT (read-only) is separated
   // from PREPARE (the only work-tree mutation), so polling for work can never
   // check out main under an in-flight agent — the cause of the off-branch aborts
-  // (Shreni-beads-jhl). See the Sthapathi workflow design §4.1–4.2.
+  //. See the Sthapathi workflow design §4.1–4.2.
   async function runCycle(kshetra: KshetraConfig, hooks: SchedulerHooks): Promise<void> {
     if (getPhase(kshetra.id) !== 'IDLE') return;
     setPhase(kshetra.id, 'SELECTING');

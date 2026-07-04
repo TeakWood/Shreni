@@ -48,8 +48,8 @@ describe('branchName', () => {
   });
 
   it('preserves dots and dashes in the id segment', () => {
-    const t: Task = { ...TASK, id: 'Shreni-beads-lwk.3', slug: 'git-branch-creation' };
-    expect(branchName(t)).toBe('bead-Shreni-beads-lwk.3/git-branch-creation');
+    const t: Task = { ...TASK, id: 'myapp-beads-lwk.3', slug: 'git-branch-creation' };
+    expect(branchName(t)).toBe('bead-myapp-beads-lwk.3/git-branch-creation');
   });
 });
 

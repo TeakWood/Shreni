@@ -1,8 +1,8 @@
 /**
- * Integration test (Shreni-beads-jst): a WIP bead resumed after a worker restart
+ * Integration test: a WIP bead resumed after a worker restart
  * re-enters the real Silpi↔Viharapala loop WITHOUT running the pickup health gate.
  *
- * This is the end-to-end proof of the Shreni-beads-hqu design guarantee —
+ * This is the end-to-end proof of the design guarantee —
  * "WIP resumes via the recovery path, bypassing the gate" — which was previously
  * correct only by construction. We drive scheduleResume() with the REAL
  * runSilpiViharapalaLoop (only the agents / git / beads boundaries are mocked) and

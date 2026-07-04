@@ -14,7 +14,7 @@ export class ParseError extends Error {
 }
 
 // Thrown when an in-flight agent run is deliberately aborted for self-heal
-// (Shreni-beads-se0): `shreni resume` on a hung (reason:'stuck') worker cancels
+//: `shreni resume` on a hung (reason:'stuck') worker cancels
 // the wedged provider subprocess so the worker can RECOVER in-process. This is a
 // SANCTIONED cancellation, not a failure — handleCycleError/classifyError must
 // never see it (it would flag the bead and clean the branch out from under the

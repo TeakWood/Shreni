@@ -184,7 +184,7 @@ describe('runViharapala', () => {
     });
 
     // Native execution loads the interactive-only repo CLAUDE.md; Viharapala's
-    // injected prompt must override it so it still reviews (Shreni-beads-9q3.2).
+    // injected prompt must override it so it still reviews.
     it('overrides the repo interactive-only rule so Viharapala still reviews', async () => {
       await runViharapala(CONTEXT, SILPI_OUTPUT, 1, '');
       const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };

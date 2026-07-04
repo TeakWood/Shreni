@@ -92,8 +92,8 @@ beforeEach(() => {
 
 describe('isValidBeadId', () => {
   it('accepts normal and dotted bead ids', () => {
-    expect(isValidBeadId('Shreni-beads-9g3')).toBe(true);
-    expect(isValidBeadId('Shreni-beads-9sk.6')).toBe(true);
+    expect(isValidBeadId('myapp-beads-9g3')).toBe(true);
+    expect(isValidBeadId('myapp-beads-9sk.6')).toBe(true);
     expect(isValidBeadId('proj-1')).toBe(true);
   });
 

@@ -169,7 +169,7 @@ describe('bd() wrapper', () => {
   });
 });
 
-describe('syncBeads resilience (Shreni-beads-9lg)', () => {
+describe('syncBeads resilience', () => {
   // Drive git subcommands (add/commit/pull/push) independently.
   function gitMock(handlers: Record<string, { err?: string; stdout?: string }>) {
     execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: Function) => {

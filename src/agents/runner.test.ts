@@ -31,7 +31,7 @@ const OPTS = (signal?: AbortSignal): AgentRunnerOpts => ({
   signal,
 });
 
-describe('runAgent abort wiring (Shreni-beads-se0)', () => {
+describe('runAgent abort wiring', () => {
   it('rejects with AgentAbortedError without spawning when the signal is already aborted', async () => {
     mockGetAdapter.mockReturnValue(sleepAdapter(30));
     const controller = new AbortController();

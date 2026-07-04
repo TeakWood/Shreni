@@ -117,7 +117,7 @@ describe('buildParikshakaSystemPrompt', () => {
 
   // Native execution loads the interactive-only repo CLAUDE.md. Parikshaka's
   // carve-out establishes it should run its analysis, but — unlike Silpi/
-  // Viharapala — it keeps the read-only boundary ABSOLUTE (Shreni-beads-9q3.2).
+  // Viharapala — it keeps the read-only boundary ABSOLUTE.
   it('carves out the interactive-only rule while keeping read-only absolute', async () => {
     await runParikshaka(makeCtx());
     const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };

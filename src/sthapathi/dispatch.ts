@@ -19,7 +19,7 @@ import { captureGuard, assertOnBranch, recoverOffBranch, OffBranchError, type Br
 
 // Bail out of a round loop the instant a self-heal abort is requested, so the
 // worker's RECOVER isn't racing a fresh round starting between agent calls
-// (Shreni-beads-se0). Throwing AgentAbortedError unwinds cleanly through
+//. Throwing AgentAbortedError unwinds cleanly through
 // runTaskSafely, which swallows it (no cycle-error handling).
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new AgentAbortedError();

@@ -34,7 +34,7 @@ export const codexAdapter: ProviderAdapter = {
   buildSpawn(opts: AgentRunnerOpts) {
     const prompt = `${opts.systemPrompt}\n\n=== TASK ===\n${opts.userPrompt}`;
 
-    // Tool restriction (Shreni-beads-8hz). codex has no per-tool deny list, so
+    // Tool restriction. codex has no per-tool deny list, so
     // the equivalent of opts.disallowedTools is the sandbox mode:
     //   - read-only agents (Parikshaka passes Write/Edit here) run under
     //     `--sandbox read-only`, which blocks file writes/edits and command side
