@@ -329,3 +329,21 @@ Verify hooks are present in `~/.claude/settings.json`:
   }
 }
 ```
+
+## License & Trademark
+
+Shreni's source code is licensed under the [Apache License 2.0](LICENSE) — free to
+use, modify, and redistribute, including commercially.
+
+**Shreni™** and **TeakWood™** are trademarks of TeakWood. An open-source license
+covers the *code*, not the *name* (Apache-2.0 §6 grants no trademark rights). See
+[TRADEMARK.md](TRADEMARK.md) for how you may use the names and logos — short
+version: use the software freely; just don't name your fork "Shreni" or imply our
+endorsement.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (contributions
+are under the Developer Certificate of Origin) and our
+[Code of Conduct](CODE_OF_CONDUCT.md). To report a security issue, see
+[SECURITY.md](SECURITY.md).
