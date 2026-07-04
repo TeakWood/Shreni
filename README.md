@@ -4,6 +4,15 @@ Automated coding agent harness for your services.
 
 Shreni orchestrates specialised AI agents to pick up structured tasks, write and review code, run tests, and merge approved changes — all without human intervention in the inner loop. You discuss a feature, file a task, and come back to find working code merged into `main`.
 
+> **Does Shreni push to `main` without me reviewing? Yes — by design.** When the
+> review agent (Viharapala) approves a change, Sthapathi **squash-merges it
+> straight to `main` and pushes** — there is no human pull-request gate in the
+> inner loop. You steer by *outcome* — the automated review loop, the green-base
+> health gate, and the merged result — not by approving every diff. Every task
+> still passes the Silpi ↔ Viharapala AI review before it can merge. If you want a
+> human gate, an optional **PR mode** (open a pull request on approval instead of
+> merging) is planned for cautious and team setups.
+
 ## Architecture
 
 Shreni has five named components:
