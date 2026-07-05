@@ -35,7 +35,7 @@ import { randomUUID } from 'crypto';
 export const TELEMETRY_ENDPOINT: string | null =
   'https://azahkqnhhdsfbmhngkul.supabase.co/functions/v1/anonymous-usage-telemetry';
 
-// Shown when a user runs `shreni telemetry enable`. FOUNDER: finalize this copy.
+// Shown when a user runs `shreni telemetry enable`.
 export const CONSENT_NOTICE = [
   'Shreni telemetry is OPT-IN and anonymous.',
   '',
