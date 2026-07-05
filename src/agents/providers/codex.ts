@@ -1,5 +1,19 @@
-import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser } from './types.js';
+import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser, TokenUsage } from './types.js';
 import { extractLastJsonObject, resolveBin, toolDetail } from './types.js';
+
+// The `turn.completed` event's usage block. codex reports cached input as a
+// single `cached_input_tokens` (a read-side cache); there is no creation counter.
+function parseCodexUsage(usage: unknown): TokenUsage | undefined {
+  if (!usage || typeof usage !== 'object') return undefined;
+  const u = usage as Record<string, unknown>;
+  const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  return {
+    inputTokens: n(u['input_tokens']),
+    outputTokens: n(u['output_tokens']),
+    cacheReadTokens: n(u['cached_input_tokens']),
+    cacheCreationTokens: 0,
+  };
+}
 
 // OpenAI — the `codex` CLI in non-interactive exec mode.
 //   codex exec --json --dangerously-bypass-approvals-and-sandbox \
@@ -63,6 +77,7 @@ export const codexAdapter: ProviderAdapter = {
     let lastAssistantText: string | null = null;
     let toolCallCount = 0;
     let errorMessage: string | null = null;
+    let usage: TokenUsage | undefined;
 
     return {
       onLine(line: string): void {
@@ -74,6 +89,11 @@ export const codexAdapter: ProviderAdapter = {
         }
 
         const type = String(ev['type'] ?? '');
+
+        if (type === 'turn.completed') {
+          usage = parseCodexUsage(ev['usage']);
+          return;
+        }
 
         if (type === 'error') {
           errorMessage = String(ev['message'] ?? 'unknown error');
@@ -125,6 +145,7 @@ export const codexAdapter: ProviderAdapter = {
           structuredOutput,
           resultText: lastAssistantText,
           toolCallCount,
+          usage,
         };
       },
     };

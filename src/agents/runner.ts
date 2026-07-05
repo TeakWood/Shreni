@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
-import { emit, touchHeartbeat } from '../sthapathi/activity-log.js';
+import { emit, touchHeartbeat, getCurrentRunId } from '../sthapathi/activity-log.js';
 import { AgentAbortedError } from '../sthapathi/errors.js';
+import { getUsageMeter } from '../ext/index.js';
 import { getAdapter } from './providers/index.js';
 import type { AgentRunnerOpts, AgentRunResult, AdapterEmit } from './providers/types.js';
 
@@ -56,7 +57,9 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      return await runAttempt(opts);
+      const result = await runAttempt(opts);
+      reportUsage(opts, result);
+      return result;
     } catch (err) {
       lastErr = err as Error;
       // A self-heal abort is terminal — never retry it (the run is being
@@ -86,6 +89,32 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
 
 // Back-compat alias — earlier code/tests referred to runClaudeAgent.
 export const runClaudeAgent = runAgent;
+
+// Hand a finalized run's token usage to the UsageMeter, keyed to the same
+// attempt the activity stream is tagged with (kshetra/beadId/runId/agent). The
+// default meter is a no-op, so this is inert locally; an extension may record it.
+// Token fields are 0 when the provider surfaced no usage (e.g. gemini today).
+// Never let metering crash a completed run.
+function reportUsage(opts: AgentRunnerOpts, result: AgentRunResult): void {
+  try {
+    const u = result.usage;
+    getUsageMeter().record({
+      kshetra: opts.kshetraId,
+      beadId: opts.beadId,
+      runId: getCurrentRunId(opts.kshetraId),
+      agent: opts.agentName,
+      provider: opts.provider,
+      model: opts.model,
+      inputTokens: u?.inputTokens ?? 0,
+      outputTokens: u?.outputTokens ?? 0,
+      cacheReadTokens: u?.cacheReadTokens ?? 0,
+      cacheCreationTokens: u?.cacheCreationTokens ?? 0,
+      toolCallCount: result.toolCallCount,
+    });
+  } catch {
+    // A metering failure must never fail an otherwise-successful agent run.
+  }
+}
 
 function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
   return new Promise((resolve, reject) => {

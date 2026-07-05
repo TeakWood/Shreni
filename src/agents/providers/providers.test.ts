@@ -157,6 +157,25 @@ describe('claudeAdapter parser', () => {
     const parser = claudeAdapter.createParser(BASE_OPTS, emit);
     expect(() => parser.finalize(1, 'stderr tail')).toThrow('without a result message');
   });
+
+  it('surfaces token usage from the result message', () => {
+    const { emit } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(JSON.stringify({
+      type: 'result', is_error: false, result: 'done', structured_output: { ok: true },
+      usage: { input_tokens: 120, output_tokens: 45, cache_read_input_tokens: 30, cache_creation_input_tokens: 10 },
+    }));
+    expect(parser.finalize(0, '').usage).toEqual({
+      inputTokens: 120, outputTokens: 45, cacheReadTokens: 30, cacheCreationTokens: 10,
+    });
+  });
+
+  it('leaves usage undefined when the result message carries none', () => {
+    const { emit } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(JSON.stringify({ type: 'result', is_error: false, result: 'done', structured_output: { ok: true } }));
+    expect(parser.finalize(0, '').usage).toBeUndefined();
+  });
 });
 
 // ── gemini adapter ─────────────────────────────────────────────────────────────
@@ -250,6 +269,16 @@ describe('codexAdapter', () => {
     const res = parser.finalize(0, '');
     expect(res.structuredOutput).toEqual({ ok: true });
     expect(texts.length).toBeGreaterThan(0);
+  });
+
+  it('surfaces token usage from turn.completed (cached input maps to cache-read)', () => {
+    const { emit } = recordingEmit();
+    const parser = codexAdapter.createParser({ ...BASE_OPTS, provider: 'openai' }, emit);
+    parser.onLine(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '{"ok":true}' } }));
+    parser.onLine(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 200, output_tokens: 60, cached_input_tokens: 50 } }));
+    expect(parser.finalize(0, '').usage).toEqual({
+      inputTokens: 200, outputTokens: 60, cacheReadTokens: 50, cacheCreationTokens: 0,
+    });
   });
 
   it('counts command_execution events once (on item.started)', () => {

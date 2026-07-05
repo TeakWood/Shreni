@@ -80,6 +80,11 @@ export const geminiAdapter: ProviderAdapter = {
         }
 
         _emit.text('[gemini run complete]');
+        // Token usage is best-effort only (epg.3): gemini's `-o json` wrapper
+        // carries a `stats` object, but its per-model token shape isn't pinned
+        // down here (the richer `-o stream-json` is a future enhancement), so we
+        // surface no usage rather than fabricate counts. The UsageMeter simply
+        // records zeros for a gemini run.
         return {
           structuredOutput,
           resultText: typeof responseText === 'string' ? responseText : null,

@@ -21,10 +21,21 @@ export interface AgentRunnerOpts {
   signal?: AbortSignal;
 }
 
+// Per-run token accounting recovered from a provider's output stream (the
+// stream JSON already carries it — it was parsed and discarded before this seam).
+// Absent when the provider surfaced no usage (e.g. gemini's json mode today).
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
 export interface AgentRunResult {
   structuredOutput: unknown;
   resultText: string | null;
   toolCallCount: number;
+  usage?: TokenUsage;
 }
 
 // How a provider's CLI should be spawned. cwd/stdio are handled by the dispatcher.

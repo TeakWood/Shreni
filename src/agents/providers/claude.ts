@@ -1,5 +1,19 @@
-import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser } from './types.js';
+import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser, TokenUsage } from './types.js';
 import { resolveBin, toolDetail } from './types.js';
+
+// The `result` message's usage block. Anthropic reports cache tokens as separate
+// creation/read counters; input_tokens excludes the cached reads.
+function parseClaudeUsage(usage: unknown): TokenUsage | undefined {
+  if (!usage || typeof usage !== 'object') return undefined;
+  const u = usage as Record<string, unknown>;
+  const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  return {
+    inputTokens: n(u['input_tokens']),
+    outputTokens: n(u['output_tokens']),
+    cacheReadTokens: n(u['cache_read_input_tokens']),
+    cacheCreationTokens: n(u['cache_creation_input_tokens']),
+  };
+}
 
 // Anthropic — the `claude` CLI in print mode with stream-json output. This is
 // the reference adapter: validated against `claude --help`.
@@ -47,7 +61,7 @@ export const claudeAdapter: ProviderAdapter = {
   },
 
   createParser(opts: AgentRunnerOpts, emit: AdapterEmit): StreamParser {
-    let resultMsg: { result: string | null; structured_output: unknown; is_error: boolean } | null = null;
+    let resultMsg: { result: string | null; structured_output: unknown; is_error: boolean; usage?: TokenUsage } | null = null;
     let toolCallCount = 0;
 
     return {
@@ -81,6 +95,7 @@ export const claudeAdapter: ProviderAdapter = {
             result: (msg['result'] as string | null) ?? null,
             structured_output: msg['structured_output'] ?? null,
             is_error: (msg['is_error'] as boolean) ?? false,
+            usage: parseClaudeUsage(msg['usage']),
           };
         }
       },
@@ -94,6 +109,7 @@ export const claudeAdapter: ProviderAdapter = {
             structuredOutput: resultMsg.structured_output,
             resultText: resultMsg.result,
             toolCallCount,
+            usage: resultMsg.usage,
           };
         }
         throw new Error(

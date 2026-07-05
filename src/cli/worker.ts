@@ -11,6 +11,7 @@ import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '..
 import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
 import { reconcilePullRequests } from '../sthapathi/merge';
+import { loadExtension } from '../ext/loader';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -134,6 +135,11 @@ async function reconcile(): Promise<void> {
 // machine) from racing a poll tick that would check out main under it. See
 // recover.ts / the Sthapathi workflow design §4.2–4.3.
 async function startup(): Promise<void> {
+  // Load the optional extension FIRST, before any events are emitted or the poll
+  // loop arms, so a registered extension's sinks/meter are in place from the very
+  // first event. Fail-open: a missing/throwing extension degrades to the local
+  // defaults with one log line (extension-points.md §"Loading an extension").
+  await loadExtension({ log: msg => console.log(`[shreni worker:${kshetraId}] ${msg}`) });
   await sync();
   const resumable = await recoverKshetra(kshetra!);
   // RECOVER has just reconciled the drift a stuck pause escalated over, so a
