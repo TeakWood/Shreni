@@ -22,7 +22,7 @@ class Shreni < Formula
   desc "Local-first, bring-your-own-model agent harness for reviewed, merged code"
   homepage "https://github.com/TeakWood/Shreni"
   url "https://registry.npmjs.org/shreni/-/shreni-0.1.0.tgz"
-  sha256 "REPLACE_WITH_TARBALL_SHA256_AFTER_NPM_PUBLISH"
+  sha256 "f2fe58602af8cdc7e751d699dca1c042773cff9626fad539f624b516da3fc75d"
   license "Apache-2.0"
 
   depends_on "node"
