@@ -1,6 +1,6 @@
 {
   "name": "shreni",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Local-first, bring-your-own-model agent harness that turns a backlog into reviewed, merged code",
   "main": "dist/index.js",
   "bin": {
