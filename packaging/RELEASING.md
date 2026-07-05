@@ -44,7 +44,7 @@ After this, the user install path is simply:
 
 ```bash
 npm install -g shreni      # (or the scoped name)
-shreni --version
+shreni                     # no args prints the usage banner (there is no --version flag)
 ```
 
 ## Homebrew
