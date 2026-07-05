@@ -8,6 +8,7 @@ import { toSlug } from './pickup.js';
 import { pauseKshetra, clearBeadAttempts } from '../kshetra/state.js';
 import { notifyOperator } from './errors.js';
 import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
+import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 
 // Label marking a bead whose approved work is on a PR awaiting a human merge
 // (mergePolicy 'pr'). The bead stays open + in_progress so bd dependents stay
@@ -180,6 +181,9 @@ export async function squashMergeAndClose(
     `files=${output.filesChanged.length} — ${output.summary.slice(0, 120)}`;
   await bd(kshetra).close(task.id, note);
 
+  // Activation signal (yds.5) — opt-in + anonymous, a no-op unless enabled.
+  emitTelemetry('task_merged', { policy: 'push' });
+
   // The bead succeeded — clear any recovery attempt count it accumulated.
   clearBeadAttempts(kshetra, task.id);
 
@@ -283,6 +287,7 @@ export async function reconcilePullRequests(kshetra: KshetraConfig): Promise<voi
 
     if (pr.state === 'MERGED') {
       await bdClient.close(bead.id, `Merged via PR: ${pr.url}`);
+      emitTelemetry('task_merged', { policy: 'pr' });
       clearBeadAttempts(kshetra, bead.id);
       // Drop the merged branch locally and (best-effort) on the remote — GitHub
       // may already have auto-deleted the head branch, so ignore failures.

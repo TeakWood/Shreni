@@ -343,6 +343,26 @@ shreni phalaka status    # server URL
 
 Once started, the dashboard is served on loopback (`127.0.0.1`) — open the printed URL in your browser to watch worker status, task progress, and stuck-state alerts across all Kshetras.
 
+## Telemetry (opt-in, anonymous)
+
+Shreni collects **no telemetry by default**. If you opt in, it sends a small,
+anonymous signal that helps us understand activation (did a clone reach a first
+merged task?) and retention — nothing else.
+
+```bash
+shreni telemetry status     # show the current setting
+shreni telemetry enable     # opt in (prints exactly what is sent)
+shreni telemetry disable    # opt back out any time
+```
+
+When enabled, an event carries only: a random anonymous id, the event name
+(`session_start`, `kshetra_init`, `task_merged`), the Shreni version, and your OS
+platform. It **never** sends your code, file paths, repo names, task contents, or
+any personal identifier. Set `DO_NOT_TRACK=1` (or `SHRENI_TELEMETRY=0`) to hard-
+disable it regardless of config; `SHRENI_TELEMETRY=1` opts in for one run. Until a
+collector endpoint is configured, opted-in events are written to a local file
+(`~/.shreni/telemetry-local.jsonl`) and never leave your machine.
+
 ## Troubleshooting
 
 ### Harness won't start — `registry.json` missing

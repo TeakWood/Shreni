@@ -17,6 +17,7 @@ import {
   PROVIDER_REGISTRY,
 } from '../agents/providers/registry';
 import { checkProviderInstalled, promptProvider, commandExists } from './provider-preflight';
+import { emit as emitTelemetry } from '../telemetry/telemetry';
 
 const execAsync = promisify(execFile);
 
@@ -563,6 +564,10 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   ];
 
   await runInitPhases(phases, reRunCmd);
+
+  // Activation-funnel signal (yds.5) — opt-in + anonymous, a no-op unless
+  // enabled. Only the provider name (not the slug/paths/remote) is sent.
+  emitTelemetry('kshetra_init', { provider: agents.provider });
 
   console.log(`\n✓ Kshetra "${opts.slug}" initialised.`);
   console.log(`  provider:   ${providerLabel}`);

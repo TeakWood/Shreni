@@ -16,6 +16,8 @@ import { runList } from './list';
 import { startPhalaka, stopPhalaka, statusPhalaka } from './phalaka';
 import { autoStartPhalaka, autoStopPhalaka } from './phalaka-autostart';
 import { runTail } from './tail';
+import { runTelemetry } from './telemetry';
+import { emit as emitTelemetry } from '../telemetry/telemetry';
 
 function parseFlag(argv: string[], flag: string): string | undefined {
   const idx = argv.indexOf(flag);
@@ -44,6 +46,8 @@ switch (command) {
           console.log(`${k.id}: started (pid ${result.pid})`);
         }
       }
+      // Retention signal (yds.5) — opt-in + anonymous, a no-op unless enabled.
+      emitTelemetry('session_start', { kshetras: targets.length });
       const dashboard = autoStartPhalaka(args);
       if (dashboard.status === 'already_running') {
         console.log(`phalaka: already running (pid ${dashboard.pid})`);
@@ -201,6 +205,11 @@ switch (command) {
     break;
   }
 
+  case 'telemetry': {
+    runTelemetry(args[0]);
+    break;
+  }
+
   case 'register': {
     const kshetraPath = args[0];
     if (!kshetraPath) {
@@ -310,5 +319,6 @@ switch (command) {
     console.error(`Unknown command: ${command ?? '(none)'}`);
     console.error('Usage: shreni <start|stop> [--kshetra <id>]');
     console.error('       shreni <status|agents|logs|pause|resume|run|sync|init-kshetra|register|migrate|verify-hooks|phalaka|tail>');
+    console.error('       shreni telemetry <status|enable|disable>');
     process.exit(1);
 }
