@@ -24,6 +24,7 @@ import { runList } from './list';
 import { startPhalaka, stopPhalaka, statusPhalaka } from './phalaka';
 import { autoStartPhalaka, autoStopPhalaka } from './phalaka-autostart';
 import { runTail } from './tail';
+import { runInit } from './init';
 import { runTelemetry } from './telemetry';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
 
@@ -170,6 +171,28 @@ export const COMMANDS: Command[] = [
     usage: '[--kshetra <id>] [--all]',
     run(ctx) {
       return runSync({ kshetraId: ctx.flag('--kshetra'), all: ctx.has('--all') });
+    },
+  },
+  {
+    name: 'init',
+    summary: 'Onboard a repo in one step (prompts for slug/path, then scaffolds the kshetra)',
+    usage: '[--slug <id>] [--path <repo-path>] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--dry-run]',
+    run(ctx) {
+      const mergePolicy = ctx.flag('--merge-policy');
+      if (mergePolicy && mergePolicy !== 'push' && mergePolicy !== 'pr') {
+        throw new Error(`Invalid --merge-policy "${mergePolicy}": expected "push" or "pr".`);
+      }
+      return runInit({
+        slug: ctx.flag('--slug'),
+        path: ctx.flag('--path'),
+        org: ctx.flag('--org'),
+        language: ctx.flag('--language'),
+        beadsPath: ctx.flag('--beads-path'),
+        provider: ctx.flag('--provider'),
+        model: ctx.flag('--model'),
+        mergePolicy: (mergePolicy as 'push' | 'pr' | undefined) ?? undefined,
+        dryRun: ctx.has('--dry-run'),
+      });
     },
   },
   {

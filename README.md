@@ -86,16 +86,20 @@ cd /projects/shreni
 pnpm install
 pnpm build
 npm install -g .          # installs the `shreni` CLI globally
-shreni --version
+shreni help               # list all commands
 ```
 
 Register a project (a **Kshetra**) and file your first task:
 
 ```bash
 # Your project repo must already exist with a GitHub remote configured.
-shreni init-kshetra --slug myapp --path /projects/myapp
-
 cd /projects/myapp
+shreni init               # prompts for slug/path (defaults: cwd + its name), then scaffolds
+
+# Non-interactive / scripted equivalent:
+#   shreni init --slug myapp --path /projects/myapp
+# `init-kshetra` is the same flow with all options required as flags.
+
 bd create "Add user authentication" -p 2 \
   --description "Email + password login with JWT sessions"
 ```
