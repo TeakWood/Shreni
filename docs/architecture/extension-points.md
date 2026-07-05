@@ -134,7 +134,7 @@ sequenceDiagram
     Ld->>X: import(module id) or SHRENI_EXT path
     alt present
         X-->>Ld: register(core) → sink(s), meter, policy, entitlements
-        Ld->>W: append sinks; swap the supplied defaults
+        Ld->>W: append sinks, swap the supplied defaults
     else absent or error
         Ld-->>W: keep defaults (one log line)
     end
