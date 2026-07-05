@@ -142,3 +142,10 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 .beads
+
+# Supabase (telemetry backend). Never commit the service-role key or local CLI
+# state — the deployed function gets SUPABASE_SERVICE_ROLE_KEY injected at runtime.
+supabase/.env
+supabase/.env.*
+supabase/.temp/
+supabase/.branches/

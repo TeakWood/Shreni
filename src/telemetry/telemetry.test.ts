@@ -83,7 +83,9 @@ describe('env overrides', () => {
 describe('local sink event shape (no PII)', () => {
   it('writes a well-formed, non-identifying event when enabled with no endpoint', () => {
     enableTelemetry(dir);
-    emit('task_merged', { policy: 'push' }, { dir, env: {} });
+    // Force the local sink: with a real default TELEMETRY_ENDPOINT, the "no
+    // endpoint" path is only reached by overriding the endpoint to empty.
+    emit('task_merged', { policy: 'push' }, { dir, env: { SHRENI_TELEMETRY_ENDPOINT: '' } });
     const events = sinkEvents();
     expect(events).toHaveLength(1);
     const e = events[0]!;
@@ -91,6 +93,7 @@ describe('local sink event shape (no PII)', () => {
     expect(e.anonymousId).toMatch(/[0-9a-f-]{36}/);
     expect(typeof e.ts).toBe('string');
     expect(e.platform).toBe(process.platform);
+    expect(e.environment).toBe('production'); // defaults to production with no SHRENI_TELEMETRY_ENV
     expect(e.props).toEqual({ policy: 'push' });
     // Guard against PII leakage: no path/repo/user/email-ish keys anywhere.
     const blob = JSON.stringify(e).toLowerCase();
@@ -101,8 +104,9 @@ describe('local sink event shape (no PII)', () => {
 
   it('accumulates multiple events as jsonl', () => {
     enableTelemetry(dir);
-    emit('session_start', undefined, { dir, env: {} });
-    emit('kshetra_init', { provider: 'anthropic' }, { dir, env: {} });
+    const env = { SHRENI_TELEMETRY_ENDPOINT: '' }; // force local sink (see above)
+    emit('session_start', undefined, { dir, env });
+    emit('kshetra_init', { provider: 'anthropic' }, { dir, env });
     expect(sinkEvents().map(e => e.name)).toEqual(['session_start', 'kshetra_init']);
   });
 });

@@ -13,8 +13,18 @@ create table if not exists public.events (
   anonymous_id uuid        not null,                -- random per-install id (NOT identity)
   version      text,                                -- shreni version
   platform     text,                                -- coarse OS (process.platform)
+  environment  text        not null default 'production'  -- 'test' (founder runs) vs 'production'
+    check (environment in ('test', 'production')),
   props        jsonb                                -- small, non-identifying primitives
 );
+
+-- Idempotent for an already-created table (create above is skipped once it exists).
+alter table public.events
+  add column if not exists environment text not null default 'production';
+do $$ begin
+  alter table public.events add constraint events_environment_chk
+    check (environment in ('test', 'production'));
+exception when duplicate_object then null; end $$;
 
 -- Query paths: retention/activation funnels group by anonymous_id + name over time.
 create index if not exists events_anon_name_time_idx
@@ -24,8 +34,8 @@ create index if not exists events_name_time_idx
 
 -- Lock it down: RLS on, and NO policies for anon/authenticated. That means the
 -- public API keys can neither read nor write this table — only the service role
--- (used exclusively by the `ingest` Edge Function, server-side) can insert. The
--- ingest endpoint is the single sanctioned write path.
+-- (used exclusively by the `anonymous-usage-telemetry` Edge Function,
+-- server-side) can insert. That endpoint is the single sanctioned write path.
 alter table public.events enable row level security;
 
 comment on table public.events is

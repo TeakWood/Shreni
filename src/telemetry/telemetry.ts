@@ -28,11 +28,12 @@ import { randomUUID } from 'crypto';
 //   2. CONSENT_NOTICE copy — the exact disclosure shown on `telemetry enable`.
 //   3. The set of event names (below) and any props — keep them non-identifying.
 
-// null → local-only sink (see above). Set this to the Supabase ingest URL
-// (https://<project-ref>.supabase.co/functions/v1/ingest) to collect events, or
-// override per-run with SHRENI_TELEMETRY_ENDPOINT. Backend + deploy steps live in
-// supabase/ (see supabase/README.md).
-export const TELEMETRY_ENDPOINT: string | null = null;
+// The anonymous-usage collector (a public Supabase Edge Function; backend +
+// deploy steps live in supabase/, see supabase/README.md). Override per-run with
+// SHRENI_TELEMETRY_ENDPOINT, or set it to '' to force the local-only sink.
+// Still only ever reached when the user has explicitly opted in.
+export const TELEMETRY_ENDPOINT: string | null =
+  'https://azahkqnhhdsfbmhngkul.supabase.co/functions/v1/anonymous-usage-telemetry';
 
 // Shown when a user runs `shreni telemetry enable`. FOUNDER: finalize this copy.
 export const CONSENT_NOTICE = [
@@ -53,12 +54,18 @@ export type TelemetryEventName =
   | 'kshetra_init' // a project was registered — top of the activation funnel
   | 'task_merged'; // a task landed on main — the activation/first-value signal
 
+// Which install an event came from. Defaults to 'production'; set
+// SHRENI_TELEMETRY_ENV=test (or dev/development/ci) during your own runs so
+// founder testing never pollutes real activation/retention numbers.
+export type TelemetryEnvironment = 'test' | 'production';
+
 export interface TelemetryEvent {
   name: TelemetryEventName;
   ts: string;
   anonymousId: string;
   version: string;
   platform: string;
+  environment: TelemetryEnvironment;
   // Caller-supplied, strictly primitive and non-identifying (e.g. { rounds: 2 }).
   props?: Record<string, string | number | boolean>;
 }
@@ -112,6 +119,14 @@ export function isTelemetryEnabled(
 
 function resolveEndpoint(cfg: TelemetryConfig, env: NodeJS.ProcessEnv): string | null {
   return env.SHRENI_TELEMETRY_ENDPOINT ?? cfg.endpoint ?? TELEMETRY_ENDPOINT;
+}
+
+// 'test' only when explicitly flagged via SHRENI_TELEMETRY_ENV; anything else
+// (including unset) is 'production' — so real users are tagged correctly with
+// no configuration, and only deliberate founder runs count as test traffic.
+function resolveEnvironment(env: NodeJS.ProcessEnv): TelemetryEnvironment {
+  const v = (env.SHRENI_TELEMETRY_ENV ?? '').toLowerCase();
+  return ['test', 'testing', 'dev', 'development', 'ci'].includes(v) ? 'test' : 'production';
 }
 
 function readVersion(): string {
@@ -177,6 +192,7 @@ export function emit(
       anonymousId: cfg.anonymousId ?? 'anonymous',
       version: readVersion(),
       platform: process.platform,
+      environment: resolveEnvironment(env),
       ...(props ? { props } : {}),
     };
     // Fire-and-forget: swallow the promise so a slow/failed POST never blocks or

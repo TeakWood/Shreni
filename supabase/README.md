@@ -6,7 +6,7 @@ Shreni-beads-60f / yds.5.
 
 - **[`migrations/`](migrations)** — the `events` table (RLS on; only the service
   role writes).
-- **[`functions/ingest/`](functions/ingest)** — a public Edge Function that
+- **[`functions/anonymous-usage-telemetry/`](functions/anonymous-usage-telemetry)** — a public Edge Function that
   validates + inserts events. It **never reads the client IP** and drops any event
   whose name isn't allowlisted.
 
@@ -27,7 +27,7 @@ supabase login
 # 3. From the repo root, link and apply.
 supabase link --project-ref <project-ref>
 supabase db push                                   # applies migrations/
-supabase functions deploy ingest --no-verify-jwt   # public: CLI sends no auth header
+supabase functions deploy anonymous-usage-telemetry --no-verify-jwt   # public: CLI sends no auth header
 ```
 
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected into the function
@@ -35,10 +35,10 @@ automatically — no secrets to set.
 
 ## Wire the client to it
 
-The function URL is `https://<project-ref>.supabase.co/functions/v1/ingest`.
+The function URL is `https://<project-ref>.supabase.co/functions/v1/anonymous-usage-telemetry`.
 Point the CLI at it either way:
 
-- **Per machine / CI:** `export SHRENI_TELEMETRY_ENDPOINT=https://<ref>.supabase.co/functions/v1/ingest`
+- **Per machine / CI:** `export SHRENI_TELEMETRY_ENDPOINT=https://<ref>.supabase.co/functions/v1/anonymous-usage-telemetry`
 - **Baked into a release:** set `TELEMETRY_ENDPOINT` in
   [`src/telemetry/telemetry.ts`](../src/telemetry/telemetry.ts) to that URL, then
   rebuild/publish. (The URL is not a secret — it's a public ingest endpoint.)
@@ -48,14 +48,19 @@ Until one is set, opted-in events stay in the local sink and nothing is collecte
 ## Smoke test
 
 ```bash
-curl -sS -X POST "https://<ref>.supabase.co/functions/v1/ingest" \
+curl -sS -X POST "https://<ref>.supabase.co/functions/v1/anonymous-usage-telemetry" \
   -H 'content-type: application/json' \
-  -d '{"name":"session_start","anonymousId":"00000000-0000-0000-0000-000000000000","version":"0.1.0","platform":"darwin","props":{"kshetras":1}}'
+  -d '{"name":"session_start","anonymousId":"00000000-0000-0000-0000-000000000000","version":"0.1.0","platform":"darwin","environment":"test","props":{"kshetras":1}}'
 # → 204; a garbage name or bad body → 400. Then confirm the row landed:
 #   select * from public.events order by received_at desc limit 5;
+# (Smoke tests should send "environment":"test" so they never skew production metrics.
+#  An unknown or missing environment is stored as 'production'.)
 ```
 
 ## The metrics (SQL)
+
+> All metrics filter `environment = 'production'` so your own `test` runs
+> (events sent with `SHRENI_TELEMETRY_ENV=test`) never skew activation/retention.
 
 **Activation** — of installs that initialised a project, how many reached a first merge?
 
@@ -65,6 +70,7 @@ with firsts as (
          min(received_at) filter (where name = 'kshetra_init') as init_at,
          min(received_at) filter (where name = 'task_merged')  as first_merge_at
   from public.events
+  where environment = 'production'
   group by anonymous_id
 )
 select
@@ -85,6 +91,7 @@ with seen as (
          min(received_at)::date as first_day,
          array_agg(distinct received_at::date) as active_days
   from public.events
+  where environment = 'production'
   group by anonymous_id
 )
 select

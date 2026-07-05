@@ -10,7 +10,7 @@
 //   • Only insert the allowlisted, non-identifying fields below; drop everything
 //     else (including the client-supplied timestamp — we use server receipt time).
 //
-// Deploy:  supabase functions deploy ingest --no-verify-jwt
+// Deploy:  supabase functions deploy anonymous-usage-telemetry --no-verify-jwt
 //   (--no-verify-jwt because the CLI posts a bare body with no auth header.)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -18,6 +18,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 // The only event names we accept. Anything else is dropped — a public endpoint
 // receives garbage and abuse, so validate strictly.
 const ALLOWED_EVENTS = new Set(['session_start', 'kshetra_init', 'task_merged']);
+// Only these two are stored; anything else (or missing) is coerced to 'production'
+// so a public caller can never mislabel real traffic as test — or invent values.
+const ALLOWED_ENVIRONMENTS = new Set(['test', 'production']);
 
 const MAX_BODY_BYTES = 4 * 1024; // events are tiny; reject anything larger
 const MAX_STR = 64; // cap version/platform/prop string lengths
@@ -29,6 +32,7 @@ interface EventRow {
   anonymous_id: string;
   version: string | null;
   platform: string | null;
+  environment: string;
   props: Record<string, string | number | boolean> | null;
 }
 
@@ -62,11 +66,16 @@ export function sanitizeEvent(raw: unknown): EventRow | null {
   if (!ALLOWED_EVENTS.has(name)) return null;
   const anonymousId = typeof e.anonymousId === 'string' ? e.anonymousId : '';
   if (!UUID_RE.test(anonymousId)) return null;
+  const environment =
+    typeof e.environment === 'string' && ALLOWED_ENVIRONMENTS.has(e.environment)
+      ? e.environment
+      : 'production';
   return {
     name,
     anonymous_id: anonymousId,
     version: clampStr(e.version),
     platform: clampStr(e.platform),
+    environment,
     props: sanitizeProps(e.props),
   };
 }
