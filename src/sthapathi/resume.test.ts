@@ -49,7 +49,11 @@ vi.mock('./branch.js', () => ({
 }));
 
 const mockSquashMergeAndClose = vi.fn<() => Promise<void>>();
-vi.mock('./merge.js', () => ({ squashMergeAndClose: mockSquashMergeAndClose }));
+vi.mock('./merge.js', () => ({
+  squashMergeAndClose: mockSquashMergeAndClose,
+  openPrAndDefer: vi.fn<() => Promise<void>>(),
+  resolveMergePolicy: vi.fn(() => 'push'),
+}));
 
 // Both health functions are spied so we can prove which one the resume path hits.
 // checkHealth = the pickup-only gate (must NOT run); measureHealth = the in-loop

@@ -95,9 +95,22 @@ export function bd(kshetra: KshetraConfig) {
       return exec(['update', id, '--status', 'open'], env);
     },
 
-    list(filters: { status?: string }): Promise<string> {
+    // Add / remove a label. Used by the PR merge policy (3r2) to mark a bead
+    // `awaiting-merge` (kept open + in_progress so dependents stay blocked) and
+    // to clear the marker once its PR is reconciled.
+    addLabel(id: string, label: string): Promise<string> {
+      return exec(['update', id, '--add-label', label], env);
+    },
+
+    removeLabel(id: string, label: string): Promise<string> {
+      return exec(['update', id, '--remove-label', label], env);
+    },
+
+    list(filters: { status?: string; label?: string; excludeLabel?: string }): Promise<string> {
       const args = ['list', '--json'];
       if (filters.status) args.push('--status', filters.status);
+      if (filters.label) args.push('--label', filters.label);
+      if (filters.excludeLabel) args.push('--exclude-label', filters.excludeLabel);
       return exec(args, env);
     },
   };

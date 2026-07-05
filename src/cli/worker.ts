@@ -10,6 +10,7 @@ import { touchHeartbeat } from '../sthapathi/activity-log';
 import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '../sthapathi/self-heal';
 import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
+import { reconcilePullRequests } from '../sthapathi/merge';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -112,6 +113,19 @@ async function sync(): Promise<void> {
   }
 }
 
+// Reconcile deferred PR beads (mergePolicy 'pr', 3r2): close any whose PR has
+// merged, block any whose PR was closed unmerged. Gated on IDLE + not-healing so
+// its branch deletes never race an in-flight agent's work tree, mirroring the
+// scheduler's "mutations only when nothing is in flight" invariant.
+async function reconcile(): Promise<void> {
+  if (scheduler.getPhase(kshetra!.id) !== 'IDLE' || healing) return;
+  try {
+    await reconcilePullRequests(kshetra!);
+  } catch (err) {
+    console.error(`[shreni worker:${kshetraId}] PR reconcile failed:`, err);
+  }
+}
+
 // Startup: (1) sync the local DB, (2) RECONCILE any drift left by a crash/restart
 // (dirty tree, stale bead-* branches, orphaned in_progress beads) back to a clean
 // IDLE, (3) RESUME any reopened WIP through the work loop — bypassing the pickup
@@ -134,6 +148,9 @@ async function startup(): Promise<void> {
     console.log(`[shreni worker:${kshetraId}] resuming WIP bead ${task.id} (bypassing health gate)`);
     await scheduleResume(kshetra!, task, runTaskSafely);
   }
+  // Reconcile any PRs that merged/closed while this worker was down, before the
+  // poll loop starts picking up new work.
+  await reconcile();
   stop = scheduler.scheduleLoop(kshetra!, hooks);
 }
 
@@ -146,6 +163,14 @@ startup().catch(err => {
 
 const syncTimer = setInterval(
   () => sync().catch(err => console.error(`[shreni worker:${kshetraId}] beads sync failed:`, err)),
+  BEADS_SYNC_INTERVAL_MS,
+);
+
+// Poll open PRs for deferred (mergePolicy 'pr') beads and close/block them as
+// their PRs land. Same cadence as the beads sync — merges are human-paced, so a
+// tight loop buys nothing, and reconcile() self-gates to IDLE anyway.
+const reconcileTimer = setInterval(
+  () => reconcile().catch(err => console.error(`[shreni worker:${kshetraId}] PR reconcile failed:`, err)),
   BEADS_SYNC_INTERVAL_MS,
 );
 
@@ -197,6 +222,7 @@ const resumeWatchTimer = setInterval(() => {
 function shutdown(): void {
   stop?.();
   clearInterval(syncTimer);
+  clearInterval(reconcileTimer);
   clearInterval(watchdogTimer);
   clearInterval(heartbeatTimer);
   clearInterval(resumeWatchTimer);

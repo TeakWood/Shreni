@@ -119,8 +119,13 @@ prepared task on its own `bead-{id}/{slug}` branch:
    structured feedback.
 3. On `REJECT`, Silpi is re-dispatched with the feedback, up to
    `agents.maxRoundsPerBead` rounds (default 3).
-4. On `APPROVE`, the branch is squash-merged to `main`
-   ([`src/sthapathi/merge.ts`](src/sthapathi/merge.ts)) and the bead is closed.
+4. On `APPROVE`, the outcome depends on `repo.mergePolicy`
+   ([`src/sthapathi/merge.ts`](src/sthapathi/merge.ts)):
+   - `push` (default): the branch is squash-merged to `main` and the bead is closed.
+   - `pr`: the branch is pushed and a pull request is opened; the bead is kept open
+     (labelled `awaiting-merge`) so dependents stay blocked, and is closed later by
+     the reconcile pass only when its PR actually merges. `resolveMergePolicy` lets
+     `SHRENI_MERGE_POLICY` override the config at runtime.
 
 After a successful merge, **Parikshaka** is dispatched asynchronously
 ([`src/sthapathi/parikshaka-dispatch.ts`](src/sthapathi/parikshaka-dispatch.ts)) —
@@ -132,7 +137,8 @@ Sthapathi owns all git operations ([`src/sthapathi/git.ts`](src/sthapathi/git.ts
 so agents never manipulate history directly:
 
 - Each task gets an isolated branch `bead-{id}/{slug}`.
-- Approved work is **squash-merged** to `main` — one clean commit per bead.
+- Approved work is **squash-merged** to `main` — one clean commit per bead — or,
+  under `mergePolicy: pr`, opened as a pull request and reconciled on merge.
 - `safePush` handles a non-fast-forward push by `pull --rebase`-ing and retrying.
 - Merge conflicts are triaged
   ([`handleMergeConflict`](src/sthapathi/merge.ts)): conflicts confined to the

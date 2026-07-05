@@ -33,7 +33,13 @@ vi.mock('./branch.js', () => ({
 }));
 
 const mockSquashMergeAndClose = vi.fn<() => Promise<void>>();
-vi.mock('./merge.js', () => ({ squashMergeAndClose: mockSquashMergeAndClose }));
+const mockOpenPrAndDefer = vi.fn<() => Promise<void>>();
+const mockResolveMergePolicy = vi.fn<() => 'push' | 'pr'>(() => 'push');
+vi.mock('./merge.js', () => ({
+  squashMergeAndClose: mockSquashMergeAndClose,
+  openPrAndDefer: mockOpenPrAndDefer,
+  resolveMergePolicy: mockResolveMergePolicy,
+}));
 
 const mockIsHealthBead = vi.fn<(t: Task) => boolean>();
 const mockMeasureHealth = vi.fn<() => Promise<{ green: boolean; failCount: number; baseline: number; sha: string }>>();
@@ -155,6 +161,11 @@ beforeEach(() => {
   mockRunViharapala.mockResolvedValue(VIHARAPALA_APPROVE);
   mockCreateTaskBranch.mockResolvedValue('bead-proj-42/fix-auth');
   mockSquashMergeAndClose.mockResolvedValue(undefined);
+  mockOpenPrAndDefer.mockResolvedValue(undefined);
+  // Default every test to the push policy; the pr-mode tests override per-case.
+  // (clearAllMocks resets call history but not return values, so a stray 'pr'
+  // would otherwise leak into later tests.)
+  mockResolveMergePolicy.mockReturnValue('push');
   mockIsHealthBead.mockReturnValue(false);
   mockMeasureHealth.mockResolvedValue({ green: true, failCount: 0, baseline: 0, sha: 'sha' });
   mockRunLintGate.mockResolvedValue({ passed: true, skipped: false, raw: '' });
@@ -255,6 +266,22 @@ describe('runSilpiViharapalaLoop', () => {
     await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
     expect(mockRunSilpi).toHaveBeenCalledOnce();
     expect(mockRunViharapala).toHaveBeenCalledOnce();
+  });
+
+  it('squash-merges on approval under the default push policy', async () => {
+    mockResolveMergePolicy.mockReturnValue('push');
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    expect(mockSquashMergeAndClose).toHaveBeenCalledOnce();
+    expect(mockOpenPrAndDefer).not.toHaveBeenCalled();
+  });
+
+  it('opens a PR and defers on approval under the pr policy (3r2)', async () => {
+    mockResolveMergePolicy.mockReturnValue('pr');
+    const result = await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    expect(mockOpenPrAndDefer).toHaveBeenCalledOnce();
+    expect(mockSquashMergeAndClose).not.toHaveBeenCalled();
+    expect(result.approved).toBe(true);
+    expect(result.note).toContain('PR opened');
   });
 
   it('records forward progress on claim and on approval (watchdog stall track)', async () => {

@@ -25,7 +25,10 @@ const BeadsIssueSchema = z.object({
   notes: z.string().optional(),
 });
 
-function toSlug(title: string): string {
+// Deterministic slug from a bead title — the same function that names bead
+// branches at creation, exported so reconcilePullRequests can reconstruct a
+// bead's branch name from its title (bd list --json carries no slug field).
+export function toSlug(title: string): string {
   return title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')

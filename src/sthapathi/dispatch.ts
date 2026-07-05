@@ -10,7 +10,7 @@ import { withRetry } from './retry.js';
 import { ParseError, AgentError } from './errors.js';
 import { emit } from './activity-log.js';
 import { createTaskBranch, branchName } from './branch.js';
-import { squashMergeAndClose } from './merge.js';
+import { squashMergeAndClose, openPrAndDefer, resolveMergePolicy } from './merge.js';
 import { isHealthBead, measureHealth } from './health.js';
 import { runLintGate } from './lint.js';
 import { recordProgress, setHealthBaseline } from '../kshetra/state.js';
@@ -258,6 +258,12 @@ export async function runSilpiViharapalaLoop(
     if (feedback.verdict === 'APPROVE') {
       emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
       recordProgress(kshetra); // a completed bead is forward progress (the design §3.2)
+      // mergePolicy (3r2): 'pr' opens a PR and defers (bead stays open, closed on
+      // merge by reconcilePullRequests); 'push' squash-merges to main + closes now.
+      if (resolveMergePolicy(kshetra) === 'pr') {
+        await openPrAndDefer(task, kshetra, silpiOut);
+        return { approved: true, note: `Approved round ${round} — PR opened, awaiting merge` };
+      }
       // Squash-merge the bead branch into main, close the task, fire Parikshaka
       await squashMergeAndClose(task, kshetra, silpiOut);
       return { approved: true, note: `Approved round ${round}` };
@@ -330,6 +336,10 @@ export async function runHealthRepairLoop(
       await bdClient.addNote(task.id, `Round ${round}: suite green — merging`);
       emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
       recordProgress(kshetra); // suite restored to green is forward progress (the design §3.2)
+      // Health-repair beads ALWAYS merge to main directly, regardless of
+      // mergePolicy: they are the mechanism that restores a green base so feature
+      // work can proceed, so deferring one behind a human PR gate would wedge the
+      // whole queue. Only feature work honours the 'pr' policy.
       await squashMergeAndClose(task, kshetra, silpiOut);
       setHealthBaseline(kshetra, 0);
       return { approved: true, note: `Suite restored to green round ${round}` };

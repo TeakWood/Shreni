@@ -177,9 +177,13 @@ switch (command) {
     const beadsPath = parseFlag(args, '--beads-path');
     const provider = parseFlag(args, '--provider');
     const model = parseFlag(args, '--model');
+    const mergePolicy = parseFlag(args, '--merge-policy');
     const dryRun = args.includes('--dry-run');
     if (!slug || !path) {
-      console.error('Usage: shreni init-kshetra --slug <id> --path <repo-path> [--org <org>] [--language <lang>] [--beads-path <path>] [--provider claude|codex|gemini] [--model <id>] [--dry-run]');
+      console.error('Usage: shreni init-kshetra --slug <id> --path <repo-path> [--org <org>] [--language <lang>] [--beads-path <path>] [--provider claude|codex|gemini] [--model <id>] [--merge-policy push|pr] [--dry-run]');
+      process.exit(1);
+    } else if (mergePolicy && mergePolicy !== 'push' && mergePolicy !== 'pr') {
+      console.error(`Invalid --merge-policy "${mergePolicy}": expected "push" or "pr".`);
       process.exit(1);
     } else {
       initKshetra({
@@ -187,6 +191,7 @@ switch (command) {
         beadsPath: beadsPath ?? undefined,
         provider: provider ?? undefined,
         model: model ?? undefined,
+        mergePolicy: (mergePolicy as 'push' | 'pr' | null) ?? undefined,
         dryRun,
       }).catch((err: unknown) => {
         console.error((err as Error).message);

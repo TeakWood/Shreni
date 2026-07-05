@@ -39,6 +39,9 @@ export interface InitKshetraOpts {
   // Explicit agents.model. Required for providers with no bakeable default
   // (codex/gemini, OQ1); optional for claude (falls back to the registry default).
   model?: string;
+  // repo.mergePolicy (3r2): 'push' (default) squash-merges to main on APPROVE;
+  // 'pr' opens a PR and defers. Omitted => the schema/runtime default 'push'.
+  mergePolicy?: 'push' | 'pr';
   // --dry-run (§3.9/OQ7): run preflight + detection and print the plan, mutating
   // nothing (no GitHub repo, symlink, config, or registration).
   dryRun?: boolean;
@@ -226,6 +229,9 @@ export function generateKshetraYaml(opts: {
   // The selected provider + model (§3.5). Defaults to the Claude profile for
   // back-compat when init did not resolve a provider.
   agents?: { provider: Provider; model: string };
+  // repo.mergePolicy (3r2). Only written when 'pr' is chosen — 'push' is the
+  // schema/runtime default, so omitting it keeps the generated config minimal.
+  mergePolicy?: 'push' | 'pr';
 }): string {
   const stack: DetectedStack = opts.stack ?? { language: opts.language ?? 'typescript', unknown: false };
   const conventions: Record<string, string> = {};
@@ -239,6 +245,9 @@ export function generateKshetraYaml(opts: {
       remote: opts.repoRemote,
       mainBranch: 'main',
       branchPattern: 'bead-{id}/{slug}',
+      // Only emit mergePolicy when 'pr' — 'push' is the default, so a plain
+      // config stays clean and back-compatible.
+      ...(opts.mergePolicy === 'pr' ? { mergePolicy: 'pr' } : {}),
     },
     beads: {
       path: opts.beadsPath,
@@ -398,6 +407,7 @@ function buildReRunCommand(opts: InitKshetraOpts): string {
   if (opts.model) parts.push(`--model ${opts.model}`);
   if (opts.language) parts.push(`--language ${opts.language}`);
   if (opts.beadsPath) parts.push(`--beads-path ${opts.beadsPath}`);
+  if (opts.mergePolicy) parts.push(`--merge-policy ${opts.mergePolicy}`);
   return parts.join(' ');
 }
 
@@ -536,6 +546,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           stack,
           conventions,
           agents,
+          mergePolicy: opts.mergePolicy,
         });
         configPath = writeKshetraConfig(repoPath, yamlContent);
         appendShreniIntegration(repoPath);

@@ -4,14 +4,15 @@ Automated coding agent harness for your services.
 
 Shreni orchestrates specialised AI agents to pick up structured tasks, write and review code, run tests, and merge approved changes — all without human intervention in the inner loop. You discuss a feature, file a task, and come back to find working code merged into `main`.
 
-> **Does Shreni push to `main` without me reviewing? Yes — by design.** When the
+> **Does Shreni push to `main` without me reviewing? Yes — by default.** When the
 > review agent (Viharapala) approves a change, Sthapathi **squash-merges it
 > straight to `main` and pushes** — there is no human pull-request gate in the
 > inner loop. You steer by *outcome* — the automated review loop, the green-base
 > health gate, and the merged result — not by approving every diff. Every task
 > still passes the Silpi ↔ Viharapala AI review before it can merge. If you want a
-> human gate, an optional **PR mode** (open a pull request on approval instead of
-> merging) is planned for cautious and team setups.
+> human gate, set **`mergePolicy: pr`** (see [Merge policy](#merge-policy-push-vs-pr))
+> and Shreni opens a pull request on approval instead of merging — for cautious and
+> team setups.
 
 ## Architecture
 
@@ -144,6 +145,44 @@ the target repo root clean.
 - **Migrating a legacy layout.** If a project still has a root `kshetra.yaml`, run
   `shreni migrate <dir>` to move it into `.shreni/`, absolutize its paths,
   re-register it, and remove the root file. It is idempotent — safe to re-run.
+
+### Merge policy (push vs pr)
+
+`repo.mergePolicy` decides **where approved work lands** — independently of *when*
+the next task starts (that is always driven by the `bd` dependency graph):
+
+| Policy | On APPROVE | Task closes | Use when |
+|---|---|---|---|
+| `push` (default) | Squash-merge the bead branch straight to `main` and push | Immediately | Solo, high-trust, fastest loop |
+| `pr` | Push the branch and open a **pull request** (`bead-…` → `main`); do **not** merge | Only when the PR actually merges | You want a human gate, or a team merge queue |
+
+In `pr` mode the bead is kept **open** (labelled `awaiting-merge`) so anything that
+depends on it stays blocked until the code is really on `main`. Sthapathi does not
+wait around: it immediately picks the next ready bead branching from the current
+`main`. A background reconcile pass closes the bead when its PR merges, or blocks it
+for review if the PR is closed unmerged. The Silpi ↔ Viharapala AI review runs in
+both modes — `pr` mode adds a human merge gate *on top of* it, it does not replace it.
+
+Set it at init or in `kshetra.yaml`, and override per run with an env var:
+
+```bash
+shreni init-kshetra --slug myapp --path /projects/myapp --merge-policy pr
+```
+
+```yaml
+repo:
+  path: /projects/myapp
+  remote: git@github.com:your-org/myapp.git
+  mainBranch: main
+  mergePolicy: pr        # omit for the default 'push'
+```
+
+```bash
+SHRENI_MERGE_POLICY=pr shreni start   # runtime override of the config, all Kshetras
+```
+
+> `pr` mode uses the `gh` CLI (already a prerequisite) to open and inspect PRs, so
+> `gh` must be authenticated for the account that owns the project repo.
 
 ## Running the Harness
 

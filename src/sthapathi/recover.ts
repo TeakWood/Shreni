@@ -75,7 +75,13 @@ export async function recoverKshetra(
   //    budget. Past MAX_RECOVER_ATTEMPTS, leave the bead blocked and escalate to
   //    a human rather than loop on it.
   const maxAttempts = kshetra.watchdog?.maxRecoverAttempts ?? MAX_RECOVER_ATTEMPTS;
-  const inFlight = parseInFlightTasks(await bd(kshetra).list({ status: 'in_progress' }));
+  // Exclude awaiting-merge beads (mergePolicy 'pr', 3r2): they are intentionally
+  // left in_progress with their branch/PR open, NOT stranded by a crash. Reopening
+  // and re-working one would discard an already-approved change that is just
+  // waiting on a human merge. reconcilePullRequests closes them when the PR lands.
+  const inFlight = parseInFlightTasks(
+    await bd(kshetra).list({ status: 'in_progress', excludeLabel: 'awaiting-merge' }),
+  );
   const resumable: Task[] = [];
   for (const task of inFlight) {
     const attempts = recordBeadAttempt(kshetra, task.id);

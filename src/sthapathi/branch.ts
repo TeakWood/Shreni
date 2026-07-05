@@ -2,7 +2,9 @@ import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import { git } from './git.js';
 
-export function branchName(task: Task): string {
+// Only the id + slug are needed to name a branch, so any object carrying those
+// works (a full Task, or the lighter awaiting-merge bead reconcile reconstructs).
+export function branchName(task: Pick<Task, 'id' | 'slug'>): string {
   return `bead-${task.id}/${task.slug}`;
 }
 

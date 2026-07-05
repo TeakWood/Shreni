@@ -15,6 +15,14 @@ const RepoConfigSchema = z.object({
   remote: z.string(),
   mainBranch: z.string().default('main'),
   branchPattern: z.string().default('bead-{id}/{slug}'),
+  // Where approved work lands (3r2). 'push' (default): squash-merge the bead
+  // branch straight to main on APPROVE — today's behaviour. 'pr': open a PR
+  // (bead branch → main) and DEFER — the bead is kept open (in_progress +
+  // `awaiting-merge` label) so bd dependents stay blocked until the code is on
+  // main, and is closed only when its PR actually merges (reconcilePullRequests).
+  // Optional for back-compat; resolveMergePolicy() treats an absent value as
+  // 'push' and lets SHRENI_MERGE_POLICY override at runtime.
+  mergePolicy: z.enum(['push', 'pr']).optional(),
 });
 
 const BeadsConfigSchema = z.object({

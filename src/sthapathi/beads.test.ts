@@ -162,6 +162,24 @@ describe('bd() wrapper', () => {
     expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress']);
   });
 
+  it('list() passes label and excludeLabel filters (awaiting-merge)', async () => {
+    mockSuccess('[]');
+    await bd(KSHETRA).list({ status: 'in_progress', label: 'awaiting-merge' });
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--label', 'awaiting-merge']);
+    mockSuccess('[]');
+    await bd(KSHETRA).list({ status: 'in_progress', excludeLabel: 'awaiting-merge' });
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--exclude-label', 'awaiting-merge']);
+  });
+
+  it('addLabel() / removeLabel() call bd update with the label flags', async () => {
+    mockSuccess('');
+    await bd(KSHETRA).addLabel('bd-123', 'awaiting-merge');
+    expect(lastCall().args).toEqual(['update', 'bd-123', '--add-label', 'awaiting-merge']);
+    mockSuccess('');
+    await bd(KSHETRA).removeLabel('bd-123', 'awaiting-merge');
+    expect(lastCall().args).toEqual(['update', 'bd-123', '--remove-label', 'awaiting-merge']);
+  });
+
   it('throws BeadsError when bd command fails', async () => {
     mockFailure('database locked');
     await expect(bd(KSHETRA).ready()).rejects.toThrow(BeadsError);
