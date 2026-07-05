@@ -28,8 +28,10 @@ import { randomUUID } from 'crypto';
 //   2. CONSENT_NOTICE copy — the exact disclosure shown on `telemetry enable`.
 //   3. The set of event names (below) and any props — keep them non-identifying.
 
-// null → local-only sink (see above). A founder sets this to the collector URL,
-// or overrides per-run with SHRENI_TELEMETRY_ENDPOINT.
+// null → local-only sink (see above). Set this to the Supabase ingest URL
+// (https://<project-ref>.supabase.co/functions/v1/ingest) to collect events, or
+// override per-run with SHRENI_TELEMETRY_ENDPOINT. Backend + deploy steps live in
+// supabase/ (see supabase/README.md).
 export const TELEMETRY_ENDPOINT: string | null = null;
 
 // Shown when a user runs `shreni telemetry enable`. FOUNDER: finalize this copy.
