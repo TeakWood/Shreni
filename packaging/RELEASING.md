@@ -70,10 +70,48 @@ Then users install with:
 brew install <you>/shreni/shreni
 ```
 
-## Not yet: prebuilt standalone binaries
+## Prebuilt standalone binaries (Node SEA)
 
-The bead also mentions **prebuilt binaries** (a single self-contained executable,
-no Node install required). That is a heavier, CI-driven effort — per-platform
-builds via Node SEA or `pkg`, checksums, and a GitHub Releases pipeline — and is
-tracked separately as a follow-up. The npm + Homebrew paths above already give
-users a real, non-source install; standalone binaries are an enhancement on top.
+Self-contained per-platform executables — no Node install required — are built
+with [Node SEA](https://nodejs.org/api/single-executable-applications.html):
+`esbuild` bundles the CLI into one file, `--experimental-sea-config` produces a
+blob, and `postject` injects it into a copy of the `node` binary. The whole
+pipeline is [`scripts/build-binary.mjs`](../scripts/build-binary.mjs).
+
+Because the binary is one file, `shreni start` / `phalaka start` can't spawn
+sibling `worker.js` / `phalaka-server.js` scripts. Instead the binary re-invokes
+itself with hidden `__worker` / `__phalaka-server` subcommands
+([`src/cli/self-exec.ts`](../src/cli/self-exec.ts)) — the same code path also
+works under a normal `node` / npm install.
+
+### Building
+
+```bash
+pnpm build:binary        # outputs build/shreni-<platform>-<arch> (+ .sha256)
+```
+
+> **Requires an official Node binary.** SEA injection needs the fuse sentinel
+> that ships in Node.org builds. **Homebrew's `node` is built without it** and
+> will fail with *"Could not find the sentinel … in the binary"*. Use a Node
+> from `actions/setup-node` (as CI does) or a nodejs.org tarball.
+
+### Release pipeline
+
+[`.github/workflows/release-binaries.yml`](../.github/workflows/release-binaries.yml)
+builds on a matrix (macOS arm64 + x64, Linux x64, Windows x64 — SEA can't
+cross-compile), runs typecheck + tests, and attaches the executables and their
+SHA-256 sidecars to the GitHub Release. Push a `v*` tag to trigger it; run it via
+`workflow_dispatch` for an artifacts-only dry build.
+
+### First-run notes for users (unsigned alpha)
+
+These binaries are **not code-signed or notarized**, so the OS will warn on first
+run of a downloaded file:
+
+- **macOS** (Gatekeeper): `xattr -d com.apple.quarantine ./shreni-darwin-arm64`,
+  then run it. (CI re-signs ad-hoc, which only covers local, non-quarantined use.)
+- **Windows** (SmartScreen): *More info → Run anyway*.
+- **Linux**: `chmod +x ./shreni-linux-x64` and run.
+
+Always verify the download against its published `.sha256` first. Signing +
+notarization (Apple Developer ID, Windows Authenticode) is a later enhancement.

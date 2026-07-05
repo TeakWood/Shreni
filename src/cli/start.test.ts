@@ -35,7 +35,7 @@ describe('startWorker', () => {
     mockReadPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(true);
 
-    const result = startWorker('myapp', '/path/to/worker.js');
+    const result = startWorker('myapp', { command: 'node', args: ['/path/to/worker.js', 'myapp'] });
 
     expect(result).toEqual({ status: 'already_running', kshetraId: 'myapp', pid: 1234 });
     expect(mockSpawn).not.toHaveBeenCalled();
@@ -47,7 +47,7 @@ describe('startWorker', () => {
     const child = makeChild(5678);
     mockSpawn.mockReturnValue(child);
 
-    const result = startWorker('myapp', '/path/to/worker.js');
+    const result = startWorker('myapp', { command: 'node', args: ['/path/to/worker.js', 'myapp'] });
 
     expect(result).toEqual({ status: 'started', kshetraId: 'myapp', pid: 5678 });
     expect(mockWritePid).toHaveBeenCalledWith('myapp', 5678);
@@ -60,7 +60,7 @@ describe('startWorker', () => {
     const child = makeChild(1001);
     mockSpawn.mockReturnValue(child);
 
-    const result = startWorker('myapp', '/path/to/worker.js');
+    const result = startWorker('myapp', { command: 'node', args: ['/path/to/worker.js', 'myapp'] });
 
     expect(result).toEqual({ status: 'started', kshetraId: 'myapp', pid: 1001 });
   });
@@ -69,7 +69,7 @@ describe('startWorker', () => {
     mockReadPid.mockReturnValue(null);
     mockSpawn.mockReturnValue(makeChild(42));
 
-    startWorker('myapp', '/path/to/worker.js');
+    startWorker('myapp', { command: 'node', args: ['/path/to/worker.js', 'myapp'] });
 
     expect(mockSpawn).toHaveBeenCalledWith(
       expect.any(String),
@@ -82,6 +82,6 @@ describe('startWorker', () => {
     mockReadPid.mockReturnValue(null);
     mockSpawn.mockReturnValue({ pid: undefined, unref: vi.fn() });
 
-    expect(() => startWorker('myapp', '/path/to/worker.js')).toThrow('Failed to spawn worker process for "myapp"');
+    expect(() => startWorker('myapp', { command: 'node', args: ['/path/to/worker.js', 'myapp'] })).toThrow('Failed to spawn worker process for "myapp"');
   });
 });

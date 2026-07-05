@@ -5,6 +5,7 @@ import { homedir } from 'os';
 import { readPhalakaPid, clearPhalakaPid, isAlive } from '../phalaka/pid';
 import { readToken, ensureToken } from '../phalaka/token';
 import { DEFAULT_PORT } from '../phalaka/server';
+import { selfExec, type Launch } from './self-exec';
 
 export const PHALAKA_LOG_PATH = resolve(homedir(), '.shreni', 'phalaka.log');
 
@@ -24,15 +25,17 @@ export interface PhalakaStatusResult {
   token: string | null;
 }
 
-function serverScript(): string {
-  return resolve(__dirname, 'phalaka-server.js');
-}
-
 function dashboardUrl(port: number, token: string): string {
   return `http://127.0.0.1:${port}/?token=${token}`;
 }
 
-export function startPhalaka(port = DEFAULT_PORT, script = serverScript()): PhalakaStartResult {
+export function startPhalaka(
+  port = DEFAULT_PORT,
+  // Defaults to re-invoking this CLI with the hidden `__phalaka-server`
+  // subcommand — works under node and as a standalone SEA binary. Injectable
+  // for tests. The port is passed via the PHALAKA_PORT env var (below).
+  launch: Launch = selfExec('__phalaka-server'),
+): PhalakaStartResult {
   const existing = readPhalakaPid();
   if (existing !== null && isAlive(existing)) {
     const token = ensureToken();
@@ -42,7 +45,7 @@ export function startPhalaka(port = DEFAULT_PORT, script = serverScript()): Phal
   mkdirSync(resolve(homedir(), '.shreni'), { recursive: true });
   const logFd = openSync(PHALAKA_LOG_PATH, 'a');
 
-  const child = spawn(process.execPath, [script], {
+  const child = spawn(launch.command, launch.args, {
     detached: true,
     stdio: ['ignore', logFd, logFd],
     env: { ...process.env, PHALAKA_PORT: String(port) },

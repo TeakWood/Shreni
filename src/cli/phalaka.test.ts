@@ -45,7 +45,7 @@ describe('startPhalaka', () => {
     mockReadPhalakaPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(true);
 
-    const result = startPhalaka(7348, '/fake/phalaka-server.js');
+    const result = startPhalaka(7348, { command: 'node', args: ['/fake/phalaka-server.js'] });
     expect(result.status).toBe('already_running');
     expect(result.pid).toBe(1234);
     expect(mockSpawn).not.toHaveBeenCalled();
@@ -54,11 +54,11 @@ describe('startPhalaka', () => {
   it('spawns a detached process when not running', () => {
     mockReadPhalakaPid.mockReturnValue(null);
 
-    const result = startPhalaka(7348, '/fake/phalaka-server.js');
+    const result = startPhalaka(7348, { command: 'node', args: ['/fake/phalaka-server.js'] });
     expect(result.status).toBe('started');
     expect(result.pid).toBe(9999);
     expect(mockSpawn).toHaveBeenCalledWith(
-      process.execPath,
+      'node',
       ['/fake/phalaka-server.js'],
       expect.objectContaining({ detached: true }),
     );
@@ -67,7 +67,7 @@ describe('startPhalaka', () => {
   it('includes the shared token and loopback host in the dashboard URL', () => {
     mockReadPhalakaPid.mockReturnValue(null);
 
-    const result = startPhalaka(7348, '/fake/phalaka-server.js');
+    const result = startPhalaka(7348, { command: 'node', args: ['/fake/phalaka-server.js'] });
     expect(result.url).toContain('token=test-token-abc');
     expect(result.url).toContain('127.0.0.1:7348');
   });
@@ -84,7 +84,7 @@ describe('startPhalaka', () => {
     mockReadPhalakaPid.mockReturnValue(null);
     mockSpawn.mockReturnValue({ pid: undefined, unref: vi.fn() });
 
-    expect(() => startPhalaka(7348, '/fake/phalaka-server.js')).toThrow('Failed to spawn');
+    expect(() => startPhalaka(7348, { command: 'node', args: ['/fake/phalaka-server.js'] })).toThrow('Failed to spawn');
   });
 });
 

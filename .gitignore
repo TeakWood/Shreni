@@ -149,3 +149,6 @@ supabase/.env
 supabase/.env.*
 supabase/.temp/
 supabase/.branches/
+
+# Standalone binary build output (Shreni-beads-lbx)
+build/

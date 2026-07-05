@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
-import { resolve } from 'path';
 import { openSync, mkdirSync } from 'fs';
 import { readPid, writePid, isAlive, kshetraDir, workerLogPath } from './pid';
+import { selfExec, type Launch } from './self-exec';
 
 export type StartResult =
   | { status: 'started'; kshetraId: string; pid: number }
@@ -9,7 +9,10 @@ export type StartResult =
 
 export function startWorker(
   kshetraId: string,
-  workerScript: string = resolve(__dirname, 'worker.js'),
+  // Defaults to re-invoking this CLI with the hidden `__worker` subcommand so it
+  // works both under node (spawns `node dist/cli/index.js __worker <id>`) and as
+  // a standalone SEA binary (spawns `<binary> __worker <id>`). Injectable for tests.
+  launch: Launch = selfExec('__worker', [kshetraId]),
 ): StartResult {
   const existing = readPid(kshetraId);
   if (existing !== null && isAlive(existing)) {
@@ -18,7 +21,7 @@ export function startWorker(
 
   mkdirSync(kshetraDir(kshetraId), { recursive: true });
   const logFd = openSync(workerLogPath(kshetraId), 'a');
-  const child = spawn(process.execPath, [workerScript, kshetraId], {
+  const child = spawn(launch.command, launch.args, {
     detached: true,
     stdio: ['ignore', logFd, logFd],
   });
