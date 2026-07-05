@@ -1,40 +1,157 @@
 # Shreni
 
-Automated coding agent harness for your services.
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](#prerequisites)
+[![Built with TypeScript](https://img.shields.io/badge/built%20with-TypeScript-3178c6.svg)](https://www.typescriptlang.org/)
 
-Shreni orchestrates specialised AI agents to pick up structured tasks, write and review code, run tests, and merge approved changes — all without human intervention in the inner loop. You discuss a feature, file a task, and come back to find working code merged into `main`.
+**Shreni turns a backlog into merged code.** You file tasks; a team of AI agents
+picks them up, writes and reviews the code, runs the tests, and merges what passes
+— on your own machine, using the model you choose. You steer by outcome, not by
+babysitting every keystroke.
 
-> **Does Shreni push to `main` without me reviewing? Yes — by default.** When the
-> review agent (Viharapala) approves a change, Sthapathi **squash-merges it
-> straight to `main` and pushes** — there is no human pull-request gate in the
-> inner loop. You steer by *outcome* — the automated review loop, the green-base
-> health gate, and the merged result — not by approving every diff. Every task
-> still passes the Silpi ↔ Viharapala AI review before it can merge. If you want a
-> human gate, set **`mergePolicy: pr`** (see [Merge policy](#merge-policy-push-vs-pr))
-> and Shreni opens a pull request on approval instead of merging — for cautious and
-> team setups.
+It is built around three convictions that set it apart from most agent frameworks:
 
-## Architecture
+- **Bring your own model.** Shreni drives the provider CLI you already pay for
+  (Claude today; Codex/Gemini experimental). No hosted middleman, no per-seat
+  markup, no lock-in to one vendor's model.
+- **Local-first.** The orchestrator, the git repos, the task database, and the
+  dashboard all run on your machine and loopback. Your code never has to leave it.
+- **An explicit merge policy.** Shreni is honest about the scariest question up
+  front: *does a bot push to `main`?* You decide — auto-merge for speed, or a
+  pull-request gate for a human/team sign-off. See [Merge policy](#merge-policy-push-vs-pr).
 
-Shreni has five named components:
+## How it works
 
-| Component | Role |
+Think of Shreni as a small, tireless engineering team you run locally:
+
+- An **orchestrator** watches your task list. When a task is ready and its
+  dependencies are met, it assigns it, sets up an isolated branch, and manages the
+  whole lifecycle — including recovering cleanly if the machine restarts mid-task.
+- A **coding agent** does the work: writes the implementation and unit tests, runs
+  lint and the test suite, and submits the result.
+- A **reviewer agent** judges that result against the task's acceptance criteria,
+  code quality, and coverage — and either approves it or sends it back with
+  specific feedback. The coder and reviewer iterate for a few rounds until the work
+  is approved or the task is flagged for you.
+
+When the reviewer approves, the change lands on `main` (or opens a pull request —
+your choice), and the orchestrator moves to the next task. A separate **test agent**
+runs afterward to backfill coverage. The whole inner loop runs without you in it —
+you steer by *outcome*: the review verdicts, a green-base health gate that refuses
+to start new work on a broken build, and the merged result.
+
+> **Does Shreni push to `main` without me reviewing?** By default, **yes — that's
+> the point**: when the reviewer approves, the change is squash-merged straight to
+> `main`. There is no human pull-request gate in the inner loop; every task still
+> passes the automated coder ↔ reviewer review first. If you want a human gate, set
+> **`mergePolicy: pr`** and Shreni opens a pull request on approval instead of
+> merging — ideal for cautious solo devs and teams. See
+> [Merge policy](#merge-policy-push-vs-pr).
+
+## Why Shreni (vs. the alternatives)
+
+Most tools in this space are either an IDE autocomplete, a Python library for
+*building* an agent graph, or a hosted product that runs your code on someone
+else's servers. Shreni is a **ready-to-run harness** for *autonomous, reviewed,
+task-driven* delivery on your own machine.
+
+| | **Shreni** | Copilot / Cursor / Augment | CrewAI / AutoGen | LangGraph | Roll your own |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Runs autonomously from a backlog | ✅ | ✋ you drive each edit | ⚙️ you build the loop | ⚙️ you build the loop | ⚙️ |
+| Built-in AI code review before merge | ✅ | ❌ | ⚙️ DIY | ⚙️ DIY | ⚙️ |
+| Owns the git + merge workflow | ✅ | ❌ | ❌ | ❌ | ⚙️ |
+| Task-graph driven (dependencies, priorities) | ✅ | ❌ | partial | ✅ (you wire it) | ⚙️ |
+| Bring your own model / CLI | ✅ | ❌ (their model) | ✅ | ✅ | ✅ |
+| Local-first (code stays on your machine) | ✅ | ❌ (mostly cloud) | ✅ | ✅ | depends |
+| Explicit auto-merge **and** PR-gate modes | ✅ | n/a | ❌ | ❌ | ⚙️ |
+
+✅ built-in · ⚙️ possible but you build it · ✋ manual · ❌ not the model
+
+If you want a copilot that suggests lines while *you* type, use a copilot. If you
+want to *assemble* a bespoke agent graph in Python, use CrewAI or LangGraph. If you
+want to hand a backlog to a local, self-reviewing team and get merged commits back,
+that's Shreni.
+
+## Quickstart
+
+> Prefer a zero-setup taste first? See [Prerequisites](#prerequisites) — you need a
+> provider CLI (e.g. Claude) authenticated, plus `bd`, `gh`, and Node ≥ 20.
+
+Install the CLI from source:
+
+```bash
+git clone https://github.com/TeakWood/Shreni.git /projects/shreni
+cd /projects/shreni
+pnpm install
+pnpm build
+npm install -g .          # installs the `shreni` CLI globally
+shreni --version
+```
+
+Register a project (a **Kshetra**) and file your first task:
+
+```bash
+# Your project repo must already exist with a GitHub remote configured.
+shreni init-kshetra --slug myapp --path /projects/myapp
+
+cd /projects/myapp
+bd create "Add user authentication" -p 2 \
+  --description "Email + password login with JWT sessions"
+```
+
+Start the harness and watch it work:
+
+```bash
+shreni start                     # orchestrator begins polling for ready tasks
+shreni agents                    # see which agent is active and on what
+shreni phalaka start             # optional: local dashboard on 127.0.0.1
+```
+
+Sthapathi polls each registered project every 30 seconds. When your task is ready,
+the coder ↔ reviewer loop runs and — on approval — the change merges to `main`.
+
+## Prerequisites
+
+- **Node.js** ≥ 20 and **pnpm** (`npm install -g pnpm`)
+- **`bd` (Beads) CLI** — the task database — `npm install -g @beads/bd`
+- **A provider CLI, authenticated** — **Anthropic API key** (`ANTHROPIC_API_KEY`)
+  for the default Claude provider. The agent still calls a model, so this is
+  required; Shreni does not host one for you.
+- **GitHub CLI** (`gh`) — authenticated for the account/org where your projects
+  live. Used to create the task database repo and (in `pr` merge mode) to open PRs.
+
+## Status
+
+Shreni is **alpha**: the core loop, recovery/watchdog machinery, and merge policies
+are implemented and tested (800+ unit tests), but the install path is source-only
+and the provider story beyond Claude is experimental. Expect rough edges around
+onboarding and distribution — those are the current focus. Feedback and issues
+welcome.
+
+## The team, by name (architecture)
+
+Under the hood, each role above has a Sanskrit name — they are the vocabulary you
+will see in logs, config, and the dashboard:
+
+| Component | Plain-English role |
 |---|---|
-| **Sthapathi** | Orchestrator. Polls `bd` for tasks, manages agent dispatch, drives the Silpi↔Viharapala review loop, and owns the entire task lifecycle and git workflow. |
-| **Silpi** | Coding agent. Receives a task (context injected by Sthapathi), writes implementation code and unit tests, runs lint and tests, then submits for review. |
-| **Viharapala** | Review agent. Evaluates Silpi's output against acceptance criteria, code quality, and test coverage. Returns `APPROVE` or `REJECT` with structured feedback. |
-| **Parikshaka** | Test agent (Sanskrit: examiner). Runs asynchronously after each merge. Writes tests for shipped features and surfaces coverage gaps back to Sthapathi. |
-| **Phalaka** | Local dashboard (Sanskrit: panel). Loopback web UI to watch worker status, task progress, and stuck-state alerts across all Kshetras. |
+| **Sthapathi** (architect) | Orchestrator. Polls `bd` for tasks, dispatches agents, drives the review loop, and owns the task lifecycle and git workflow. |
+| **Silpi** (craftsman) | Coding agent. Writes implementation code and unit tests, runs lint and tests, submits for review. |
+| **Viharapala** (guardian) | Review agent. Judges Silpi's output against acceptance criteria, quality, and coverage; returns `APPROVE` or `REJECT` with structured feedback. |
+| **Parikshaka** (examiner) | Test agent. Runs asynchronously after each merge; backfills tests and surfaces coverage gaps. |
+| **Phalaka** (panel) | Local dashboard. Loopback web UI to watch worker status, task progress, and stuck-state alerts. |
 
-Each project managed by Shreni is a **Kshetra** (Sanskrit: field). A Kshetra has its own git repo, `bd` task database, RAG index, and agent queue. Kshetras are fully isolated — no cross-contamination of context, tasks, or git state.
+Each project managed by Shreni is a **Kshetra** (field) — its own git repo, `bd`
+task database, RAG index, and agent queue, fully isolated from every other project.
 
 ```
 Developer machine
 ├── Sthapathi (Node.js process)
 │   ├── polls bd ready every 30s per Kshetra
 │   ├── dispatches Silpi → Viharapala loop (up to 3 rounds)
-│   ├── squash-merges approved branches to main
-│   └── dispatches E2E agent async post-merge
+│   ├── squash-merges approved branches to main (or opens a PR)
+│   └── dispatches the test agent async post-merge
 ├── Phalaka server (Fastify, loopback)
 │   └── serves the local dashboard at 127.0.0.1
 └── Kshetras/
@@ -44,36 +161,21 @@ Developer machine
     └── myapp-beads/    ← bd Dolt database (git repo)
 ```
 
-**Key design constraint:** Sthapathi is the sole caller of `bd update --claim` and `bd close`. Agents (Silpi, Viharapala, E2E) never call `bd` directly — they receive task context as injected prompt data. Interactive Claude Code sessions can file tasks (`bd create`) but cannot claim or close them.
+**Key design constraint:** Sthapathi is the sole caller of `bd update --claim` and
+`bd close`. Agents (Silpi, Viharapala, Parikshaka) never call `bd` directly — they
+receive task context as injected prompt data. Interactive Claude Code sessions can
+file tasks (`bd create`) but cannot claim or close them.
 
-> For a deeper walkthrough — the worker lifecycle and phase machine, the git workflow, the provider abstraction, and the watchdog/self-heal resilience machinery — see [ARCHITECTURE.md](ARCHITECTURE.md).
+> For a deeper walkthrough — the worker lifecycle and phase machine, the git
+> workflow, the provider abstraction, and the watchdog/self-heal resilience
+> machinery — see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Prerequisites
+## Setting up a Project (Kshetra) in detail
 
-- **Node.js** ≥ 20 and **pnpm** (`npm install -g pnpm`)
-- **`bd` (Beads) CLI** — `npm install -g @beads/bd`
-- **Anthropic API key** — set `ANTHROPIC_API_KEY` in your environment
-- **GitHub CLI** (`gh`) — authenticated with access to the GitHub account or org where your projects live
-
-## Installing Shreni
-
-```bash
-git clone git@github.com:TeakWood/Shreni.git /projects/shreni
-cd /projects/shreni
-pnpm install
-pnpm build
-npm install -g .   # installs the shreni CLI globally
-```
-
-Verify:
-
-```bash
-shreni --version
-```
-
-## Kickstarting a Project (Kshetra)
-
-Before running `shreni init-kshetra`, the project git repo must already exist and have a GitHub remote configured. `init-kshetra` reads the remote URL from the repo (`git remote get-url origin`) to populate `kshetra.yaml` — it does not create the project repo for you.
+Before running `shreni init-kshetra`, the project git repo must already exist and
+have a GitHub remote configured. `init-kshetra` reads the remote URL from the repo
+(`git remote get-url origin`) to populate `kshetra.yaml` — it does not create the
+project repo for you.
 
 ```bash
 # Create and push the project repo first (if it doesn't exist yet)
@@ -82,7 +184,7 @@ cd myapp
 git remote -v   # confirm origin is set
 ```
 
-Then run `shreni init-kshetra` to register a new project. This is a one-time setup per project.
+Then register the project. This is a one-time setup per project:
 
 ```bash
 shreni init-kshetra --slug myapp --path /projects/myapp
@@ -121,13 +223,6 @@ agents:
 > **experimental** — draft and not verified end-to-end — and ship with no default
 > model, so they require an explicit `agents.model`. `shreni init-kshetra` warns
 > you if you pick one. If you want a reliable first run, use Claude.
-
-File your first task:
-
-```bash
-cd /projects/myapp
-bd create "Add user authentication" -p 2 --description "Email + password login with JWT sessions"
-```
 
 ### Config source of truth
 

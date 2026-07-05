@@ -1,7 +1,7 @@
 {
   "name": "shreni",
   "version": "1.0.0",
-  "description": "Automated coding agent harness for your services",
+  "description": "Local-first, bring-your-own-model agent harness that turns a backlog into reviewed, merged code",
   "main": "dist/index.js",
   "bin": {
     "shreni": "dist/cli/index.js"
@@ -18,8 +18,17 @@
     "type": "git",
     "url": "git+https://github.com/TeakWood/Shreni.git"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "ai-agents",
+    "autonomous-agents",
+    "coding-agent",
+    "code-review",
+    "orchestrator",
+    "agent-harness",
+    "local-first",
+    "bring-your-own-model"
+  ],
+  "author": "TeakWood <teakwood.dev@gmail.com>",
   "license": "Apache-2.0",
   "type": "commonjs",
   "packageManager": "pnpm@10.12.1",
