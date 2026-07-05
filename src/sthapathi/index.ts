@@ -1,9 +1,12 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
+import { canTransition, type Phase } from './lifecycle.js';
 
 // Worker lifecycle phase. One task at a time is enforced structurally: a cycle
-// only starts from IDLE (see runCycle). See the Sthapathi workflow design §4.1.
-export type Phase = 'IDLE' | 'SELECTING' | 'PREPARING' | 'WORKING';
+// only starts from IDLE (see runCycle). The legal transitions are formalized in
+// lifecycle.ts (canTransition), consulted by setPhase below.
+// See the Sthapathi workflow design §4.1.
+export type { Phase };
 
 export interface SchedulerHooks {
   // SELECT — read-only: choose the next ready task. Must NOT mutate the work tree.
@@ -35,7 +38,16 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
 
   // Set the in-memory phase and notify the optional observer (the worker persists
   // it to state.json so `shreni status` / Phalaka can show it cross-process).
+  // The transition is validated against the formalized phase machine
+  // (lifecycle.ts): an illegal jump is a logic bug — most importantly a
+  // write-only latch (a phase with no edge back to IDLE) — so warn loudly, but
+  // don't throw. runCycle already owns the hard structural invariant; this is a
+  // tripwire (yds.10), not a second gate that could wedge the loop.
   function setPhase(kshetraId: string, p: Phase): void {
+    const prev = getPhase(kshetraId);
+    if (!canTransition(prev, p)) {
+      console.warn(`[sthapathi] illegal phase transition for "${kshetraId}": ${prev} -> ${p}`);
+    }
     phase.set(kshetraId, p);
     opts.onPhase?.(kshetraId, p);
   }

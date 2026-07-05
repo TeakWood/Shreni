@@ -75,6 +75,15 @@ stateDiagram-v2
     WORKING --> IDLE: cycle complete (merged, rejected, or error-handled)
 ```
 
+This diagram is not just documentation: the same edges are the typed transition
+table in [`src/sthapathi/lifecycle.ts`](src/sthapathi/lifecycle.ts), and
+`setPhase` consults its `canTransition` guard on every phase change. An illegal
+jump — most importantly a *write-only latch* (a phase with no edge back to
+`IDLE`, the Watchdog-ARD bug class) — is a unit-test failure and a runtime
+warning. It is deliberately a lightweight table, not a state-machine library: bd,
+git, and `state.json` stay the durable sources of truth; a heavier engine is
+deferred to post-launch.
+
 Two invariants make this safe under a repeating timer:
 
 1. **One task at a time is structural, not emergent.** A cycle runs *only* from
