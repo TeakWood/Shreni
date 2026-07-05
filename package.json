@@ -12,7 +12,18 @@
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "pnpm build"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "ARCHITECTURE.md",
+    "LICENSE",
+    "TRADEMARK.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "repository": {
     "type": "git",
@@ -33,6 +44,7 @@
   "type": "commonjs",
   "packageManager": "pnpm@10.12.1",
   "engines": {
+    "node": ">=20",
     "npm": "please-use-pnpm",
     "yarn": "please-use-pnpm"
   },
