@@ -38,6 +38,17 @@ export class AgentError extends Error {
   }
 }
 
+// Thrown when the PolicySource pre-run check denies a run (epg.5). The default
+// static policy always allows, so this never fires locally; an optional policy
+// extension may deny (e.g. a gated tier), and the reason is surfaced. Treated as
+// a normal run failure by the caller's retry/error handling.
+export class RunNotPermittedError extends Error {
+  constructor(agentName: string, reason: string) {
+    super(`${agentName}: run not permitted — ${reason}`);
+    this.name = 'RunNotPermittedError';
+  }
+}
+
 type ErrorClass = 'API_DOWN' | 'AGENT_FAILED' | 'MALFORMED_OUTPUT' | 'GIT_FAILED' | 'BD_FAILED' | 'UNKNOWN';
 
 function classifyError(err: unknown): ErrorClass {

@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import { emit, touchHeartbeat, getCurrentRunId } from '../sthapathi/activity-log.js';
-import { AgentAbortedError } from '../sthapathi/errors.js';
-import { getUsageMeter } from '../ext/index.js';
+import { AgentAbortedError, RunNotPermittedError } from '../sthapathi/errors.js';
+import { getUsageMeter, getPolicySource } from '../ext/index.js';
 import { getAdapter } from './providers/index.js';
 import type { AgentRunnerOpts, AgentRunResult, AdapterEmit } from './providers/types.js';
 
@@ -53,31 +53,54 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 // activity log, and retries on transient errors. Provider-specific command
 // construction and output parsing live in ./providers/*.
 export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
-  let lastErr = new Error(`${opts.agentName}: no attempt made`);
+  // Selection + go/no-go run ONCE per run (not per attempt), routed through the
+  // PolicySource seam (epg.5). The default static policy echoes today's
+  // kshetra.yaml choice and always allows, so behavior is unchanged; an optional
+  // policy extension may route the model per bead or deny a run.
+  const policy = getPolicySource();
+  const selection = policy.selectModel({
+    kshetra: opts.kshetraId,
+    beadId: opts.beadId,
+    agent: opts.agentName,
+    default: { provider: opts.provider, model: opts.model },
+  });
+  const decision = policy.mayProceed({
+    kshetra: opts.kshetraId,
+    beadId: opts.beadId,
+    agent: opts.agentName,
+    provider: selection.provider,
+    model: selection.model,
+  });
+  if (!decision.allowed) throw new RunNotPermittedError(opts.agentName, decision.reason);
+
+  // The effective run uses the policy-selected provider/model (identical to
+  // opts under the default policy). Retry/backoff/failover stay here.
+  const runOpts: AgentRunnerOpts = { ...opts, provider: selection.provider, model: selection.model };
+  let lastErr = new Error(`${runOpts.agentName}: no attempt made`);
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const result = await runAttempt(opts);
-      reportUsage(opts, result);
+      const result = await runAttempt(runOpts);
+      reportUsage(runOpts, result);
       return result;
     } catch (err) {
       lastErr = err as Error;
       // A self-heal abort is terminal — never retry it (the run is being
       // cancelled on purpose so the worker can RECOVER).
-      if (lastErr instanceof AgentAbortedError || opts.signal?.aborted) throw lastErr;
+      if (lastErr instanceof AgentAbortedError || runOpts.signal?.aborted) throw lastErr;
       const msg = lastErr.message;
       if (looksTransient(msg) && attempt < MAX_ATTEMPTS) {
         const waitMs = RETRY_BACKOFF_MS[attempt - 1];
         emit({
           type: 'agent_text',
-          kshetra: opts.kshetraId,
-          beadId: opts.beadId,
-          agent: opts.agentName,
+          kshetra: runOpts.kshetraId,
+          beadId: runOpts.beadId,
+          agent: runOpts.agentName,
           text: `[transient error — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${MAX_ATTEMPTS}): ${msg.slice(0, 200)}]`,
         });
-        await sleep(waitMs, opts.signal);
+        await sleep(waitMs, runOpts.signal);
         // The backoff may have been cut short by an abort — re-check before retrying.
-        if (opts.signal?.aborted) throw new AgentAbortedError();
+        if (runOpts.signal?.aborted) throw new AgentAbortedError();
       } else {
         break;
       }

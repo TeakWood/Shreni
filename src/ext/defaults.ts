@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { logPath, type LoggedEvent } from '../sthapathi/activity-log.js';
-import type { EventSink, UsageMeter } from './types.js';
+import type { EventSink, UsageMeter, PolicySource, Entitlements } from './types.js';
 
 // The free-tier default EventSink: append the event to the Kshetra's
 // activity.jsonl exactly as the pre-seam emit() did — same path, same
@@ -29,4 +29,21 @@ export const noopMeter: UsageMeter = {
   record(): void {
     // intentionally does nothing
   },
+};
+
+// The free-tier default PolicySource: selection is exactly today's static answer
+// (the model/provider from kshetra.yaml, passed in as `req.default`), and every
+// run is allowed. An optional extension swaps in a policy that may route model
+// choice per bead or gate a run.
+export const staticPolicySource: PolicySource = {
+  selectModel: req => req.default,
+  mayProceed: () => ({ allowed: true }),
+};
+
+// The free-tier default Entitlements: every capability enabled, no limits. The
+// standalone tool has all locally-available features on. An optional extension
+// swaps in a resolver that may restrict them.
+export const allEnabledEntitlements: Entitlements = {
+  capability: () => true,
+  limit: () => null,
 };

@@ -8,6 +8,7 @@ import { toSlug } from './pickup.js';
 import { pauseKshetra, clearBeadAttempts } from '../kshetra/state.js';
 import { notifyOperator } from './errors.js';
 import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
+import { getEntitlements } from '../ext/index.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 
 // Label marking a bead whose approved work is on a PR awaiting a human merge
@@ -173,8 +174,13 @@ export async function squashMergeAndClose(
   await g.commit(buildCommitMessage(task, output));
   await g.push('origin', main);
 
-  // Fire Parikshaka after merge commit — non-blocking, does not stall the main loop
-  dispatchParikshakaAsync(kshetra, task, output);
+  // Fire Parikshaka after merge commit — non-blocking, does not stall the main
+  // loop. The post-merge test agent is an optional capability: the core asks
+  // Entitlements rather than assuming it's on (epg.5). Default entitlements
+  // enable it, so it always runs locally; an optional extension may gate it.
+  if (getEntitlements().capability('parikshaka')) {
+    dispatchParikshakaAsync(kshetra, task, output);
+  }
 
   const note =
     `Merged: confidence=${output.confidenceScore} ` +

@@ -5,18 +5,25 @@
 // startup before the Sthapathi loop arms.
 
 import { SinkRegistry } from './sink-registry.js';
-import { localFileSink, noopMeter } from './defaults.js';
-import type { EventSink, UsageMeter, ExtensionCore } from './types.js';
+import { localFileSink, noopMeter, staticPolicySource, allEnabledEntitlements } from './defaults.js';
+import type { EventSink, UsageMeter, PolicySource, Entitlements, ExtensionCore } from './types.js';
 
-export type { EventSink, UsageMeter, UsageRecord, ExtensionCore, Extension } from './types.js';
+export type {
+  EventSink, UsageMeter, UsageRecord, PolicySource, Entitlements,
+  ModelSelection, SelectModelRequest, PolicyRunContext, PolicyDecision,
+  AgentRole, ExtensionCore, Extension,
+} from './types.js';
 export { SinkRegistry } from './sink-registry.js';
-export { localFileSink, noopMeter } from './defaults.js';
+export { localFileSink, noopMeter, staticPolicySource, allEnabledEntitlements } from './defaults.js';
 
-// Default sink list = [localFileSink]; default meter = no-op. Mutable so the
-// loader can extend them; read only through the accessors below so a swapped
-// meter is picked up by later reads.
+// Default sink list = [localFileSink]; default meter = no-op; default policy =
+// static (today's kshetra.yaml selection, always allowed); default entitlements =
+// all enabled. All mutable so the loader can extend/swap them; read only through
+// the accessors below so a swapped impl is picked up by later reads.
 const sinkRegistry = new SinkRegistry([localFileSink]);
 let usageMeter: UsageMeter = noopMeter;
+let policySource: PolicySource = staticPolicySource;
+let entitlements: Entitlements = allEnabledEntitlements;
 
 // emit() publishes every event here (activity-log.ts). The registry instance is
 // stable — the loader appends sinks to it rather than replacing it.
@@ -30,8 +37,19 @@ export function getUsageMeter(): UsageMeter {
   return usageMeter;
 }
 
+// runner.ts routes model selection + the pre-run go/no-go check through this.
+export function getPolicySource(): PolicySource {
+  return policySource;
+}
+
+// The core queries this before enabling an optional feature.
+export function getEntitlements(): Entitlements {
+  return entitlements;
+}
+
 // The handle passed to an extension's register(core). Additive: an extension may
-// append sinks and swap the meter, but cannot remove the local defaults.
+// append sinks and swap the meter/policy/entitlements, but cannot remove the
+// local defaults.
 export const extensionCore: ExtensionCore = {
   version: '1',
   addEventSink(sink: EventSink): void {
@@ -39,5 +57,11 @@ export const extensionCore: ExtensionCore = {
   },
   setUsageMeter(meter: UsageMeter): void {
     usageMeter = meter;
+  },
+  setPolicySource(policy: PolicySource): void {
+    policySource = policy;
+  },
+  setEntitlements(e: Entitlements): void {
+    entitlements = e;
   },
 };

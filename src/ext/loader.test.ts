@@ -1,16 +1,20 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { loadExtension, DEFAULT_EXT_MODULE } from './loader.js';
-import type { ExtensionCore, EventSink, UsageMeter } from './types.js';
+import type { ExtensionCore, EventSink, UsageMeter, PolicySource, Entitlements } from './types.js';
 
 function fakeCore() {
   const sinks: EventSink[] = [];
   let meter: UsageMeter | null = null;
+  let policy: PolicySource | null = null;
+  let entitlements: Entitlements | null = null;
   const core: ExtensionCore = {
     version: 'test',
     addEventSink: s => sinks.push(s),
     setUsageMeter: m => { meter = m; },
+    setPolicySource: p => { policy = p; },
+    setEntitlements: e => { entitlements = e; },
   };
-  return { core, sinks, getMeter: () => meter };
+  return { core, sinks, getMeter: () => meter, getPolicy: () => policy, getEntitlements: () => entitlements };
 }
 
 const silentLog = () => {};
@@ -37,16 +41,25 @@ describe('loadExtension (fail-open)', () => {
   });
 
   it('calls register(core) and returns true when the extension is present', async () => {
-    const { core, sinks, getMeter } = fakeCore();
+    const { core, sinks, getMeter, getPolicy, getEntitlements } = fakeCore();
     const extSink: EventSink = { name: 'ext', handle: () => {} };
     const extMeter: UsageMeter = { record: () => {} };
-    const register = vi.fn((c: ExtensionCore) => { c.addEventSink(extSink); c.setUsageMeter(extMeter); });
+    const extPolicy: PolicySource = { selectModel: r => r.default, mayProceed: () => ({ allowed: true }) };
+    const extEnt: Entitlements = { capability: () => false, limit: () => 0 };
+    const register = vi.fn((c: ExtensionCore) => {
+      c.addEventSink(extSink);
+      c.setUsageMeter(extMeter);
+      c.setPolicySource(extPolicy);
+      c.setEntitlements(extEnt);
+    });
     const importer = vi.fn().mockResolvedValue({ register });
     const loaded = await loadExtension({ importer, log: silentLog, core });
     expect(loaded).toBe(true);
     expect(register).toHaveBeenCalledWith(core);
     expect(sinks).toEqual([extSink]);
     expect(getMeter()).toBe(extMeter);
+    expect(getPolicy()).toBe(extPolicy);
+    expect(getEntitlements()).toBe(extEnt);
   });
 
   it('supports a register exported under default', async () => {

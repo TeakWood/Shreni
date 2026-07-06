@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { AgentRunnerOpts } from './providers/types';
 
 // Mock the adapter registry so runAgent spawns a real, controllable long-lived
@@ -9,15 +9,22 @@ vi.mock('./providers/index.js', () => ({ getAdapter: mockGetAdapter }));
 
 // Capture what runAgent hands the UsageMeter on a successful run. getSinkRegistry
 // is stubbed too because activity-log.ts (imported transitively for
-// getCurrentRunId) loads from this same module.
+// getCurrentRunId) loads from this same module. getPolicySource is swappable via
+// policyRef so tests can exercise model override + a mayProceed denial.
 const mockRecord = vi.fn();
+const staticPolicy = {
+  selectModel: (req: { default: unknown }) => req.default,
+  mayProceed: () => ({ allowed: true as const }),
+};
+const policyRef: { current: unknown } = { current: staticPolicy };
 vi.mock('../ext/index.js', () => ({
   getUsageMeter: () => ({ record: mockRecord }),
   getSinkRegistry: () => ({ handle: () => {} }),
+  getPolicySource: () => policyRef.current,
 }));
 
 const { runAgent } = await import('./runner');
-const { AgentAbortedError } = await import('../sthapathi/errors');
+const { AgentAbortedError, RunNotPermittedError } = await import('../sthapathi/errors');
 
 function sleepAdapter(seconds: number) {
   return {
@@ -90,5 +97,30 @@ describe('runAgent usage metering', () => {
     expect(mockRecord.mock.calls[0][0]).toMatchObject({
       inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 1,
     });
+  });
+});
+
+describe('runAgent policy routing', () => {
+  afterEach(() => { policyRef.current = staticPolicy; });
+
+  it('runs with the policy-selected provider/model (reflected in the usage record)', async () => {
+    mockRecord.mockClear();
+    policyRef.current = {
+      selectModel: () => ({ provider: 'openai', model: 'gpt-5' }),
+      mayProceed: () => ({ allowed: true as const }),
+    };
+    mockGetAdapter.mockReturnValue(okAdapter(undefined));
+    await runAgent(OPTS());
+    expect(mockRecord.mock.calls[0][0]).toMatchObject({ provider: 'openai', model: 'gpt-5' });
+  });
+
+  it('throws RunNotPermittedError and never spawns when mayProceed denies', async () => {
+    mockGetAdapter.mockClear();
+    policyRef.current = {
+      selectModel: (req: { default: unknown }) => req.default,
+      mayProceed: () => ({ allowed: false as const, reason: 'gated tier' }),
+    };
+    await expect(runAgent(OPTS())).rejects.toBeInstanceOf(RunNotPermittedError);
+    expect(mockGetAdapter).not.toHaveBeenCalled();
   });
 });
