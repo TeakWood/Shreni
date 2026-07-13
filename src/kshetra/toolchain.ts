@@ -14,6 +14,7 @@ interface Profile {
   build: string;
   test: string;
   lint: string;
+  coverage: string;
   testFileGlobs: string[];
   vendorDirs: string[];
 }
@@ -39,6 +40,7 @@ const STATIC_PROFILES: Record<Exclude<ProfileKey, 'node'>, Profile> = {
     build: '',
     test: 'pytest',
     lint: 'ruff check',
+    coverage: 'pytest --cov',
     testFileGlobs: ['test_*.py', '*_test.py'],
     vendorDirs: ['.venv', '__pycache__'],
   },
@@ -46,6 +48,7 @@ const STATIC_PROFILES: Record<Exclude<ProfileKey, 'node'>, Profile> = {
     build: 'go build ./...',
     test: 'go test ./...',
     lint: 'go vet ./...',
+    coverage: 'go test -cover ./...',
     testFileGlobs: ['*_test.go'],
     vendorDirs: ['vendor'],
   },
@@ -53,6 +56,9 @@ const STATIC_PROFILES: Record<Exclude<ProfileKey, 'node'>, Profile> = {
     build: 'cargo build',
     test: 'cargo test',
     lint: 'cargo clippy',
+    // No standard cargo coverage tool (tarpaulin/llvm-cov are opt-in installs),
+    // so coverage skips by default; set stack.coverageCommand to enable.
+    coverage: '',
     testFileGlobs: ['tests/**', '*_test.rs'],
     vendorDirs: ['target'],
   },
@@ -60,6 +66,9 @@ const STATIC_PROFILES: Record<Exclude<ProfileKey, 'node'>, Profile> = {
     build: 'mvn -q compile',
     test: 'mvn -q test',
     lint: 'mvn -q checkstyle:check',
+    // Coverage needs a jacoco (or similar) plugin wired into the pom, so no
+    // safe default exists; set stack.coverageCommand to enable.
+    coverage: '',
     testFileGlobs: ['*Test.java'],
     vendorDirs: ['target'],
   },
@@ -69,6 +78,7 @@ const STATIC_PROFILES: Record<Exclude<ProfileKey, 'node'>, Profile> = {
     build: '',
     test: '',
     lint: '',
+    coverage: '',
     testFileGlobs: [],
     vendorDirs: ['.git'],
   },
@@ -80,6 +90,7 @@ function nodeProfile(packageManager: string): Profile {
     build: `${pm} build`,
     test: `${pm} test`,
     lint: `${pm} lint`,
+    coverage: `${pm} test:coverage`,
     testFileGlobs: ['**/*.test.ts', '**/*.spec.ts', '**/*.test.js'],
     vendorDirs: ['node_modules', 'dist'],
   };
@@ -112,6 +123,12 @@ export function resolveTestCommand(kshetra: KshetraConfig): string {
 // that has no lint step.
 export function resolveLintCommand(kshetra: KshetraConfig): string {
   return resolveCommand(kshetra.stack.lintCommand, profileFor(kshetra).lint);
+}
+
+// The coverage gate/report command. "" = skipped (a project without a coverage
+// script opts out with an explicit stack.coverageCommand: '').
+export function resolveCoverageCommand(kshetra: KshetraConfig): string {
+  return resolveCommand(kshetra.stack.coverageCommand, profileFor(kshetra).coverage);
 }
 
 // Test-file globs for Parikshaka's static discovery walk. Config override wins.

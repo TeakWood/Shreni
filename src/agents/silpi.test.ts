@@ -213,6 +213,47 @@ describe('runSilpi', () => {
     expect(opts.systemPrompt).toContain('function foo() {}');
   });
 
+  // Command-drift fix: the prompt carries the exact toolchain-resolved commands
+  // the gate enforces, so Silpi never iterates against a different command.
+  describe('QUALITY GATES section', () => {
+    it('injects the resolved toolchain commands', async () => {
+      await runSilpi(CONTEXT, 1);
+      const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+      expect(opts.systemPrompt).toContain('== QUALITY GATES ==');
+      expect(opts.systemPrompt).toContain('- build: `pnpm build`');
+      expect(opts.systemPrompt).toContain('- test: `pnpm test`');
+      expect(opts.systemPrompt).toContain('- lint: `pnpm lint`');
+      expect(opts.systemPrompt).toContain('- coverage: `pnpm test:coverage`');
+    });
+
+    it('stack overrides win and empty commands are omitted', async () => {
+      const ctx = {
+        ...CONTEXT,
+        kshetra: {
+          ...KSHETRA,
+          stack: { language: 'typescript', testRunner: 'vitest run', coverageCommand: '' },
+        },
+      };
+      await runSilpi(ctx, 1);
+      const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+      expect(opts.systemPrompt).toContain('- test: `vitest run`');
+      expect(opts.systemPrompt).not.toContain('- coverage:');
+    });
+
+    it('omits the section entirely when no command resolves (unknown language)', async () => {
+      const ctx = { ...CONTEXT, kshetra: { ...KSHETRA, stack: { language: 'brainfuck' } } };
+      await runSilpi(ctx, 1);
+      const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+      expect(opts.systemPrompt).not.toContain('== QUALITY GATES ==');
+    });
+
+    it('no longer tells Silpi to discover commands from the instruction file', async () => {
+      await runSilpi(CONTEXT, 1);
+      const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+      expect(opts.systemPrompt).not.toContain('check the project instruction file for commands');
+    });
+  });
+
   it('includes branch name in system prompt and user prompt', async () => {
     await runSilpi(CONTEXT, 1, null, 'bead-proj-42/fix-auth');
     const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string; userPrompt: string };

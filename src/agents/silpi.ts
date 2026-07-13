@@ -1,4 +1,11 @@
 import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
+import type { KshetraConfig } from '../kshetra/config.js';
+import {
+  resolveBuildCommand,
+  resolveTestCommand,
+  resolveLintCommand,
+  resolveCoverageCommand,
+} from '../kshetra/toolchain.js';
 import { ParseError } from '../sthapathi/errors.js';
 import { runAgent } from './runner.js';
 
@@ -36,6 +43,27 @@ const SILPI_OUTPUT_SCHEMA: Record<string, unknown> = {
   ],
 };
 
+// The exact commands the harness will enforce at the gate (toolchain
+// single-source), injected so Silpi never iterates against a different command
+// than the one that decides APPROVE/REJECT (command-drift). Empty commands are
+// omitted (that gate is skipped); all empty → no section.
+function qualityGateCommands(kshetra: KshetraConfig): string {
+  const commands: Array<[string, string]> = [
+    ['build', resolveBuildCommand(kshetra)],
+    ['test', resolveTestCommand(kshetra)],
+    ['lint', resolveLintCommand(kshetra)],
+    ['coverage', resolveCoverageCommand(kshetra)],
+  ];
+  const lines = commands.filter(([, cmd]) => cmd).map(([name, cmd]) => `- ${name}: \`${cmd}\``);
+  if (lines.length === 0) return '';
+  return (
+    `== QUALITY GATES ==\n` +
+    `These are the EXACT commands the harness runs to gate your submission.\n` +
+    `Run these — not variants from docs or scripts — so your local result matches the gate:\n` +
+    lines.join('\n')
+  );
+}
+
 function buildSilpiSystemPrompt(
   context: AgentContext,
   round: number,
@@ -70,6 +98,9 @@ function buildSilpiSystemPrompt(
 
   if (context.ragChunks) sections.push(`== RELEVANT CODE ==\n${context.ragChunks}`);
 
+  const gateCommands = qualityGateCommands(context.kshetra);
+  if (gateCommands) sections.push(gateCommands);
+
   sections.push(`== ROLE BOUNDARY ==
 You are Silpi, the Sthapathi-dispatched implementer for this bead, running
 unattended — this is NOT an interactive session. Any repository instruction
@@ -82,7 +113,7 @@ Do NOT call \`bd\` commands. Do NOT push to remote.
 1. Use Read to understand the existing codebase structure and patterns.
 2. Implement the task fully using Write and Edit tools.
 3. Write unit tests covering the new behaviour.
-4. Run the project's quality gates (check the project instruction file for commands) using Bash — ALL must pass.
+4. ${gateCommands ? 'Run the quality gates using Bash — the EXACT commands in == QUALITY GATES == — ALL must pass.' : "Run the project's quality gates using Bash, if it has any — ALL must pass."}
 5. If tests or lint fail, fix them before proceeding.
 6. Commit all changes: \`git add -A && git commit -m "${context.task.id}: <brief description>"\`
 7. Get the diff of your commit: \`git show --stat HEAD && git diff HEAD~1 HEAD\`

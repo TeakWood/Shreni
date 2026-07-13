@@ -105,10 +105,18 @@ const KSHETRA: KshetraConfig = {
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
   beads: { path: '/projects/myapp-beads', remote: '', mode: 'embedded' },
-  stack: { language: 'typescript' },
+  // coverageCommand '' so the real evaluateGates skips coverage instead of
+  // exec'ing a coverage run in tests.
+  stack: { language: 'typescript', coverageCommand: '' },
   conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
+  gates: {
+    test: { level: 'block' },
+    lint: { level: 'block' },
+    coverage: { level: 'warn' },
+    diffSize: { level: 'warn', maxFiles: 40, maxLines: 1500 },
+  },
 } as unknown as KshetraConfig;
 
 const WIP_TASK: Task = {

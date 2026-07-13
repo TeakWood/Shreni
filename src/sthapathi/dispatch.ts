@@ -13,6 +13,7 @@ import { createTaskBranch, branchName } from './branch.js';
 import { squashMergeAndClose, openPrAndDefer, resolveMergePolicy } from './merge.js';
 import { isHealthBead, measureHealth } from './health.js';
 import { runLintGate } from './lint.js';
+import { evaluateGates } from './gates.js';
 import { recordProgress, setHealthBaseline } from '../kshetra/state.js';
 import { AgentAbortedError } from './errors.js';
 import { captureGuard, assertOnBranch, recoverOffBranch, OffBranchError, type BranchGuard } from './guard.js';
@@ -202,6 +203,10 @@ export async function runSilpiViharapalaLoop(
     // Silpi's self-reported lintPassed (the toolchain design §3.3). When no lint gate
     // is configured, runLintGate skips-and-logs and reports passed=true.
     const lint = await runLintGate(kshetra);
+    // Configurable gates (kshetra.yaml gates:): evaluated at this same decision
+    // point, commands delegate to the toolchain single-source. test/lint stay
+    // hard-blocking (level clamped); coverage honours its configured level.
+    const gates = await evaluateGates(kshetra, health, lint, branch);
 
     emit({
       type: 'silpi_done',
@@ -219,12 +224,22 @@ export async function runSilpiViharapalaLoop(
       await bdClient.remember(insight);
     }
 
-    if (!health.green || !lint.passed) {
-      await bdClient.addNote(task.id, `Round ${round}: lint/tests failed`);
+    // Failing warn gates never block, but they are surfaced on the bead so a
+    // human (and the next round's prompt context) can see them.
+    if (gates.warnings.length > 0) {
+      await bdClient.addNote(
+        task.id,
+        `Round ${round}: gate warnings (non-blocking) — ${gates.warnings.map(w => w.reason).join(' | ')}`,
+      );
+    }
+
+    if (!gates.passed) {
+      const failed = gates.blockers.map(b => b.gate).join(', ');
+      await bdClient.addNote(task.id, `Round ${round}: gates failed (${failed})`);
       lastRejectSource = 'tests';
       feedback = {
         verdict: 'REJECT',
-        mustFix: ['Tests or lint failed — fix before resubmitting'],
+        mustFix: gates.blockers.map(b => b.reason),
         overallScore: 0,
         suggestions: [],
         issues: [],

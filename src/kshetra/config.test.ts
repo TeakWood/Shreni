@@ -92,6 +92,28 @@ stack:
     expect(config.priority.p0AutoAssign).toBe(true);
     expect(config.priority.maxConcurrentBeads).toBe(1);
     expect(config.repo.mainBranch).toBe('main');
+    // gates: defaults — test/lint block, coverage warn, diffSize warn 40/1500.
+    expect(config.gates).toEqual({
+      test: { level: 'block' },
+      lint: { level: 'block' },
+      coverage: { level: 'warn' },
+      diffSize: { level: 'warn', maxFiles: 40, maxLines: 1500 },
+    });
+  });
+
+  it('accepts a partial gates block and fills the rest with defaults', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + '\ngates:\n  coverage:\n    level: block\n  diffSize:\n    maxFiles: 10\n');
+    const config = loadKshetraConfig(path);
+    expect(config.gates.coverage.level).toBe('block');
+    expect(config.gates.diffSize).toEqual({ level: 'warn', maxFiles: 10, maxLines: 1500 });
+    expect(config.gates.test.level).toBe('block');
+  });
+
+  it('rejects an invalid gate level', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + '\ngates:\n  test:\n    level: "off"\n');
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
   });
 
   it('throws KshetraConfigError when file does not exist', () => {

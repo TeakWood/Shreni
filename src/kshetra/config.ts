@@ -48,6 +48,10 @@ const StackConfigSchema = z.object({
   // an independent gate; omit to skip lint (never synthesised for a repo that
   // has none).
   lintCommand: z.string().optional(),
+  // Coverage gate/report command. Omit to use the language default (e.g.
+  // `<pm> test:coverage` on node); set to "" when the repo has no coverage
+  // script so the gate visibly skips.
+  coverageCommand: z.string().optional(),
   // Optional escape hatches (§3.4) — usually unnecessary; the runner's own
   // config already declares these. Set testFileGlobs/vendorDirs only when the
   // harness must discover tests WITHOUT invoking the runner (Parikshaka's
@@ -86,6 +90,42 @@ const PriorityConfigSchema = z.object({
   maxConcurrentBeads: z.number().int().min(1).default(1),
 });
 
+// Configurable quality gates (delegate-first): entries carry ONLY an
+// enforcement level — the command each gate runs resolves from the toolchain
+// single-source (resolveTest/Lint/CoverageCommand), never restated here.
+// Gates are additive-stricter: the hard build/test/lint gates sit above this
+// layer and cannot be waived (a 'warn' on test/lint is clamped to block by the
+// evaluator); a repo opts out of a gate by emptying its toolchain command
+// (e.g. lintCommand: ''), which is a visible skip. Coverage defaults to warn
+// (advisory, matching Parikshaka today).
+const GateEntrySchema = z.object({
+  level: z.enum(['block', 'warn']),
+});
+
+// The one loop-native guard (no equivalent in the repo's own tooling): caps the
+// bead branch's diff against main. Conservative warn-level defaults — a
+// runaway-agent tripwire, not a style rule; raise to block for repos where an
+// oversized diff must never reach review.
+const DiffSizeGateSchema = z.object({
+  level: z.enum(['block', 'warn']).default('warn'),
+  maxFiles: z.number().int().positive().default(40),
+  maxLines: z.number().int().positive().default(1500),
+});
+
+const GATES_DEFAULTS = {
+  test: { level: 'block' },
+  lint: { level: 'block' },
+  coverage: { level: 'warn' },
+  diffSize: { level: 'warn', maxFiles: 40, maxLines: 1500 },
+} as const;
+
+const GatesConfigSchema = z.object({
+  test: GateEntrySchema.default(GATES_DEFAULTS.test),
+  lint: GateEntrySchema.default(GATES_DEFAULTS.lint),
+  coverage: GateEntrySchema.default(GATES_DEFAULTS.coverage),
+  diffSize: DiffSizeGateSchema.default(GATES_DEFAULTS.diffSize),
+});
+
 // Optional per-Kshetra overrides for the stuck-watchdog and recovery budget.
 // Any omitted field falls back to the defaults in watchdog.ts / recover.ts.
 const WatchdogConfigSchema = z.object({
@@ -104,6 +144,7 @@ export const KshetraConfigSchema = z.object({
   conventions: ConventionsConfigSchema.default({ styleGuide: undefined, architecture: undefined }),
   agents: AgentsConfigSchema.default({ provider: 'anthropic', model: DEFAULT_AGENT_MODEL, maxRoundsPerBead: 3 }),
   priority: PriorityConfigSchema.default({ p0AutoAssign: true, maxConcurrentBeads: 1 }),
+  gates: GatesConfigSchema.default(GATES_DEFAULTS),
   watchdog: WatchdogConfigSchema.optional(),
 });
 

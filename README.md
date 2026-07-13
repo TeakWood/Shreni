@@ -283,6 +283,40 @@ SHRENI_MERGE_POLICY=pr shreni start   # runtime override of the config, all Kshe
 > `pr` mode uses the `gh` CLI (already a prerequisite) to open and inspect PRs, so
 > `gh` must be authenticated for the account that owns the project repo.
 
+### Quality gates (`gates:`)
+
+Every round, after Silpi submits, the harness runs the project's quality gates and
+only forwards clean work to Viharapala. The optional `gates:` block in
+`kshetra.yaml` controls **how strictly** each gate is enforced — never *what* it
+runs:
+
+```yaml
+gates:                    # all optional — these are the defaults
+  test:     { level: block }
+  lint:     { level: block }
+  coverage: { level: warn }
+  diffSize: { level: warn, maxFiles: 40, maxLines: 1500 }
+```
+
+- **Delegate-first.** Gate commands are never restated here — each gate resolves
+  its command from the toolchain single-source (`stack.testRunner`,
+  `stack.lintCommand`, `stack.coverageCommand`, falling back to the language
+  default, e.g. `pnpm test:coverage` on node). To disable a gate, empty its
+  command (`coverageCommand: ""`) — a visible skip, never a silent pass. Silpi's
+  prompt is injected with the same resolved commands, so the agent iterates
+  against exactly what the gate will enforce.
+- **`block` vs `warn`.** A failing `block` gate rejects the round with a per-gate
+  reason fed back to Silpi; a failing `warn` gate is noted on the bead but does
+  not block. Enforcement happens at the dispatch decision point — stronger than a
+  bypassable git hook.
+- **Additive-stricter only.** The hard `build`/`test`/`lint` gates cannot be
+  waived: setting `test` or `lint` to `warn` is clamped back to `block`. Config
+  may only tighten (e.g. raise `coverage` to `block`), never loosen.
+- **`diffSize`** is the one loop-native guard (no equivalent in the repo's own
+  tooling): it caps the bead branch's diff against `main` — a runaway-agent
+  tripwire. Defaults are conservative and `warn`-level; raise to `block` if an
+  oversized diff must never reach review.
+
 ## Running the Harness
 
 ### Start / Stop

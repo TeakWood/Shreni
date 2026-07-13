@@ -99,10 +99,18 @@ const KSHETRA: KshetraConfig = {
     remote: 'git@github.com:TeakWood/myapp-beads.git',
     mode: 'embedded',
   },
-  stack: { language: 'typescript' },
+  // coverageCommand '' so the real evaluateGates skips coverage instead of
+  // exec'ing a coverage run in tests.
+  stack: { language: 'typescript', coverageCommand: '' },
   conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
+  gates: {
+    test: { level: 'block' },
+    lint: { level: 'block' },
+    coverage: { level: 'warn' },
+    diffSize: { level: 'warn', maxFiles: 40, maxLines: 1500 },
+  },
 };
 
 const TASK: Task = {
@@ -391,7 +399,7 @@ describe('runSilpiViharapalaLoop', () => {
     expect(result.approved).toBe(true);
   });
 
-  it('adds lint/tests failed note when the enforced lint gate fails', async () => {
+  it('adds gates failed note when the enforced lint gate fails', async () => {
     mockRunSilpi
       .mockResolvedValueOnce(SILPI_PASS)
       .mockResolvedValueOnce(SILPI_PASS);
@@ -400,7 +408,7 @@ describe('runSilpiViharapalaLoop', () => {
       .mockResolvedValue({ passed: true, skipped: false, raw: '' });
     mockRunViharapala.mockResolvedValueOnce(VIHARAPALA_APPROVE);
     await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
-    expect(mockBdAddNote).toHaveBeenCalledWith('proj-42', expect.stringContaining('lint/tests failed'));
+    expect(mockBdAddNote).toHaveBeenCalledWith('proj-42', expect.stringContaining('gates failed (lint)'));
   });
 
   it('REJECTS on a failing lint gate even when Silpi self-reports lintPassed=true', async () => {
