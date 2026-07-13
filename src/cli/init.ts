@@ -32,10 +32,9 @@ async function promptWithDefault(question: string, def: string): Promise<string>
 // same defaults. Everything else (provider selection, the beads-repo creation,
 // config, hooks, registration) is delegated unchanged to initKshetra.
 //
-// NOTE (yds.1 scope): this wraps the existing flow — it does NOT create the app
-// repo or its GitHub remote. The repo at --path must already exist with an
-// `origin` remote (enforced by initKshetra's Config phase). Auto-scaffolding a
-// brand-new app repo is deliberately out of scope for this wrapper.
+// The zero-repo case (yds.11) is handled inside initKshetra's App-repo phase:
+// a path without a git repo / origin remote is git-inited, its GitHub repo
+// created via gh, and an initial commit pushed before the rest of the flow.
 export async function runInit(opts: InitOpts): Promise<void> {
   const interactive = Boolean(process.stdin.isTTY);
 

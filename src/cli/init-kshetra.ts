@@ -87,6 +87,47 @@ async function exec(cmd: string, args: string[], opts: { cwd?: string; env?: Nod
   return stdout.trim();
 }
 
+// ── Step 0: Ensure the app repo exists with an origin remote (yds.11) ─────────
+
+// The zero-repo on-ramp: `shreni init` in a brand-new directory. If the path
+// already has an `origin` remote this is a no-op (the yds.1 wrapper path,
+// byte-identical). Otherwise: git-init if needed, create the app GitHub repo
+// via gh (mirroring the beads-repo flow), wire `origin`, make an initial
+// commit on an unborn HEAD, and push — so the Config phase's origin
+// requirement is satisfied instead of enforced-and-failed.
+export async function ensureAppRepo(org: string, slug: string, repoPath: string): Promise<void> {
+  if (!existsSync(join(repoPath, '.git'))) {
+    mkdirSync(repoPath, { recursive: true });
+    await exec('git', ['init', '-b', 'main'], { cwd: repoPath });
+  }
+
+  try {
+    await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
+    return; // already wired — nothing outward-facing happens
+  } catch {
+    // no origin remote — scaffold it
+  }
+
+  const remote = `git@github.com:${org}/${slug}.git`;
+  try {
+    await exec('gh', ['repo', 'view', `${org}/${slug}`], {});
+  } catch {
+    await exec('gh', ['repo', 'create', `${org}/${slug}`, '--private', '--confirm'], {});
+  }
+  await exec('git', ['remote', 'add', 'origin', remote], { cwd: repoPath });
+
+  // Unborn HEAD (fresh git init): commit whatever is present so there is a
+  // branch to push; --allow-empty covers the truly empty directory.
+  try {
+    await exec('git', ['rev-parse', 'HEAD'], { cwd: repoPath });
+  } catch {
+    await exec('git', ['add', '-A'], { cwd: repoPath });
+    await exec('git', ['commit', '--allow-empty', '-m', 'chore: initial commit (shreni init)'], { cwd: repoPath });
+  }
+  const branch = await exec('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath });
+  await exec('git', ['push', '-u', 'origin', branch], { cwd: repoPath });
+}
+
 // ── Step 1: Create GitHub beads repo ─────────────────────────────────────────
 
 export async function createGitHubRepo(org: string, slug: string): Promise<string> {
@@ -497,6 +538,15 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   let configPath = configTarget;
 
   const phases: InitPhase[] = [
+    {
+      name: 'App repo',
+      recovery:
+        `ensure \`gh\` is authenticated (gh auth status) and you can push to GitHub; ` +
+        `or create the repo at ${repoPath} yourself with an 'origin' remote and re-run.`,
+      run: async () => {
+        await ensureAppRepo(org, opts.slug, repoPath);
+      },
+    },
     {
       name: 'Beads repo',
       recovery:
