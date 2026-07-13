@@ -1,0 +1,16 @@
+name: node-api
+version: 1
+description: Backend Node API (fastify/express) + TypeScript + vitest + eslint
+detect:
+  packageJson:
+    dependencies: ["fastify", "express"]
+    # Shared with nextjs-vitest so a framework hit here always outranks the
+    # test-runner hint alone (a fastify+vitest repo must not tie with nextjs).
+    devDependencies: ["vitest"]
+stack:
+  language: typescript
+  framework: fastify
+  packageManager: pnpm
+  buildCommand: pnpm build
+  testRunner: pnpm test
+  lintCommand: pnpm lint

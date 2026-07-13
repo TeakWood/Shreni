@@ -1,0 +1,16 @@
+name: nextjs-vitest
+version: 1
+description: Next.js App Router + TypeScript + vitest + eslint
+detect:
+  files: ["next.config.*"]
+  packageJson:
+    dependencies: ["next"]
+    devDependencies: ["vitest"]
+stack:
+  language: typescript
+  framework: nextjs
+  packageManager: pnpm
+  # next build runs tsc — the build gate doubles as the type-check gate.
+  buildCommand: pnpm build
+  testRunner: pnpm test
+  lintCommand: pnpm lint

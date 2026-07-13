@@ -1,0 +1,15 @@
+name: go-service
+version: 1
+description: Go stdlib HTTP service — race-on tests, vet, standard layout
+detect:
+  files: ["go.mod"]
+stack:
+  language: go
+  buildCommand: go build ./...
+  # Race detector on by default (deliberately stricter than the bare go
+  # profile): cheap at fixture scale and catches the class of bug agents
+  # introduce most.
+  testRunner: go test -race ./...
+  # Detection adds `golangci-lint run` here when .golangci.yml exists; the
+  # universal baseline is vet.
+  lintCommand: go vet ./...

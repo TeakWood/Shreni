@@ -1,0 +1,19 @@
+name: python-fastapi
+version: 1
+description: FastAPI + uv + pytest + ruff (pydantic-first conventions)
+detect:
+  pyproject:
+    dependencies: ["fastapi"]
+stack:
+  language: python
+  framework: fastapi
+  # No build step for a Python service (Toolchain OQ3) — an explicit, visible
+  # skip. Repos wanting a type gate set: buildCommand: uv run mypy .
+  buildCommand: ""
+  # uv-first (ARD §4.3): uv resolves the environment so PATH drift — the top
+  # field-failure prediction for Python — can't break the gates. Manual escape
+  # hatch: .venv/bin/pytest via stack.testRunner.
+  testRunner: uv run pytest
+  lintCommand: uv run ruff check
+  # No coverage plugin in the fixture; enable with: uv run pytest --cov
+  coverageCommand: ""

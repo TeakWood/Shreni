@@ -58,6 +58,9 @@ jobs:
       - run: pnpm build
       - name: Install bd + claude CLIs
         run: npm install -g @beads/bd @anthropic-ai/claude-code
+      # Per-ecosystem toolchains the fixtures need: uv for python-fastapi
+      # (backlog.sh runs `uv sync`); Go ships on ubuntu-latest already.
+      - uses: astral-sh/setup-uv@v5
       - name: Git identity for fixture commits
         run: |
           git config --global user.name "shreni-cert"
