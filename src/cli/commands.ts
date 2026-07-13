@@ -176,7 +176,7 @@ export const COMMANDS: Command[] = [
   {
     name: 'init',
     summary: 'Onboard a repo in one step (prompts for slug/path, then scaffolds the kshetra)',
-    usage: '[--slug <id>] [--path <repo-path>] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--dry-run]',
+    usage: '[--slug <id>] [--path <repo-path>] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--dry-run]',
     run(ctx) {
       const mergePolicy = ctx.flag('--merge-policy');
       if (mergePolicy && mergePolicy !== 'push' && mergePolicy !== 'pr') {
@@ -192,13 +192,16 @@ export const COMMANDS: Command[] = [
         model: ctx.flag('--model'),
         mergePolicy: (mergePolicy as 'push' | 'pr' | undefined) ?? undefined,
         dryRun: ctx.has('--dry-run'),
+        pack: ctx.flag('--pack') ?? undefined,
+        noPack: ctx.has('--no-pack'),
+        upgrade: ctx.has('--upgrade'),
       });
     },
   },
   {
     name: 'init-kshetra',
     summary: 'Scaffold and register a new kshetra from a repo path',
-    usage: '--slug <id> --path <repo-path> [--org <org>] [--language <lang>] [--beads-path <path>] [--provider claude|codex|gemini] [--model <id>] [--merge-policy push|pr] [--dry-run]',
+    usage: '--slug <id> --path <repo-path> [--org <org>] [--language <lang>] [--beads-path <path>] [--provider claude|codex|gemini] [--model <id>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--dry-run]',
     run(ctx) {
       const slug = ctx.flag('--slug');
       const path = ctx.flag('--path');
@@ -222,6 +225,9 @@ export const COMMANDS: Command[] = [
         model: model ?? undefined,
         mergePolicy: (mergePolicy as 'push' | 'pr' | null) ?? undefined,
         dryRun,
+        pack: ctx.flag('--pack') ?? undefined,
+        noPack: ctx.has('--no-pack'),
+        upgrade: ctx.has('--upgrade'),
       });
     },
   },

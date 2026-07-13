@@ -12,6 +12,9 @@ export interface InitOpts {
   model?: string;
   mergePolicy?: 'push' | 'pr';
   dryRun?: boolean;
+  pack?: string;
+  noPack?: boolean;
+  upgrade?: boolean;
 }
 
 // Ask a question, showing `def` as the bracketed default; empty input keeps it.
@@ -57,5 +60,8 @@ export async function runInit(opts: InitOpts): Promise<void> {
     model: opts.model,
     mergePolicy: opts.mergePolicy,
     dryRun: opts.dryRun,
+    pack: opts.pack,
+    noPack: opts.noPack,
+    upgrade: opts.upgrade,
   });
 }

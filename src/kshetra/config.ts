@@ -141,6 +141,10 @@ export const KshetraConfigSchema = z.object({
   repo: RepoConfigSchema,
   beads: BeadsConfigSchema,
   stack: StackConfigSchema,
+  // Provenance only ("<name>@<version>", e.g. nextjs-vitest@1): records which
+  // stack pack init materialized this config from. Nothing resolves through it
+  // at runtime — the pack's values were written into stack.* at init.
+  pack: z.string().regex(/^[a-z0-9-]+@\d+$/, 'pack must be "<name>@<version>"').optional(),
   conventions: ConventionsConfigSchema.default({ styleGuide: undefined, architecture: undefined }),
   agents: AgentsConfigSchema.default({ provider: 'anthropic', model: DEFAULT_AGENT_MODEL, maxRoundsPerBead: 3 }),
   priority: PriorityConfigSchema.default({ p0AutoAssign: true, maxConcurrentBeads: 1 }),

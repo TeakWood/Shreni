@@ -43,6 +43,15 @@ vi.mock('fs', () => ({
 const mockRegisterKshetra = vi.fn();
 vi.mock('../kshetra/registry', () => ({ registerKshetra: mockRegisterKshetra }));
 
+// Pack loading probes the packs dir on disk; stub the by-name resolver and keep
+// the pure pieces (mergeStack) real. loadPack/listPacks are unit-tested in
+// packs.test.ts against a real tmp dir.
+const mockLoadPackByName = vi.fn();
+vi.mock('../kshetra/packs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../kshetra/packs')>();
+  return { ...actual, loadPackByName: (...a: unknown[]) => mockLoadPackByName(...a) };
+});
+
 // Preflight probes the real filesystem/PATH; stub it so the orchestrator tests
 // exercise the write path rather than the (mocked-false) CLI-present check. The
 // resolver + preflight are unit-tested directly (resolveAgents here,
@@ -71,6 +80,9 @@ const {
   generateKshetraYaml,
   writeKshetraConfig,
   scaffoldConventions,
+  materializePackTemplates,
+  printPackTemplateDiffs,
+  upgradeKshetraStack,
   smokeCheckToolchain,
   appendShreniIntegration,
   createRagIndexStub,
@@ -474,6 +486,140 @@ describe('scaffoldConventions', () => {
   });
 });
 
+// ── Packs: materialization, provenance, --upgrade (84m.2) ─────────────────────
+
+const FAKE_PACK = {
+  name: 'nextjs-vitest',
+  version: 1,
+  dir: '/packs/nextjs-vitest',
+  stack: {
+    language: 'typescript',
+    framework: 'nextjs',
+    packageManager: 'pnpm',
+    buildCommand: 'pnpm build',
+    testRunner: 'pnpm test',
+    lintCommand: 'pnpm lint',
+  },
+};
+
+describe('materializePackTemplates', () => {
+  it('copies the three conventions templates into .shreni/ and returns pointers', () => {
+    mockExistsSync.mockReturnValue(false);
+    mockReadFileSync.mockImplementation((p: unknown) => `template: ${p as string}`);
+
+    const conventions = materializePackTemplates(FAKE_PACK, '/repos/myapp');
+
+    for (const f of ['style-guide.md', 'arch.md', 'review-guide.md']) {
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        join('/repos/myapp', '.shreni', f),
+        `template: ${join('/packs/nextjs-vitest', f)}`,
+        'utf8',
+      );
+    }
+    expect(conventions).toEqual({
+      styleGuide: join('.shreni', 'style-guide.md'),
+      architecture: join('.shreni', 'arch.md'),
+      reviewGuide: join('.shreni', 'review-guide.md'),
+    });
+  });
+
+  it('never overwrites existing files — skip and warn', () => {
+    mockExistsSync.mockReturnValue(true);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    materializePackTemplates(FAKE_PACK, '/repos/myapp');
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    const warned = warnSpy.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(warned).toContain('already exists');
+    warnSpy.mockRestore();
+  });
+});
+
+describe('upgradeKshetraStack', () => {
+  it('updates stack values + provenance and preserves every other config block', () => {
+    mockReadFileSync.mockReturnValue(
+      'id: myapp\nagents:\n  provider: anthropic\n  model: m\nstack:\n  language: typescript\n  testRunner: old-runner\ngates:\n  coverage:\n    level: block\n',
+    );
+    upgradeKshetraStack('/repos/myapp/.shreni/kshetra.yaml', FAKE_PACK.stack, 'nextjs-vitest@2');
+    const written = mockWriteFileSync.mock.calls[0][1] as string;
+    expect(written).toContain('testRunner: pnpm test');
+    expect(written).not.toContain('old-runner');
+    expect(written).toContain('pack: nextjs-vitest@2');
+    expect(written).toContain('provider: anthropic');
+    expect(written).toContain('level: block');
+  });
+});
+
+describe('printPackTemplateDiffs', () => {
+  it('runs diff -u per existing doc and prints the output when they differ', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExecFile.mockRejectedValue(
+      Object.assign(new Error('differs'), { stdout: '--- current\n+++ pristine' }),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await printPackTemplateDiffs(FAKE_PACK, '/repos/myapp');
+
+    expect(mockExecFile).toHaveBeenCalledTimes(3);
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'diff',
+      ['-u', join('/repos/myapp', '.shreni', 'review-guide.md'), join('/packs/nextjs-vitest', 'review-guide.md')],
+      expect.any(Object),
+    );
+    const out = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(out).toContain('differs from the pristine nextjs-vitest@1 template');
+    expect(out).toContain('+++ pristine');
+    logSpy.mockRestore();
+  });
+
+  it('prints nothing when docs match the template (diff exits 0)', async () => {
+    mockExistsSync.mockReturnValue(true);
+    resolveExec('');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await printPackTemplateDiffs(FAKE_PACK, '/repos/myapp');
+    expect(logSpy).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+});
+
+describe('generateKshetraYaml with a pack', () => {
+  const OPTS = {
+    slug: 'my-app',
+    repoPath: '/repos/my-app',
+    repoRemote: 'git@github.com:TeakWood/my-app.git',
+    beadsPath: '/repos/my-app-beads',
+    beadsRemote: 'git@github.com:TeakWood/my-app-beads.git',
+    packStack: FAKE_PACK.stack,
+    pack: 'nextjs-vitest@1',
+    conventions: {
+      styleGuide: '.shreni/style-guide.md',
+      architecture: '.shreni/arch.md',
+      reviewGuide: '.shreni/review-guide.md',
+    },
+  };
+
+  it('writes every populated pack stack value (including framework)', () => {
+    const out = generateKshetraYaml(OPTS);
+    expect(out).toContain('framework: nextjs');
+    expect(out).toContain('buildCommand: pnpm build');
+    expect(out).toContain('testRunner: pnpm test');
+    expect(out).toContain('lintCommand: pnpm lint');
+  });
+
+  it('records the pack provenance line', () => {
+    expect(generateKshetraYaml(OPTS)).toContain('pack: nextjs-vitest@1');
+  });
+
+  it('points conventions.reviewGuide at the materialized review guide', () => {
+    expect(generateKshetraYaml(OPTS)).toContain('reviewGuide: .shreni/review-guide.md');
+  });
+
+  it('omits provenance and reviewGuide on the no-pack path', () => {
+    const out = generateKshetraYaml({ ...OPTS, packStack: undefined, pack: undefined, conventions: undefined, language: 'typescript' });
+    expect(out).not.toContain('pack:');
+    expect(out).not.toContain('reviewGuide');
+  });
+});
+
 // ── smokeCheckToolchain (§3.6.5, warn-only) ───────────────────────────────────
 
 describe('smokeCheckToolchain', () => {
@@ -810,6 +956,85 @@ describe('initKshetra', () => {
     expect(err).toContain('To recover');
     expect(err).toContain('shreni init-kshetra --slug myapp --path /repos/myapp --org Acme');
     errSpy.mockRestore();
+  });
+
+  it('--pack materializes stack values, provenance, and templates', async () => {
+    mockLoadPackByName.mockReturnValue(FAKE_PACK);
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest' });
+
+    expect(mockLoadPackByName).toHaveBeenCalledWith('nextjs-vitest');
+    const configWrite = mockWriteFileSync.mock.calls.find(
+      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
+    );
+    expect(configWrite?.[1]).toContain('pack: nextjs-vitest@1');
+    expect(configWrite?.[1]).toContain('framework: nextjs');
+    expect(configWrite?.[1]).toContain('buildCommand: pnpm build');
+    expect(configWrite?.[1]).toContain('reviewGuide:');
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      join('/repos/myapp', '.shreni', 'review-guide.md'), expect.anything(), 'utf8',
+    );
+  });
+
+  it('--language (explicit user value) wins over the pack value', async () => {
+    mockLoadPackByName.mockReturnValue(FAKE_PACK);
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', language: 'javascript' });
+    const configWrite = mockWriteFileSync.mock.calls.find(
+      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
+    );
+    expect(configWrite?.[1]).toContain('language: javascript');
+    expect(configWrite?.[1]).toContain('testRunner: pnpm test');
+  });
+
+  it('rejects --pack combined with --no-pack before mutating anything', async () => {
+    await expect(
+      initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'x', noPack: true }),
+    ).rejects.toThrow('mutually exclusive');
+    expect(mockLoadPackByName).not.toHaveBeenCalled();
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+  });
+
+  it('rejects --upgrade without --pack', async () => {
+    await expect(
+      initKshetra({ slug: 'myapp', path: '/repos/myapp', upgrade: true }),
+    ).rejects.toThrow('--upgrade requires --pack');
+  });
+
+  it('--upgrade updates stack values only, prints template diffs, and runs no init phases', async () => {
+    mockLoadPackByName.mockReturnValue({ ...FAKE_PACK, version: 2 });
+    mockExistsSync.mockImplementation(
+      (p: string) => p.endsWith('kshetra.yaml') || p.endsWith('.md') || p.endsWith('.git'),
+    );
+    mockReadFileSync.mockReturnValue(
+      'id: myapp\nagents:\n  provider: anthropic\nstack:\n  language: typescript\n  testRunner: old-runner\n',
+    );
+    mockExecFile.mockReset().mockRejectedValue(
+      Object.assign(new Error('differs'), { stdout: '--- current\n+++ pristine' }),
+    );
+
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', upgrade: true });
+
+    const configWrite = mockWriteFileSync.mock.calls.find(
+      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
+    );
+    expect(configWrite?.[1]).toContain('pack: nextjs-vitest@2');
+    expect(configWrite?.[1]).toContain('testRunner: pnpm test');
+    expect(configWrite?.[1]).toContain('provider: anthropic');
+    // Docs untouched; a diff was printed instead.
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('review-guide.md'), expect.anything(), 'utf8',
+    );
+    expect(mockExecFile).toHaveBeenCalledWith('diff', expect.anything(), expect.any(Object));
+    // No repo/beads/register phases.
+    expect(mockSymlinkSync).not.toHaveBeenCalled();
+    expect(mockRegisterKshetra).not.toHaveBeenCalled();
+  });
+
+  it('--upgrade errors when there is no existing config to upgrade', async () => {
+    mockLoadPackByName.mockReturnValue(FAKE_PACK);
+    mockExistsSync.mockReturnValue(false);
+    await expect(
+      initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', upgrade: true }),
+    ).rejects.toThrow('Nothing to upgrade');
   });
 
   it('resumes without duplicating GitHub repo/symlink/config when outputs already exist', async () => {

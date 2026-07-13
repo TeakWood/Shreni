@@ -8,6 +8,8 @@ import { resolve, join, dirname, basename } from 'path';
 import { homedir } from 'os';
 import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
+import { loadPackByName, mergeStack, type Pack } from '../kshetra/packs';
+import type { StackConfig } from '../kshetra/config';
 import { detectToolchain, type DetectedStack } from './detect-toolchain';
 import type { Provider } from '../agents/providers/types';
 import {
@@ -27,6 +29,7 @@ const execAsync = promisify(execFile);
 export const SHRENI_DIR = '.shreni';
 export const STYLE_GUIDE_FILE = join(SHRENI_DIR, 'style-guide.md');
 export const ARCH_FILE = join(SHRENI_DIR, 'arch.md');
+export const REVIEW_GUIDE_FILE = join(SHRENI_DIR, 'review-guide.md');
 
 export interface InitKshetraOpts {
   slug: string;
@@ -46,6 +49,13 @@ export interface InitKshetraOpts {
   // --dry-run (§3.9/OQ7): run preflight + detection and print the plan, mutating
   // nothing (no GitHub repo, symlink, config, or registration).
   dryRun?: boolean;
+  // Stack pack selection (84m.2). --pack <name> materializes the pack's stack
+  // values + conventions templates at init; --no-pack forces today's bare
+  // language-profile path; --upgrade (requires --pack) re-applies a newer pack
+  // version to an existing Kshetra: stack values only, docs stay user-owned.
+  pack?: string;
+  noPack?: boolean;
+  upgrade?: boolean;
 }
 
 // Resolve the selected provider + model from init opts (§3.5). Validates the
@@ -255,6 +265,75 @@ export function smokeCheckToolchain(stack: DetectedStack): string[] {
   return warnings;
 }
 
+// Emit every populated field of a pack-merged stack (framework, coverage,
+// globs, …) — unlike stackBlock(), which only carries what detection resolves.
+function stackBlockFromConfig(stack: StackConfig): Record<string, unknown> {
+  const block: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(stack)) {
+    if (value !== undefined) block[key] = value;
+  }
+  return block;
+}
+
+// Pack template → repo-relative .shreni/ target (materialization + --upgrade
+// diffs both walk this).
+const PACK_TEMPLATE_TARGETS: [string, string][] = [
+  ['style-guide.md', STYLE_GUIDE_FILE],
+  ['arch.md', ARCH_FILE],
+  ['review-guide.md', REVIEW_GUIDE_FILE],
+];
+
+// Copy the pack's conventions templates into .shreni/ — never overwriting:
+// after materialization the docs are user-owned (ARD OQ1), so an existing
+// file is skipped with a warning, not merged. Returns the conventions
+// pointers for kshetra.yaml (review-guide.md rides the Viharapala-only
+// injection channel, Agent-Execution §3.3).
+export function materializePackTemplates(pack: Pack, repoPath: string): {
+  styleGuide: string;
+  architecture: string;
+  reviewGuide: string;
+} {
+  mkdirSync(join(repoPath, SHRENI_DIR), { recursive: true });
+  for (const [src, rel] of PACK_TEMPLATE_TARGETS) {
+    const dest = join(repoPath, rel);
+    if (existsSync(dest)) {
+      console.warn(`  ⚠ ${rel} already exists — left untouched (pack template not applied).`);
+      continue;
+    }
+    writeFileSync(dest, readFileSync(join(pack.dir, src), 'utf8'), 'utf8');
+  }
+  return { styleGuide: STYLE_GUIDE_FILE, architecture: ARCH_FILE, reviewGuide: REVIEW_GUIDE_FILE };
+}
+
+// --upgrade never touches the materialized docs; it prints a diff of each one
+// against the pristine template for the human to apply (ARD OQ1).
+export async function printPackTemplateDiffs(pack: Pack, repoPath: string): Promise<void> {
+  for (const [src, rel] of PACK_TEMPLATE_TARGETS) {
+    const dest = join(repoPath, rel);
+    if (!existsSync(dest)) continue;
+    try {
+      await exec('diff', ['-u', dest, join(pack.dir, src)]);
+    } catch (err) {
+      // diff exits 1 when the files differ — its output is the payload.
+      const out = (err as { stdout?: string }).stdout;
+      console.log(
+        `\n  ${rel} differs from the pristine ${pack.name}@${pack.version} template ` +
+          `(docs are user-owned — apply manually if wanted):`,
+      );
+      if (out) console.log(out);
+    }
+  }
+}
+
+// --upgrade: update ONLY stack values + provenance in the existing config;
+// every other block (gates, agents, watchdog, …) is preserved verbatim.
+export function upgradeKshetraStack(configPath: string, stack: StackConfig, provenance: string): void {
+  const existing = yaml.load(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+  existing['stack'] = stackBlockFromConfig(stack);
+  existing['pack'] = provenance;
+  writeFileSync(configPath, yaml.dump(existing, { lineWidth: -1 }), 'utf8');
+}
+
 export function generateKshetraYaml(opts: {
   slug: string;
   repoPath: string;
@@ -265,9 +344,14 @@ export function generateKshetraYaml(opts: {
   // (back-compat) — the language is normalised into a minimal DetectedStack.
   stack?: DetectedStack;
   language?: string;
+  // Pack-merged stack values (84m.2): when set, written verbatim as the stack
+  // block (all populated fields) instead of the detection-derived stackBlock.
+  packStack?: StackConfig;
+  // Pack provenance ("<name>@<version>") recorded alongside the stack block.
+  pack?: string;
   // Conventions doc pointers (relative to repo root, like conventions.reviewGuide
   // in dispatch.ts). Omitted when init did not scaffold the stubs.
-  conventions?: { styleGuide?: string; architecture?: string };
+  conventions?: { styleGuide?: string; architecture?: string; reviewGuide?: string };
   // The selected provider + model (§3.5). Defaults to the Claude profile for
   // back-compat when init did not resolve a provider.
   agents?: { provider: Provider; model: string };
@@ -279,6 +363,7 @@ export function generateKshetraYaml(opts: {
   const conventions: Record<string, string> = {};
   if (opts.conventions?.styleGuide) conventions['styleGuide'] = opts.conventions.styleGuide;
   if (opts.conventions?.architecture) conventions['architecture'] = opts.conventions.architecture;
+  if (opts.conventions?.reviewGuide) conventions['reviewGuide'] = opts.conventions.reviewGuide;
   const config: Record<string, unknown> = {
     id: opts.slug,
     name: toName(opts.slug),
@@ -296,7 +381,8 @@ export function generateKshetraYaml(opts: {
       remote: opts.beadsRemote,
       mode: 'embedded',
     },
-    stack: stackBlock(stack),
+    stack: opts.packStack ? stackBlockFromConfig(opts.packStack) : stackBlock(stack),
+    ...(opts.pack ? { pack: opts.pack } : {}),
     ...(Object.keys(conventions).length ? { conventions } : {}),
     agents: {
       provider: opts.agents?.provider ?? 'anthropic',
@@ -450,6 +536,9 @@ function buildReRunCommand(opts: InitKshetraOpts): string {
   if (opts.language) parts.push(`--language ${opts.language}`);
   if (opts.beadsPath) parts.push(`--beads-path ${opts.beadsPath}`);
   if (opts.mergePolicy) parts.push(`--merge-policy ${opts.mergePolicy}`);
+  if (opts.pack) parts.push(`--pack ${opts.pack}`);
+  if (opts.noPack) parts.push('--no-pack');
+  if (opts.upgrade) parts.push('--upgrade');
   return parts.join(' ');
 }
 
@@ -475,6 +564,35 @@ async function runInitPhases(phases: InitPhase[], reRunCmd: string): Promise<voi
 export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   const org = opts.org ?? 'TeakWood';
   const repoPath = resolve(opts.path);
+
+  // ── Pack selection (84m.2) ───────────────────────────────────────────────────
+  if (opts.pack && opts.noPack) {
+    throw new Error('--pack and --no-pack are mutually exclusive.');
+  }
+  if (opts.upgrade && !opts.pack) {
+    throw new Error('--upgrade requires --pack <name>.');
+  }
+  // Load + validate the pack before anything mutates (a bad pack aborts clean).
+  const pack: Pack | undefined = opts.pack ? loadPackByName(opts.pack) : undefined;
+  // Precedence (ARD G4): explicit user stack.* (--language) > pack values;
+  // language-profile defaults still fill remaining gaps at runtime.
+  const packStack: StackConfig | undefined = pack
+    ? mergeStack(opts.language ? { language: opts.language } : undefined, pack.stack)
+    : undefined;
+
+  // --upgrade is a narrow re-application, not a re-init: update stack values +
+  // provenance in the existing config, print template diffs (docs stay
+  // user-owned, ARD OQ1), and stop — no repo/beads/register phases.
+  if (opts.upgrade && pack && packStack) {
+    const configPath = join(repoPath, SHRENI_DIR, 'kshetra.yaml');
+    if (!existsSync(configPath)) {
+      throw new Error(`Nothing to upgrade: no config at ${configPath}. Run \`shreni init --pack ${pack.name}\` first.`);
+    }
+    upgradeKshetraStack(configPath, packStack, `${pack.name}@${pack.version}`);
+    console.log(`✓ stack values updated to ${pack.name}@${pack.version} in ${configPath} (other config blocks untouched).`);
+    await printPackTemplateDiffs(pack, repoPath);
+    return;
+  }
   const beadsPath = opts.beadsPath
     ? resolve(opts.beadsPath)
     : resolve(join(dirname(repoPath), `${basename(repoPath)}-beads`));
@@ -504,9 +622,22 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
 
   // Detect the ecosystem from marker files (pure read); an explicit --language
   // overrides the detected language but keeps any detected packageManager/commands.
-  const detected = detectToolchain(repoPath);
-  const stack: DetectedStack = opts.language ? { ...detected, language: opts.language } : detected;
-  if (stack.unknown) {
+  // A selected pack replaces detection: its merged stack is authoritative.
+  const stack: DetectedStack = packStack
+    ? {
+        language: packStack.language,
+        packageManager: packStack.packageManager,
+        buildCommand: packStack.buildCommand,
+        testRunner: packStack.testRunner,
+        lintCommand: packStack.lintCommand,
+        unknown: false,
+      }
+    : opts.language
+      ? { ...detectToolchain(repoPath), language: opts.language }
+      : detectToolchain(repoPath);
+  if (pack) {
+    console.log(`  Using pack ${pack.name}@${pack.version} (${stack.language}).`);
+  } else if (stack.unknown) {
     console.warn(
       `  ⚠ Could not detect the ecosystem in ${repoPath}. Will write a config with empty ` +
         `build/test/lint commands — edit stack.* in the config to point at your build/test/lint.`,
@@ -527,7 +658,8 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     console.log(`  repo:        ${repoPath}`);
     console.log(`  beads repo:  ${beadsPath}`);
     console.log(`  config:      ${configTarget}`);
-    console.log(`  conventions: ${join(repoPath, STYLE_GUIDE_FILE)}, ${join(repoPath, ARCH_FILE)}`);
+    if (pack) console.log(`  pack:        ${pack.name}@${pack.version}`);
+    console.log(`  conventions: ${join(repoPath, STYLE_GUIDE_FILE)}, ${join(repoPath, ARCH_FILE)}${pack ? `, ${join(repoPath, REVIEW_GUIDE_FILE)}` : ''}`);
     console.log('\nRe-run without --dry-run to apply.');
     return;
   }
@@ -587,7 +719,11 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         const repoRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
         // repoPath/beadsPath are already absolute; the loader does NOT expand ~ or
         // resolve relatives, so init bakes absolute paths in.
-        const conventions = scaffoldConventions(repoPath);
+        // A pack materializes its own conventions templates (skip-and-warn);
+        // otherwise the generic stubs are scaffolded as before.
+        const conventions = pack
+          ? materializePackTemplates(pack, repoPath)
+          : scaffoldConventions(repoPath);
         const yamlContent = generateKshetraYaml({
           slug: opts.slug,
           repoPath,
@@ -595,6 +731,8 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           beadsPath,
           beadsRemote,
           stack,
+          packStack,
+          pack: pack ? `${pack.name}@${pack.version}` : undefined,
           conventions,
           agents,
           mergePolicy: opts.mergePolicy,

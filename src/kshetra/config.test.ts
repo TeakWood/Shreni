@@ -51,6 +51,14 @@ describe('loadKshetraConfig', () => {
     expect(config.stack.language).toBe('typescript');
   });
 
+  it('accepts a pack provenance line and rejects a malformed one', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + '\npack: nextjs-vitest@1\n');
+    expect(loadKshetraConfig(path).pack).toBe('nextjs-vitest@1');
+    writeFileSync(path, VALID_YAML + '\npack: NextJS v1\n');
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+  });
+
   it('leaves watchdog undefined when the block is omitted', () => {
     const path = join(dir, 'kshetra.yaml');
     writeFileSync(path, VALID_YAML);

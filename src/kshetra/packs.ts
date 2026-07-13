@@ -116,6 +116,19 @@ export function listPacks(rootDir: string = defaultPacksDir()): Pack[] {
     .map(p => loadPack(p));
 }
 
+// Resolve `--pack <name>` against the installed pack root. An unknown name
+// lists what is actually available instead of a bare ENOENT.
+export function loadPackByName(name: string, rootDir: string = defaultPacksDir()): Pack {
+  const dir = join(resolve(rootDir), name);
+  if (!existsSync(join(dir, 'pack.yaml'))) {
+    const available = listPacks(rootDir).map(p => p.name);
+    throw new Error(
+      `Unknown pack "${name}". Available packs: ${available.length ? available.join(', ') : '(none installed)'}`,
+    );
+  }
+  return loadPack(dir);
+}
+
 // The init-time precedence merge: explicit user stack.* values (including ""
 // = deliberate skip) win over pack values; where the user is silent the pack
 // fills in. Language profile defaults are NOT applied here — the merged

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { loadPack, listPacks, mergeStack, PackError, PACK_TEMPLATE_FILES } from './packs.js';
+import { loadPack, loadPackByName, listPacks, mergeStack, PackError, PACK_TEMPLATE_FILES } from './packs.js';
 
 const VALID_PACK_YAML = `
 name: nextjs-vitest
@@ -129,6 +129,18 @@ describe('listPacks', () => {
   it('throws when a listed pack is broken', () => {
     writePack(join(dir, 'broken'), 'name: broken\nversion: 1\n');
     expect(() => listPacks(dir)).toThrow(PackError);
+  });
+});
+
+describe('loadPackByName', () => {
+  it('resolves a pack by name under the root dir', () => {
+    writePack(join(dir, 'go-service'), VALID_PACK_YAML.replace('nextjs-vitest', 'go-service'));
+    expect(loadPackByName('go-service', dir).name).toBe('go-service');
+  });
+
+  it('lists the available packs on an unknown name', () => {
+    writePack(join(dir, 'a-pack'), VALID_PACK_YAML.replace('nextjs-vitest', 'a-pack'));
+    expect(() => loadPackByName('nope', dir)).toThrow(/Unknown pack "nope"\. Available packs: a-pack/);
   });
 });
 
