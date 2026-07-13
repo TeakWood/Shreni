@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "certify": "tsx scripts/certify-pack.ts",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",

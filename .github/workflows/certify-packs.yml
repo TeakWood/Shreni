@@ -1,0 +1,66 @@
+# Pack certification (ARD Stack-Packs §3.4, Shreni-beads-84m.4). For every
+# in-tree pack with a reference/ fixture, run the FULL Silpi ↔ Viharapala ↔
+# health-gate ↔ Parikshaka loop against the fixture backlog and assert merged
+# beads + gates observed in the activity log + Parikshaka discovery. A pack may
+# not claim "certified" without this passing — supported is a tested claim (G3).
+#
+# Runs real agents, so it needs ANTHROPIC_API_KEY and is NOT a per-PR gate:
+# trigger manually or on the weekly schedule. One job per pack, ~10 min cap.
+name: certify-packs
+
+on:
+  workflow_dispatch:
+    inputs:
+      pack:
+        description: 'Certify a single pack (blank = all packs with a reference/ fixture)'
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 4 * * 1' # weekly, Monday 04:00 UTC
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      packs: ${{ steps.list.outputs.packs }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          if [ -n "${{ github.event.inputs.pack }}" ]; then
+            packs='["${{ github.event.inputs.pack }}"]'
+          else
+            packs=$(ls -d packs/*/reference 2>/dev/null | cut -d/ -f2 | jq -R . | jq -cs .)
+            [ -z "$packs" ] && packs='[]'
+          fi
+          echo "packs=$packs" >> "$GITHUB_OUTPUT"
+          echo "certifying: $packs"
+
+  certify:
+    needs: discover
+    if: needs.discover.outputs.packs != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pack: ${{ fromJSON(needs.discover.outputs.packs) }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Install bd + claude CLIs
+        run: npm install -g @beads/bd @anthropic-ai/claude-code
+      - name: Git identity for fixture commits
+        run: |
+          git config --global user.name "shreni-cert"
+          git config --global user.email "cert@shreni.invalid"
+      - name: Certify ${{ matrix.pack }}
+        run: pnpm certify ${{ matrix.pack }}
