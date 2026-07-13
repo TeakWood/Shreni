@@ -31,7 +31,7 @@ const BeadsConfigSchema = z.object({
   mode: z.literal('embedded').default('embedded'),
 });
 
-const StackConfigSchema = z.object({
+export const StackConfigSchema = z.object({
   language: z.string(),
   framework: z.string().optional(),
   // Selects the default command family for node profiles (pnpm/npm/yarn).
@@ -149,6 +149,7 @@ export const KshetraConfigSchema = z.object({
 });
 
 export type KshetraConfig = z.infer<typeof KshetraConfigSchema>;
+export type StackConfig = z.infer<typeof StackConfigSchema>;
 
 export class KshetraConfigError extends Error {
   constructor(
