@@ -8,9 +8,10 @@ import { resolve, join, dirname, basename } from 'path';
 import { homedir } from 'os';
 import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
-import { loadPackByName, mergeStack, type Pack } from '../kshetra/packs';
+import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
 import type { StackConfig } from '../kshetra/config';
-import { detectToolchain, type DetectedStack } from './detect-toolchain';
+import { detectToolchain, suggestPack, type DetectedStack } from './detect-toolchain';
+import { createInterface } from 'readline';
 import type { Provider } from '../agents/providers/types';
 import {
   providerFromCliName,
@@ -325,6 +326,40 @@ export async function printPackTemplateDiffs(pack: Pack, repoPath: string): Prom
   }
 }
 
+async function promptLine(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await new Promise<string>(res => rl.question(question, res));
+  } finally {
+    rl.close();
+  }
+}
+
+// Suggest-and-confirm (84m.3). A single top scorer asks Y/n; a tie asks which
+// of the tied packs to use (blank = none). Declining always falls back to the
+// bare language-profile path.
+export async function confirmSuggestedPack(repoPath: string): Promise<Pack | undefined> {
+  const suggestion = suggestPack(repoPath, listPacks());
+  if (suggestion.ambiguous) {
+    const top = suggestion.candidates
+      .filter(c => c.score === suggestion.candidates[0].score)
+      .map(c => c.pack.name);
+    const answer = (
+      await promptLine(`Multiple packs match this repo (${top.join(', ')}). Type a pack name to use it, or press enter for none: `)
+    ).trim();
+    if (!answer) return undefined;
+    const chosen = suggestion.candidates.find(c => c.pack.name === answer)?.pack;
+    if (!chosen) console.warn(`  ⚠ "${answer}" is not one of the matching packs — continuing without a pack.`);
+    return chosen;
+  }
+  if (!suggestion.best) return undefined;
+  for (const w of suggestion.warnings) console.warn(`  ⚠ ${w}`);
+  const answer = (
+    await promptLine(`Detected pack "${suggestion.best.name}@${suggestion.best.version}" for this repo — use it? [Y/n]: `)
+  ).trim();
+  return answer === '' || /^y(es)?$/i.test(answer) ? suggestion.best : undefined;
+}
+
 // --upgrade: update ONLY stack values + provenance in the existing config;
 // every other block (gates, agents, watchdog, …) is preserved verbatim.
 export function upgradeKshetraStack(configPath: string, stack: StackConfig, provenance: string): void {
@@ -573,7 +608,15 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     throw new Error('--upgrade requires --pack <name>.');
   }
   // Load + validate the pack before anything mutates (a bad pack aborts clean).
-  const pack: Pack | undefined = opts.pack ? loadPackByName(opts.pack) : undefined;
+  let pack: Pack | undefined = opts.pack ? loadPackByName(opts.pack) : undefined;
+
+  // No explicit --pack: score installed packs' detect blocks and SUGGEST the
+  // best match with interactive confirm (84m.3). Never silently applied: a
+  // non-TTY run and --no-pack keep today's bare-profile path byte-identically.
+  if (!pack && !opts.noPack && process.stdin.isTTY) {
+    pack = await confirmSuggestedPack(repoPath);
+  }
+
   // Precedence (ARD G4): explicit user stack.* (--language) > pack values;
   // language-profile defaults still fill remaining gaps at runtime.
   const packStack: StackConfig | undefined = pack
