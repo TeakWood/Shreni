@@ -40,13 +40,19 @@ jobs:
     needs: discover
     if: needs.discover.outputs.packs != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Real agent latency on hosted runners is ~4-5 min/bead; a 3-bead fixture
+    # backlog + setup needs headroom past the old 15. Kept bounded so a hung
+    # run still fails fast-ish. See Shreni-beads-84m.13 for fixture right-sizing.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         pack: ${{ fromJSON(needs.discover.outputs.packs) }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # The cert script's internal backlog cap (default 9 min) is too tight for a
+      # full 3-bead loop on hosted runners; give it room within the job timeout.
+      SHRENI_CERT_TIMEOUT_MS: '780000' # 13 min
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
