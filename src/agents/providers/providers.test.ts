@@ -129,6 +129,18 @@ describe('claudeAdapter.buildSpawn', () => {
     expect(idx).toBeLessThan(spec.args.length - 1);
     expect(spec.args[spec.args.length - 1]).toBe('USER');
   });
+
+  it('never lets the variadic --disallowedTools sit directly before the prompt', () => {
+    // --disallowedTools is variadic (<tools...>); if it were the last flag it
+    // would eat the positional prompt and the CLI would exit 1 with "Input must
+    // be provided … when using --print" (Shreni-beads-84m.12). A single-arity
+    // flag (--json-schema) must separate it from the prompt.
+    const spec = claudeAdapter.buildSpawn({ ...BASE_OPTS, disallowedTools: ['Write', 'Edit'] });
+    const promptIdx = spec.args.length - 1;
+    expect(spec.args[promptIdx]).toBe('USER');
+    expect(spec.args[promptIdx - 2]).toBe('--json-schema');
+    expect(spec.args[promptIdx - 1]).toBe(JSON.stringify(BASE_OPTS.jsonSchema));
+  });
 });
 
 describe('claudeAdapter parser', () => {

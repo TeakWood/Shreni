@@ -41,16 +41,21 @@ export const claudeAdapter: ProviderAdapter = {
       '--no-session-persistence',
       '--setting-sources', 'project',
       '--model', opts.model,
-      '--json-schema', JSON.stringify(opts.jsonSchema),
     ];
 
     // Hard tool block (e.g. read-only Parikshaka): bypassPermissions grants every
     // tool, so a deny list is the only way to keep the agent from writing files.
-    // Comma-separated; placed before the positional prompt.
+    // --disallowedTools is VARIADIC (<tools...>), so it must NOT sit directly
+    // before the positional prompt — the CLI would swallow the prompt as another
+    // tool name and exit 1 ("Input must be provided … when using --print"). The
+    // single-arity --json-schema below is pushed after it precisely to terminate
+    // the variadic and guarantee the prompt lands as the sole positional.
     if (opts.disallowedTools && opts.disallowedTools.length > 0) {
       args.push('--disallowedTools', opts.disallowedTools.join(','));
     }
 
+    // Keep --json-schema (single value) immediately before the positional prompt.
+    args.push('--json-schema', JSON.stringify(opts.jsonSchema));
     args.push(opts.userPrompt);
 
     return {
