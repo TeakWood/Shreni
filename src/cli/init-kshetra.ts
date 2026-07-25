@@ -170,6 +170,38 @@ export async function initBeadsDb(beadsPath: string): Promise<void> {
   });
 }
 
+// ── Step 3.5: Commit + push the beads repo (yds.13) ──────────────────────────
+
+// `bd init --stealth` deliberately does no git ops, so without this step the
+// embedded dolt db exists only locally and the freshly created <slug>-beads
+// GitHub repo stays empty. Idempotent: a clean tree skips the commit, pushing
+// an up-to-date branch is a no-op, and a --beads-path repo with no origin
+// remote skips the push with a note instead of failing.
+export async function pushBeadsRepo(beadsPath: string): Promise<void> {
+  let remote = '';
+  try {
+    remote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: beadsPath });
+  } catch {
+    // no origin remote — handled below
+  }
+  if (!remote) {
+    console.log(`  beads repo at ${beadsPath} has no origin remote — skipping push`);
+    return;
+  }
+  const dirty = await exec('git', ['status', '--porcelain'], { cwd: beadsPath });
+  if (dirty) {
+    await exec('git', ['add', '-A'], { cwd: beadsPath });
+    await exec('git', ['commit', '-m', 'chore: init beads db (shreni init)'], { cwd: beadsPath });
+  }
+  try {
+    await exec('git', ['rev-parse', 'HEAD'], { cwd: beadsPath });
+  } catch {
+    return; // unborn HEAD and nothing committed — nothing to push
+  }
+  const branch = await exec('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: beadsPath });
+  await exec('git', ['push', '-u', 'origin', branch], { cwd: beadsPath });
+}
+
 // ── Step 4: Create .beads symlink ─────────────────────────────────────────────
 
 export function createBeadsSymlink(repoPath: string, beadsPath: string): void {
@@ -596,8 +628,23 @@ async function runInitPhases(phases: InitPhase[], reRunCmd: string): Promise<voi
   }
 }
 
+// The GitHub owner for created repos (yds.16): an explicit --org wins;
+// otherwise the authenticated gh user. No baked-in fallback — a hardcoded org
+// would silently create repos under the wrong owner for everyone else.
+async function resolveOrg(explicit?: string): Promise<string> {
+  if (explicit) return explicit;
+  try {
+    const login = await exec('gh', ['api', 'user', '--jq', '.login'], {});
+    if (login) return login;
+  } catch {
+    // fall through to the guidance below
+  }
+  throw new Error(
+    'Could not resolve a GitHub owner for created repos: pass --org <owner>, or log in with `gh auth login`.',
+  );
+}
+
 export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
-  const org = opts.org ?? 'TeakWood';
   const repoPath = resolve(opts.path);
 
   // ── Pack selection (84m.2) ───────────────────────────────────────────────────
@@ -707,6 +754,10 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     return;
   }
 
+  // Resolved only past --dry-run so the plan stays offline; only the mutating
+  // phases (repo/beads creation) need an owner.
+  const org = await resolveOrg(opts.org);
+
   // ── Mutating phases ──────────────────────────────────────────────────────────
   // Shared state threaded between phases via closures.
   let beadsRemote = '';
@@ -725,7 +776,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     {
       name: 'Beads repo',
       recovery:
-        `ensure \`gh\` is authenticated (gh auth status) and you can reach GitHub, ` +
+        `ensure \`gh\` is authenticated (gh auth status) and you can push to GitHub, ` +
         `or pass --beads-path to point at an existing beads repo.`,
       run: async () => {
         if (opts.beadsPath && existsSync(beadsPath)) {
@@ -740,6 +791,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           await cloneBeadsRepo(beadsRemote, beadsPath);
         }
         await initBeadsDb(beadsPath);
+        await pushBeadsRepo(beadsPath);
       },
     },
     {
@@ -800,7 +852,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   // enabled. Only the provider name (not the slug/paths/remote) is sent.
   emitTelemetry('kshetra_init', { provider: agents.provider });
 
-  console.log(`\n✓ Kshetra "${opts.slug}" initialised.`);
+  console.log(`\n✓ Initialization done — Shreni is now ready to work on "${opts.slug}".`);
   console.log(`  provider:   ${providerLabel}`);
   console.log(`  config:     ${configPath}`);
   console.log(`  beads repo: ${beadsPath}`);

@@ -74,6 +74,7 @@ const {
   createGitHubRepo,
   cloneBeadsRepo,
   initBeadsDb,
+  pushBeadsRepo,
   createBeadsSymlink,
   addToGitignore,
   setupClaudeHooks,
@@ -96,6 +97,28 @@ const {
 
 function resolveExec(stdout: string) {
   mockExecFile.mockResolvedValue({ stdout, stderr: '' });
+}
+
+// Dispatch mock keyed on "<cmd> <args...>" prefixes — robust to call ordering,
+// unlike mockResolvedValueOnce chains. `overrides` win over the defaults; an
+// override value of null makes that command reject.
+function resolveExecByCommand(overrides: Record<string, string | null> = {}) {
+  mockExecFile.mockImplementation((cmd: unknown, args: unknown) => {
+    const key = `${cmd} ${(args as string[]).join(' ')}`;
+    for (const [prefix, stdout] of Object.entries(overrides)) {
+      if (key.startsWith(prefix)) {
+        return stdout === null
+          ? Promise.reject(new Error(`mock rejection for "${prefix}"`))
+          : Promise.resolve({ stdout, stderr: '' });
+      }
+    }
+    if (key.startsWith('gh api user')) return Promise.resolve({ stdout: 'TeakWood\n', stderr: '' });
+    if (key.startsWith('git remote get-url origin')) {
+      return Promise.resolve({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' });
+    }
+    if (key.startsWith('git rev-parse --abbrev-ref HEAD')) return Promise.resolve({ stdout: 'main\n', stderr: '' });
+    return Promise.resolve({ stdout: '', stderr: '' });
+  });
 }
 
 beforeEach(() => {
@@ -245,6 +268,47 @@ describe('initBeadsDb', () => {
     mockExistsSync.mockImplementation((p: string) => p.endsWith('.dolt'));
     await initBeadsDb('/repos/myapp-beads');
     expect(mockExecFile).not.toHaveBeenCalled();
+  });
+});
+
+// ── Step 3.5: pushBeadsRepo (yds.13) ─────────────────────────────────────────
+
+describe('pushBeadsRepo', () => {
+  const cwd = expect.objectContaining({ cwd: '/repos/myapp-beads' });
+
+  it('commits and pushes when the tree is dirty', async () => {
+    resolveExecByCommand({ 'git status --porcelain': ' M issues.jsonl\n' });
+    await pushBeadsRepo('/repos/myapp-beads');
+    expect(mockExecFile).toHaveBeenCalledWith('git', ['add', '-A'], cwd);
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'git', ['commit', '-m', 'chore: init beads db (shreni init)'], cwd,
+    );
+    expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], cwd);
+  });
+
+  it('skips the commit but still pushes when the tree is clean', async () => {
+    resolveExecByCommand();
+    await pushBeadsRepo('/repos/myapp-beads');
+    expect(mockExecFile).not.toHaveBeenCalledWith('git', ['add', '-A'], expect.anything());
+    expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], cwd);
+  });
+
+  it('skips the push when there is no origin remote', async () => {
+    resolveExecByCommand({ 'git remote get-url origin': null });
+    await pushBeadsRepo('/repos/myapp-beads');
+    const push = mockExecFile.mock.calls.find(
+      c => c[0] === 'git' && (c[1] as string[]).includes('push'),
+    );
+    expect(push).toBeUndefined();
+  });
+
+  it('skips the push on an unborn HEAD with nothing to commit', async () => {
+    resolveExecByCommand({ 'git rev-parse HEAD': null });
+    await pushBeadsRepo('/repos/myapp-beads');
+    const push = mockExecFile.mock.calls.find(
+      c => c[0] === 'git' && (c[1] as string[]).includes('push'),
+    );
+    expect(push).toBeUndefined();
   });
 });
 
@@ -802,18 +866,11 @@ describe('registerWithSthapathi', () => {
 
 describe('initKshetra', () => {
   beforeEach(() => {
-    // App repo phase no-ops: .git exists and origin resolves.
+    // App repo phase no-ops: .git exists and origin resolves. Exec calls are
+    // dispatched by command (resolveExecByCommand defaults): origin resolves,
+    // gh api user yields the login, everything else succeeds with ''.
     mockExistsSync.mockImplementation((p: string) => p.endsWith('.git'));
-    // App-repo origin check, gh repo view (exists→skip create), git clone,
-    // bd init, bd setup claude, git remote
-    mockExecFile
-      .mockResolvedValueOnce({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' }) // App repo: origin exists
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })   // gh repo view → repo exists
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })   // git clone
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })   // bd init
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })   // bd setup claude
-      .mockResolvedValueOnce({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' }) // git remote
-      .mockResolvedValue({ stdout: '', stderr: '' });      // any subsequent
+    resolveExecByCommand();
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
@@ -836,16 +893,31 @@ describe('initKshetra', () => {
     );
   });
 
-  it('uses TeakWood as default org', async () => {
+  it('resolves the owner from the gh login when --org is omitted', async () => {
+    resolveExecByCommand({ 'gh api user': 'navakanth\n' });
     await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    const ghCall = mockExecFile.mock.calls.find(c => c[0] === 'gh');
-    expect(ghCall?.[1]).toContain('TeakWood/myapp-beads');
+    const ghCall = mockExecFile.mock.calls.find(
+      c => c[0] === 'gh' && (c[1] as string[]).includes('view'),
+    );
+    expect(ghCall?.[1]).toContain('navakanth/myapp-beads');
   });
 
-  it('uses custom org when provided', async () => {
+  it('uses custom org when provided, without consulting gh', async () => {
     await initKshetra({ slug: 'myapp', path: '/repos/myapp', org: 'Acme' });
-    const ghCall = mockExecFile.mock.calls.find(c => c[0] === 'gh');
+    const ghCall = mockExecFile.mock.calls.find(
+      c => c[0] === 'gh' && (c[1] as string[]).includes('view'),
+    );
     expect(ghCall?.[1]).toContain('Acme/myapp-beads');
+    const loginCall = mockExecFile.mock.calls.find(
+      c => c[0] === 'gh' && (c[1] as string[]).includes('user'),
+    );
+    expect(loginCall).toBeUndefined();
+  });
+
+  it('errors with --org guidance when no org is given and the gh login cannot be resolved', async () => {
+    resolveExecByCommand({ 'gh api user': null });
+    await expect(initKshetra({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow('--org');
+    expect(mockRegisterKshetra).not.toHaveBeenCalled();
   });
 
   it('skips clone, bd init, and symlink creation when beads already fully initialized', async () => {
@@ -865,17 +937,37 @@ describe('initKshetra', () => {
       return '';
     });
     mockReadlinkSync.mockReturnValue('/repos/myapp-beads');
-    mockExecFile.mockReset()
-      .mockResolvedValueOnce({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' }) // App repo: origin exists
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })  // gh repo view → exists
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })  // bd setup claude
-      .mockResolvedValueOnce({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' }); // git remote
 
     await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
 
-    expect(mockExecFile).toHaveBeenCalledTimes(4);
+    const cloned = mockExecFile.mock.calls.find(
+      c => c[0] === 'git' && (c[1] as string[]).includes('clone'),
+    );
+    expect(cloned).toBeUndefined();
+    const bdInit = mockExecFile.mock.calls.find(
+      c => c[0] === 'bd' && (c[1] as string[]).includes('init'),
+    );
+    expect(bdInit).toBeUndefined();
     expect(mockSymlinkSync).not.toHaveBeenCalled();
     expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', expect.stringContaining('kshetra.yaml'));
+  });
+
+  it('pushes the beads repo after bd init so the embedded db reaches the remote', async () => {
+    resolveExecByCommand({ 'git status --porcelain': ' M issues.jsonl\n' });
+    const beadsCwd = expect.objectContaining({ cwd: '/repos/myapp-beads' });
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'git', ['commit', '-m', 'chore: init beads db (shreni init)'], beadsCwd,
+    );
+    expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], beadsCwd);
+  });
+
+  it('ends with the ready-to-work message', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+    const out = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(out).toContain('Initialization done — Shreni is now ready to work on "myapp"');
+    expect(out).toContain('Run `shreni start` to begin.');
   });
 
   it('derives default beads path as sibling <repo>-beads when --beads-path is omitted', async () => {
@@ -1047,11 +1139,6 @@ describe('initKshetra', () => {
       return false;
     });
     mockReadlinkSync.mockReturnValue('/repos/myapp-beads');
-    mockExecFile.mockReset()
-      .mockResolvedValueOnce({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' }) // App repo: origin exists
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })  // gh repo view → exists (no create)
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })  // bd setup claude
-      .mockResolvedValueOnce({ stdout: 'git@github.com:TeakWood/myapp.git\n', stderr: '' }); // git remote
 
     await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
 
