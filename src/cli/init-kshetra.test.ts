@@ -136,10 +136,14 @@ beforeEach(() => {
 // ── Step 0: ensureAppRepo (yds.11) ───────────────────────────────────────────
 
 describe('ensureAppRepo', () => {
-  it('is a no-op when the repo already has an origin remote', async () => {
+  it('is a no-op when the repo already has an origin remote, without resolving an owner', async () => {
     mockExistsSync.mockImplementation((p: string) => p.endsWith('.git'));
     resolveExec('git@github.com:TeakWood/myapp.git');
-    await ensureAppRepo('TeakWood', 'myapp', '/repos/myapp');
+    // A pre-wired repo (e.g. the certification harness's local bare origin) must
+    // not force owner resolution — that regressed cert with 'gh auth login' (84m.11).
+    const resolveOwner = vi.fn(async () => 'TeakWood');
+    await ensureAppRepo(resolveOwner, 'myapp', '/repos/myapp');
+    expect(resolveOwner).not.toHaveBeenCalled();
     expect(mockExecFile).toHaveBeenCalledTimes(1);
     expect(mockExecFile).toHaveBeenCalledWith(
       'git', ['remote', 'get-url', 'origin'], expect.objectContaining({ cwd: '/repos/myapp' }),
@@ -160,7 +164,7 @@ describe('ensureAppRepo', () => {
       .mockResolvedValueOnce({ stdout: 'main\n', stderr: '' })      // git rev-parse --abbrev-ref HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' });           // git push -u origin main
 
-    await ensureAppRepo('Acme', 'myapp', '/repos/myapp');
+    await ensureAppRepo(async () => 'Acme', 'myapp', '/repos/myapp');
 
     expect(mockExecFile).toHaveBeenCalledWith(
       'git', ['init', '-b', 'main'], expect.objectContaining({ cwd: '/repos/myapp' }),
@@ -191,7 +195,7 @@ describe('ensureAppRepo', () => {
       .mockResolvedValueOnce({ stdout: 'trunk\n', stderr: '' })     // git rev-parse --abbrev-ref HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' });           // git push -u origin trunk
 
-    await ensureAppRepo('TeakWood', 'myapp', '/repos/myapp');
+    await ensureAppRepo(async () => 'TeakWood', 'myapp', '/repos/myapp');
 
     const cmds = mockExecFile.mock.calls.map(c => `${c[0]} ${(c[1] as string[]).join(' ')}`);
     expect(cmds).not.toContain('git init -b main');
@@ -210,7 +214,7 @@ describe('createGitHubRepo', () => {
     mockExecFile
       .mockRejectedValueOnce(Object.assign(new Error('not found'), { exitCode: 1 }))
       .mockResolvedValueOnce({ stdout: '', stderr: '' });
-    const url = await createGitHubRepo('TeakWood', 'myapp');
+    const url = await createGitHubRepo(async () => 'TeakWood', 'myapp');
     expect(mockExecFile).toHaveBeenCalledWith(
       'gh',
       ['repo', 'create', 'TeakWood/myapp-beads', '--private', '--confirm'],
@@ -221,7 +225,7 @@ describe('createGitHubRepo', () => {
 
   it('skips gh repo create and returns URL when remote repo already exists', async () => {
     resolveExec('');
-    const url = await createGitHubRepo('TeakWood', 'myapp');
+    const url = await createGitHubRepo(async () => 'TeakWood', 'myapp');
     expect(mockExecFile).toHaveBeenCalledTimes(1);
     expect(mockExecFile).not.toHaveBeenCalledWith(
       'gh', expect.arrayContaining(['create']), expect.any(Object),

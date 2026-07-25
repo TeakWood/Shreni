@@ -106,7 +106,11 @@ async function exec(cmd: string, args: string[], opts: { cwd?: string; env?: Nod
 // via gh (mirroring the beads-repo flow), wire `origin`, make an initial
 // commit on an unborn HEAD, and push — so the Config phase's origin
 // requirement is satisfied instead of enforced-and-failed.
-export async function ensureAppRepo(org: string, slug: string, repoPath: string): Promise<void> {
+export async function ensureAppRepo(
+  resolveOwner: () => Promise<string>,
+  slug: string,
+  repoPath: string,
+): Promise<void> {
   if (!existsSync(join(repoPath, '.git'))) {
     mkdirSync(repoPath, { recursive: true });
     await exec('git', ['init', '-b', 'main'], { cwd: repoPath });
@@ -114,11 +118,14 @@ export async function ensureAppRepo(org: string, slug: string, repoPath: string)
 
   try {
     await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
-    return; // already wired — nothing outward-facing happens
+    return; // already wired — nothing outward-facing happens, no owner needed
   } catch {
     // no origin remote — scaffold it
   }
 
+  // Owner is resolved only here, on the create path: a repo that already had an
+  // origin returned above without ever needing one.
+  const org = await resolveOwner();
   const remote = `git@github.com:${org}/${slug}.git`;
   try {
     await exec('gh', ['repo', 'view', `${org}/${slug}`], {});
@@ -141,7 +148,11 @@ export async function ensureAppRepo(org: string, slug: string, repoPath: string)
 
 // ── Step 1: Create GitHub beads repo ─────────────────────────────────────────
 
-export async function createGitHubRepo(org: string, slug: string): Promise<string> {
+export async function createGitHubRepo(
+  resolveOwner: () => Promise<string>,
+  slug: string,
+): Promise<string> {
+  const org = await resolveOwner();
   const repoName = `${slug}-beads`;
   const remote = `git@github.com:${org}/${repoName}.git`;
   try {
@@ -843,9 +854,13 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     return;
   }
 
-  // Resolved only past --dry-run so the plan stays offline; only the mutating
-  // phases (repo/beads creation) need an owner.
-  const org = await resolveOrg(opts.org);
+  // Owner resolution is deferred AND memoized: a run whose app repo and beads
+  // repo already have origins (the certification harness's local bare remotes,
+  // or any pre-wired repo) never needs an owner, so it must not fail for lack
+  // of one. Resolve lazily — only when a repo actually has to be created — and
+  // cache so at most one `gh api user` call happens across the phases.
+  let orgCache: string | undefined;
+  const getOrg = async (): Promise<string> => (orgCache ??= await resolveOrg(opts.org));
 
   // ── Mutating phases ──────────────────────────────────────────────────────────
   // Shared state threaded between phases via closures.
@@ -859,7 +874,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         `ensure \`gh\` is authenticated (gh auth status) and you can push to GitHub; ` +
         `or create the repo at ${repoPath} yourself with an 'origin' remote and re-run.`,
       run: async () => {
-        await ensureAppRepo(org, opts.slug, repoPath);
+        await ensureAppRepo(getOrg, opts.slug, repoPath);
       },
     },
     {
@@ -876,7 +891,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
             beadsRemote = '';
           }
         } else {
-          beadsRemote = await createGitHubRepo(org, opts.slug);
+          beadsRemote = await createGitHubRepo(getOrg, opts.slug);
           await cloneBeadsRepo(beadsRemote, beadsPath);
         }
         await initBeadsDb(beadsPath);
