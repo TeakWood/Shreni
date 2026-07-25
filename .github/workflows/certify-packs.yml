@@ -12,11 +12,15 @@ on:
   workflow_dispatch:
     inputs:
       pack:
-        description: 'Certify a single pack (blank = all packs with a reference/ fixture)'
+        description: 'Certify a single pack (wins over change detection). Blank = only packs changed since <base>.'
+        required: false
+        default: ''
+      base:
+        description: 'Git ref to diff against for changed-pack detection (blank = HEAD~1). Use "all" to force every pack.'
         required: false
         default: ''
   schedule:
-    - cron: '0 4 * * 1' # weekly, Monday 04:00 UTC
+    - cron: '0 4 * * 1' # weekly, Monday 04:00 UTC — full sweep, catches external drift
 
 jobs:
   discover:
@@ -25,14 +29,38 @@ jobs:
       packs: ${{ steps.list.outputs.packs }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history so the change-detection diff can resolve <base>
       - id: list
+        env:
+          PACK_INPUT: ${{ github.event.inputs.pack }}
+          BASE_INPUT: ${{ github.event.inputs.base }}
+          EVENT: ${{ github.event_name }}
         run: |
-          if [ -n "${{ github.event.inputs.pack }}" ]; then
-            packs='["${{ github.event.inputs.pack }}"]'
+          set -euo pipefail
+          # Certifiable packs = those carrying a reference/ fixture.
+          all_packs() { ls -d packs/*/reference 2>/dev/null | cut -d/ -f2 | sort -u; }
+
+          if [ -n "$PACK_INPUT" ]; then
+            # Explicit single pack wins over any detection.
+            sel="$PACK_INPUT"
+          elif [ "$EVENT" = "schedule" ] || [ "$BASE_INPUT" = "all" ]; then
+            # Weekly (and opt-in --all) run the full sweep to catch external drift
+            # — dependency/CLI-version rot that no pack edit would reveal.
+            sel="$(all_packs)"
           else
-            packs=$(ls -d packs/*/reference 2>/dev/null | cut -d/ -f2 | jq -R . | jq -cs .)
-            [ -z "$packs" ] && packs='[]'
+            # Scope to packs whose own files changed since <base> (default HEAD~1),
+            # intersected with certifiable packs. New packs with a reference/ show
+            # up here too. Empty result → the certify job is skipped entirely.
+            base="${BASE_INPUT:-HEAD~1}"
+            changed="$(git diff --name-only "$base"...HEAD -- 'packs/**' | cut -d/ -f2 | sort -u)"
+            sel="$(comm -12 <(all_packs) <(printf '%s\n' "$changed" | sort -u))"
           fi
+
+          # Build the JSON matrix. The `|| packs='[]'` keeps an empty selection
+          # from tripping `set -e` (grep exits non-zero when nothing matches).
+          packs=$(printf '%s\n' $sel | grep -v '^[[:space:]]*$' | jq -R . | jq -cs .) || packs='[]'
+          [ -z "$packs" ] && packs='[]'
           echo "packs=$packs" >> "$GITHUB_OUTPUT"
           echo "certifying: $packs"
 
