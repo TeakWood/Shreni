@@ -112,7 +112,10 @@ const DiffSizeGateSchema = z.object({
   maxLines: z.number().int().positive().default(1500),
 });
 
-const GATES_DEFAULTS = {
+// Exported for init (yds.15): the generated kshetra.yaml writes these
+// explicitly so the operator sees the gate levels instead of inheriting them
+// silently from the schema defaults.
+export const GATES_DEFAULTS = {
   test: { level: 'block' },
   lint: { level: 'block' },
   coverage: { level: 'warn' },
@@ -154,6 +157,7 @@ export const KshetraConfigSchema = z.object({
 
 export type KshetraConfig = z.infer<typeof KshetraConfigSchema>;
 export type StackConfig = z.infer<typeof StackConfigSchema>;
+export type GatesConfig = z.infer<typeof GatesConfigSchema>;
 
 export class KshetraConfigError extends Error {
   constructor(

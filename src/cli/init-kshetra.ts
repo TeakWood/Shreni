@@ -9,7 +9,7 @@ import { homedir } from 'os';
 import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
 import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
-import type { StackConfig } from '../kshetra/config';
+import { GATES_DEFAULTS, type GatesConfig, type StackConfig } from '../kshetra/config';
 import { detectToolchain, suggestPack, type DetectedStack } from './detect-toolchain';
 import { createInterface } from 'readline';
 import type { Provider } from '../agents/providers/types';
@@ -358,6 +358,61 @@ export async function printPackTemplateDiffs(pack: Pack, repoPath: string): Prom
   }
 }
 
+// ── Quality gates at init (yds.15) ───────────────────────────────────────────
+
+// A re-init never clobbers an operator's gate tuning: when the existing config
+// already carries a gates block, it is preserved verbatim. Any parse problem
+// falls through to the defaults path (the config is regenerated anyway).
+export function readExistingGates(configPath: string): Record<string, unknown> | undefined {
+  if (!existsSync(configPath)) return undefined;
+  try {
+    const existing = yaml.load(readFileSync(configPath, 'utf8')) as Record<string, unknown> | null;
+    const gates = existing?.['gates'];
+    return gates && typeof gates === 'object' ? (gates as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Print what will actually gate this Kshetra: the enforcement level per gate
+// and, for the delegate-first gates, the command the toolchain resolved ('' =
+// a visible skip; unset = the language-profile default fills in at runtime).
+export function formatGatesSummary(gates: GatesConfig, stack: DetectedStack): string {
+  const cmd = (c?: string) =>
+    c === '' ? '(skipped — empty command)' : c ?? '(language default)';
+  return [
+    'Quality gates:',
+    `  test:     ${gates.test.level}  ${cmd(stack.testRunner)}`,
+    `  lint:     ${gates.lint.level}  ${cmd(stack.lintCommand)}`,
+    `  coverage: ${gates.coverage.level}`,
+    `  diffSize: ${gates.diffSize.level} (≤${gates.diffSize.maxFiles} files, ≤${gates.diffSize.maxLines} lines)`,
+  ].join('\n');
+}
+
+async function promptGateLevel(name: string, def: 'block' | 'warn'): Promise<'block' | 'warn'> {
+  const answer = (
+    await promptLine(`  ${name} gate level [block/warn] (default ${def}): `)
+  ).trim().toLowerCase();
+  if (answer === 'block' || answer === 'warn') return answer;
+  if (answer) console.warn(`  ⚠ "${answer}" is not block|warn — keeping ${def}.`);
+  return def;
+}
+
+// Interactive adjust for the two advisory gates. test/lint stay block — they
+// are Shreni hard gates (a 'warn' would be clamped back to block by the
+// evaluator); a repo opts out of one by emptying its toolchain command, which
+// the summary shows as a visible skip.
+export async function promptGates(): Promise<GatesConfig> {
+  const coverage = await promptGateLevel('coverage', GATES_DEFAULTS.coverage.level);
+  const diffSize = await promptGateLevel('diffSize', GATES_DEFAULTS.diffSize.level);
+  return {
+    test: { ...GATES_DEFAULTS.test },
+    lint: { ...GATES_DEFAULTS.lint },
+    coverage: { level: coverage },
+    diffSize: { ...GATES_DEFAULTS.diffSize, level: diffSize },
+  };
+}
+
 async function promptLine(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -425,6 +480,10 @@ export function generateKshetraYaml(opts: {
   // repo.mergePolicy (3r2). Only written when 'pr' is chosen — 'push' is the
   // schema/runtime default, so omitting it keeps the generated config minimal.
   mergePolicy?: 'push' | 'pr';
+  // Quality gates (yds.15): written explicitly (defaults, operator-adjusted
+  // levels, or a preserved block from a prior config) so enforcement is
+  // visible in the file rather than inherited silently from the schema.
+  gates?: Record<string, unknown> | GatesConfig;
 }): string {
   const stack: DetectedStack = opts.stack ?? { language: opts.language ?? 'typescript', unknown: false };
   const conventions: Record<string, string> = {};
@@ -457,6 +516,7 @@ export function generateKshetraYaml(opts: {
       maxRoundsPerBead: 3,
     },
     priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
+    ...(opts.gates ? { gates: opts.gates } : {}),
   };
   let out = yaml.dump(config, { lineWidth: -1 });
   // Unknown ecosystem: flag the empty commands inline so the operator knows to
@@ -742,6 +802,35 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   }
 
   const configTarget = join(repoPath, SHRENI_DIR, 'kshetra.yaml');
+
+  // ── Quality gates (yds.15) ───────────────────────────────────────────────────
+  // An existing gates block is operator-owned and preserved verbatim; otherwise
+  // start from the defaults, show them, and (on a TTY, outside --dry-run) offer
+  // the two advisory levels for adjustment. Either way the block is written
+  // explicitly into the generated config.
+  const existingGates = readExistingGates(configTarget);
+  let gates: Record<string, unknown> | GatesConfig;
+  if (existingGates) {
+    gates = existingGates;
+    console.log(`  Keeping the existing gates block from ${configTarget}.`);
+  } else {
+    gates = {
+      test: { ...GATES_DEFAULTS.test },
+      lint: { ...GATES_DEFAULTS.lint },
+      coverage: { ...GATES_DEFAULTS.coverage },
+      diffSize: { ...GATES_DEFAULTS.diffSize },
+    };
+    console.log(formatGatesSummary(gates as GatesConfig, stack));
+    if (process.stdin.isTTY && !opts.dryRun) {
+      const answer = (
+        await promptLine('Accept these gate levels? [Y/n]: ')
+      ).trim();
+      if (answer && !/^y(es)?$/i.test(answer)) {
+        gates = await promptGates();
+        console.log(formatGatesSummary(gates as GatesConfig, stack));
+      }
+    }
+  }
   if (opts.dryRun) {
     console.log('\n--dry-run — plan only, nothing written:');
     console.log(`  provider:    ${providerLabel}`);
@@ -831,6 +920,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           conventions,
           agents,
           mergePolicy: opts.mergePolicy,
+          gates,
         });
         configPath = writeKshetraConfig(repoPath, yamlContent);
         appendShreniIntegration(repoPath);

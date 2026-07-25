@@ -85,6 +85,8 @@ const {
   printPackTemplateDiffs,
   upgradeKshetraStack,
   smokeCheckToolchain,
+  readExistingGates,
+  formatGatesSummary,
   appendShreniIntegration,
   createRagIndexStub,
   registerWithSthapathi,
@@ -734,6 +736,61 @@ describe('smokeCheckToolchain', () => {
 
 // ── resolveAgents (provider selection §3.5) ───────────────────────────────────
 
+// ── Quality gates at init (yds.15) ───────────────────────────────────────────
+
+describe('readExistingGates', () => {
+  it('returns undefined when no config exists', () => {
+    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toBeUndefined();
+  });
+
+  it('returns the gates block from an existing config', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue('id: myapp\ngates:\n  coverage:\n    level: block\n');
+    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toEqual({
+      coverage: { level: 'block' },
+    });
+  });
+
+  it('returns undefined when the config has no gates block', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue('id: myapp\n');
+    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toBeUndefined();
+  });
+
+  it('returns undefined on unparseable YAML', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue('id: [unclosed');
+    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toBeUndefined();
+  });
+});
+
+describe('formatGatesSummary', () => {
+  const defaults = {
+    test: { level: 'block' as const },
+    lint: { level: 'block' as const },
+    coverage: { level: 'warn' as const },
+    diffSize: { level: 'warn' as const, maxFiles: 40, maxLines: 1500 },
+  };
+
+  it('shows levels with the resolved commands', () => {
+    const out = formatGatesSummary(defaults, {
+      language: 'typescript', testRunner: 'pnpm test', lintCommand: 'pnpm lint', unknown: false,
+    });
+    expect(out).toContain('test:     block  pnpm test');
+    expect(out).toContain('lint:     block  pnpm lint');
+    expect(out).toContain('coverage: warn');
+    expect(out).toContain('diffSize: warn (≤40 files, ≤1500 lines)');
+  });
+
+  it('marks empty commands as visible skips and unset ones as language defaults', () => {
+    const out = formatGatesSummary(defaults, {
+      language: 'python', lintCommand: '', unknown: false,
+    });
+    expect(out).toContain('test:     block  (language default)');
+    expect(out).toContain('lint:     block  (skipped — empty command)');
+  });
+});
+
 describe('resolveAgents', () => {
   it('defaults to claude/anthropic with the registry default model', () => {
     expect(resolveAgents({})).toEqual({ provider: 'anthropic', model: 'claude-sonnet-4-6' });
@@ -960,6 +1017,35 @@ describe('initKshetra', () => {
       'git', ['commit', '-m', 'chore: init beads db (shreni init)'], beadsCwd,
     );
     expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], beadsCwd);
+  });
+
+  it('writes an explicit gates block with the schema defaults into a fresh config', async () => {
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+    const configWrite = mockWriteFileSync.mock.calls.find(
+      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
+    );
+    const yamlOut = configWrite?.[1] as string;
+    expect(yamlOut).toContain('gates:');
+    expect(yamlOut).toMatch(/test:\s*\n\s*level: block/);
+    expect(yamlOut).toMatch(/coverage:\s*\n\s*level: warn/);
+    expect(yamlOut).toContain('maxFiles: 40');
+    expect(yamlOut).toContain('maxLines: 1500');
+  });
+
+  it('preserves an existing gates block on re-init instead of resetting to defaults', async () => {
+    mockExistsSync.mockImplementation(
+      (p: string) => p.endsWith('.git') || p.endsWith('kshetra.yaml'),
+    );
+    mockReadFileSync.mockImplementation((p: unknown) =>
+      (p as string).endsWith('kshetra.yaml')
+        ? 'id: myapp\ngates:\n  coverage:\n    level: block\n'
+        : '',
+    );
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+    const configWrite = mockWriteFileSync.mock.calls.find(
+      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
+    );
+    expect(configWrite?.[1]).toMatch(/coverage:\s*\n\s*level: block/);
   });
 
   it('ends with the ready-to-work message', async () => {
