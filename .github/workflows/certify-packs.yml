@@ -57,7 +57,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Install bd + claude CLIs
-        run: npm install -g @beads/bd @anthropic-ai/claude-code
+        # @beads/bd's postinstall SKIPS the release-binary download when CI is
+        # set (GitHub Actions sets CI=true), so a plain `npm i -g` leaves the
+        # wrapper without its binary and `bd init` aborts with "bd binary not
+        # found". Clear CI for the bd install so the postinstall downloads it,
+        # then assert bd is on PATH so a silent miss fails here, not mid-cert.
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          CI= npm install -g @beads/bd
+          bd version
       # Per-ecosystem toolchains the fixtures need: uv for python-fastapi
       # (backlog.sh runs `uv sync`); Go ships on ubuntu-latest already.
       - uses: astral-sh/setup-uv@v5
