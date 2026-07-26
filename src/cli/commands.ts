@@ -23,6 +23,7 @@ import { verifyHooks } from './verify-hooks';
 import { runList } from './list';
 import { startPhalaka, stopPhalaka, statusPhalaka } from './phalaka';
 import { autoStartPhalaka, autoStopPhalaka } from './phalaka-autostart';
+import { runSuthradhara } from './suthradhara';
 import { runTail } from './tail';
 import { runInit } from './init';
 import { runTelemetry } from './telemetry';
@@ -327,6 +328,18 @@ export const COMMANDS: Command[] = [
       } else {
         throw new Error('Usage: shreni phalaka <start|stop|status> [--port <port>]');
       }
+    },
+  },
+  {
+    name: 'suthradhara',
+    summary: 'Control a Suthradhara interview session for a kshetra',
+    usage: '<start|stop|status> [@<id> | --kshetra <id>]',
+    run(ctx) {
+      runSuthradhara(ctx.args[0], {
+        args: ctx.args.slice(1),
+        flagKshetra: ctx.flag('--kshetra'),
+        cwd: process.cwd(),
+      });
     },
   },
   {
