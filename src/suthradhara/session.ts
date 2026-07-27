@@ -3,8 +3,10 @@ import type { KshetraConfig } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
 import { readOnlyAllowlist, filingAllowlist } from './allowlist';
+import { mergeGrants } from './grant';
 import { buildSystemPrompt } from './prompt';
 import type { SessionState } from './state';
+import type { McpGrants } from '../kshetra/config';
 
 // Raised when the spawn wiring cannot be built — today only a configured MCP
 // server whose `secretEnv` names a host env var that is unset (pmb.4). Failing
@@ -45,17 +47,26 @@ export interface SuthradharaSpawnOpts {
   kshetra: KshetraConfig;
   systemPrompt: string;
   userPrompt: string;
+  // In-memory session grants from interactive grant-on-demand (pmb.6), merged on
+  // top of the statically-configured per-role grants for THIS turn's allowlist.
+  // Absent on a fresh turn; the turn loop passes the accumulated map when it
+  // re-spawns after an operator `y`/`always`. Never touches disk here — persistence
+  // of an `always` grant is a separate step (persistMcpGrant).
+  sessionGrants?: McpGrants;
 }
 
 export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
   const { kshetra } = opts;
-  // Read-only surface PLUS Suthradhara's statically-configured MCP grants
-  // (agents.suthradhara.mcp), compiled to exact `mcp__<server>__<tool>` ids
-  // (pmb.5). buildFilingSpawn swaps this whole value for filingAllowlist(), which
-  // takes no grants — so the granted tracker-read tools ride only the interview
-  // turn, never the bd-write turn. Interactive grant-on-demand (pmb.6) will layer
-  // session-scoped grants on top of these config ones.
-  const allowlist = readOnlyAllowlist(kshetra.agents.suthradhara?.mcp);
+  // Read-only surface PLUS Suthradhara's MCP grants, compiled to exact
+  // `mcp__<server>__<tool>` ids (pmb.5). The grant map is the statically-configured
+  // per-role grants (agents.suthradhara.mcp) MERGED with any in-memory session
+  // grants the operator approved this session via grant-on-demand (pmb.6).
+  // buildFilingSpawn swaps this whole value for filingAllowlist(), which takes no
+  // grants — so the granted tracker-read tools ride only the interview turn, never
+  // the bd-write turn.
+  const allowlist = readOnlyAllowlist(
+    mergeGrants(kshetra.agents.suthradhara?.mcp, opts.sessionGrants),
+  );
 
   // Ambient MCP connect + secret injection. --mcp-config points claude at each
   // server's def file (repo-relative in yaml → absolute against repo.path so it
@@ -113,11 +124,13 @@ export function buildInterviewSpawn(
   state: SessionState,
   kshetra: KshetraConfig,
   userPrompt: string,
+  sessionGrants?: McpGrants,
 ): SpawnSpec {
   return buildClaudeSpawn({
     kshetra,
     systemPrompt: buildSystemPrompt(state, kshetra),
     userPrompt,
+    sessionGrants,
   });
 }
 

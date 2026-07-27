@@ -7,7 +7,10 @@ import { runInterviewTurn, resumeInterruptedCommit, type TurnDeps } from '../sut
 import { captureClaudeTurn } from '../suthradhara/capture';
 import { makeCommitFn } from '../suthradhara/commit';
 import { makeLocateFn } from '../suthradhara/evolve';
-import type { KshetraConfig } from '../kshetra/config';
+import { parseGrantAnswer, renderGrantPrompt } from '../suthradhara/grant';
+import { resolveConfigPath } from '../kshetra/registry';
+import { persistMcpGrant } from '../kshetra/grant-persist';
+import type { KshetraConfig, McpGrants } from '../kshetra/config';
 
 // Detached entry point for a Suthradhara session. Reads the kshetra id from
 // argv[2] and the session id from argv[3], records its own PID, hydrates the
@@ -79,18 +82,48 @@ runReplSession(kshetra, session);
 export function runReplSession(
   kshetra: KshetraConfig,
   initial: SessionState,
-  deps: TurnDeps = {
-    capture: captureClaudeTurn,
-    commit: makeCommitFn(),
-    save: saveSession,
-    locate: makeLocateFn(kshetra),
-  },
+  depsOverride?: Partial<TurnDeps>,
 ): void {
   let state = initial;
   let busy = false;
   const queue: string[] = [];
+  // In-memory session grants from interactive grant-on-demand (pmb.6). Held only
+  // in this process — a new session or a resume starts empty (an `always` grant
+  // reaches the next session via kshetra.yaml, not this map). Threaded through
+  // every turn and updated from the turn's result.
+  let sessionGrants: McpGrants = {};
 
   const rl = createInterface({ input: process.stdin, terminal: false });
+
+  // While a turn is mid-flight and awaiting an operator grant decision, the next
+  // stdin line is that answer — not a new interview message. `pendingLine` diverts
+  // exactly one line to the grant resolver; otherwise lines flow to the turn queue.
+  let pendingLine: ((line: string) => void) | null = null;
+  const askOperatorLine = (promptText: string): Promise<string> =>
+    new Promise((resolveLine) => {
+      process.stdout.write(`\n${promptText} `);
+      pendingLine = resolveLine;
+    });
+
+  // Grant-on-demand wiring: the prompt reads a line off stdin (shared readline);
+  // `always` persists to kshetra.yaml via the registry-resolved config path. Both
+  // are overridable so a test can drive the loop without a TTY or a real file.
+  const deps: TurnDeps = {
+    capture: captureClaudeTurn,
+    commit: makeCommitFn(),
+    save: saveSession,
+    locate: makeLocateFn(kshetra),
+    askGrant: async (server, tool) =>
+      parseGrantAnswer(await askOperatorLine(renderGrantPrompt(server, tool))),
+    persistGrant: (server, tool) => {
+      const configPath = resolveConfigPath(kshetra.id);
+      if (!configPath) {
+        throw new Error(`kshetra "${kshetra.id}" is not registered — cannot resolve kshetra.yaml`);
+      }
+      persistMcpGrant(configPath, 'suthradhara', server, tool);
+    },
+    ...depsOverride,
+  };
 
   const drain = async (): Promise<void> => {
     if (busy) return;
@@ -98,8 +131,9 @@ export function runReplSession(
     if (message === undefined) return;
     busy = true;
     try {
-      const result = await runInterviewTurn(state, kshetra, message, deps);
+      const result = await runInterviewTurn(state, kshetra, message, deps, sessionGrants);
       state = result.state;
+      if (result.sessionGrants) sessionGrants = result.sessionGrants;
       process.stdout.write(`\n${result.reply}\n\n`);
       for (const w of result.warnings) console.error(`[suthradhara:${kshetra.id}] ${w}`);
     } catch (err) {
@@ -133,6 +167,14 @@ export function runReplSession(
     });
 
   rl.on('line', (line) => {
+    // A pending grant prompt claims the next line as its answer (§4.2), before any
+    // trim/command handling — an empty line is a valid "deny" there.
+    if (pendingLine) {
+      const resolveLine = pendingLine;
+      pendingLine = null;
+      resolveLine(line);
+      return;
+    }
     const message = line.trim();
     if (message === '') return;
     if (message === '/exit' || message === '/quit') { shutdown(); return; }

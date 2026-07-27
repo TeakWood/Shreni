@@ -496,3 +496,142 @@ describe('renderRecentWindow', () => {
     expect(w).not.toContain('Operator: a');
   });
 });
+
+// ── interactive grant-on-demand (pmb.6) ──────────────────────────────────────
+
+// The list passed to `claude --allowedTools` for a spawn.
+function allowlistOf(spec: SpawnSpec): string[] {
+  const i = spec.args.indexOf('--allowedTools');
+  return i >= 0 ? (spec.args[i + 1] ?? '').split(',') : [];
+}
+
+// A capture fake that models the real CLI: the MCP tool `deniedId` is refused
+// (surfaced on `deniedTools`) until it appears on the spawn's allowlist — i.e.
+// after a grant re-spawns the turn — at which point the call succeeds with
+// `successText`. Records every spec so tests can count spawns.
+function grantAwareCapture(deniedId: string, successText: string, waitingText = 'Waiting on permission.') {
+  const specs: SpawnSpec[] = [];
+  const capture = (spec: SpawnSpec): Promise<CaptureResult> => {
+    specs.push(spec);
+    if (allowlistOf(spec).includes(deniedId)) {
+      return Promise.resolve({ text: successText, deniedTools: [] });
+    }
+    return Promise.resolve({ text: waitingText, deniedTools: [{ name: deniedId, input: { issue: 'PROJ-123' } }] });
+  };
+  return { capture, specs };
+}
+
+const ID = 'mcp__jira__get_issue';
+
+describe('runInterviewTurn — grant-on-demand (pmb.6)', () => {
+  it('y: a denied read tool prompts, the grant re-spawns the turn to success, and does not persist', async () => {
+    const { capture, specs } = grantAwareCapture(ID, withDelta('Pulled PROJ-123.', '{"requirements":["from PROJ-123"]}'));
+    const askGrant = vi.fn().mockResolvedValue('session');
+    const persistGrant = vi.fn();
+    const save = vi.fn();
+    const deps: TurnDeps = { capture, commit: okCommit, save, askGrant, persistGrant, now: () => NOW };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, "let's work on PROJ-123", deps);
+
+    // prompted once with the parsed server/tool
+    expect(askGrant).toHaveBeenCalledExactlyOnceWith('jira', 'get_issue');
+    // re-spawned: first spawn denied, second (with grant) succeeded
+    expect(specs.length).toBe(2);
+    expect(allowlistOf(specs[0])).not.toContain(ID);
+    expect(allowlistOf(specs[1])).toContain(ID);
+    // the successful turn's output was distilled, not the waiting text
+    expect(res.state.requirements).toEqual(['from PROJ-123']);
+    expect(res.reply).toBe('Pulled PROJ-123.');
+    // session-scoped: returned in memory, NOT persisted to config
+    expect(res.sessionGrants).toEqual({ jira: ['get_issue'] });
+    expect(persistGrant).not.toHaveBeenCalled();
+  });
+
+  it('always: also persists the per-role grant', async () => {
+    const { capture } = grantAwareCapture(ID, withDelta('Pulled.', '{}'));
+    const askGrant = vi.fn().mockResolvedValue('always');
+    const persistGrant = vi.fn();
+    const deps: TurnDeps = { capture, commit: okCommit, save: vi.fn(), askGrant, persistGrant, now: () => NOW };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'PROJ-123', deps);
+
+    expect(persistGrant).toHaveBeenCalledExactlyOnceWith('jira', 'get_issue');
+    expect(res.sessionGrants).toEqual({ jira: ['get_issue'] });
+    expect(res.warnings).toEqual([]);
+  });
+
+  it('always with no persistGrant hook: keeps the grant session-only and warns', async () => {
+    const { capture } = grantAwareCapture(ID, withDelta('Pulled.', '{}'));
+    const askGrant = vi.fn().mockResolvedValue('always');
+    const deps: TurnDeps = { capture, commit: okCommit, save: vi.fn(), askGrant, now: () => NOW };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'PROJ-123', deps);
+
+    expect(res.sessionGrants).toEqual({ jira: ['get_issue'] });
+    expect(res.warnings.join(' ')).toMatch(/session only/i);
+  });
+
+  it('always: a failing persist downgrades to session-only with a warning', async () => {
+    const { capture } = grantAwareCapture(ID, withDelta('Pulled.', '{}'));
+    const askGrant = vi.fn().mockResolvedValue('always');
+    const persistGrant = vi.fn(() => { throw new Error('server not defined'); });
+    const deps: TurnDeps = { capture, commit: okCommit, save: vi.fn(), askGrant, persistGrant, now: () => NOW };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'PROJ-123', deps);
+
+    expect(res.sessionGrants).toEqual({ jira: ['get_issue'] });
+    expect(res.warnings.join(' ')).toMatch(/could not persist.*server not defined/i);
+  });
+
+  it('N: no grant, no re-spawn, no persist — the turn proceeds without the tool', async () => {
+    const { capture, specs } = grantAwareCapture(ID, 'unreachable');
+    const askGrant = vi.fn().mockResolvedValue('deny');
+    const persistGrant = vi.fn();
+    const deps: TurnDeps = { capture, commit: okCommit, save: vi.fn(), askGrant, persistGrant, now: () => NOW };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'PROJ-123', deps);
+
+    expect(askGrant).toHaveBeenCalledOnce();
+    expect(specs.length).toBe(1); // no re-spawn
+    expect(res.sessionGrants).toEqual({}); // unchanged
+    expect(persistGrant).not.toHaveBeenCalled();
+    expect(res.reply).toBe('Waiting on permission.'); // proceeds on the text it got
+  });
+
+  it('never prompts for a mutation verb — a denied write is not offered', async () => {
+    const { capture, specs } = grantAwareCapture('mcp__jira__update_issue', 'unreachable');
+    const askGrant = vi.fn().mockResolvedValue('session');
+    const deps: TurnDeps = { capture, commit: okCommit, save: vi.fn(), askGrant, now: () => NOW };
+
+    await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'transition PROJ-123', deps);
+
+    expect(askGrant).not.toHaveBeenCalled();
+    expect(specs.length).toBe(1);
+  });
+
+  it('a grant carried in from a prior turn is not re-prompted', async () => {
+    const { capture, specs } = grantAwareCapture(ID, withDelta('Pulled again.', '{}'));
+    const askGrant = vi.fn().mockResolvedValue('deny');
+    const deps: TurnDeps = { capture, commit: okCommit, save: vi.fn(), askGrant, now: () => NOW };
+
+    const res = await runInterviewTurn(
+      newSessionState(sid, 'myapp', NOW), KSHETRA, 'PROJ-123 again', deps,
+      { jira: ['get_issue'] }, // already granted this session
+    );
+
+    expect(askGrant).not.toHaveBeenCalled();
+    expect(specs.length).toBe(1);
+    expect(allowlistOf(specs[0])).toContain(ID); // granted from the start of the turn
+    expect(res.reply).toBe('Pulled again.');
+  });
+
+  it('without an askGrant hook, denials are ignored (pre-pmb.6 behaviour)', async () => {
+    const { capture, specs } = grantAwareCapture(ID, 'unreachable');
+    const deps: TurnDeps = { capture, commit: okCommit, save: vi.fn(), now: () => NOW };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'PROJ-123', deps);
+
+    expect(specs.length).toBe(1);
+    expect(res.reply).toBe('Waiting on permission.');
+  });
+});

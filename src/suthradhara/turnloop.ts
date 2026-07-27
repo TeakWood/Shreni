@@ -35,6 +35,13 @@ import { parseConfirmFrame, hasPendingProposal, applyConfirmFrame } from './conf
 import { parseTurnOutput, applyDelta } from './distill';
 import type { CaptureFn } from './capture';
 import type { CommitFn, CommitReport } from './commit';
+import type { McpGrants } from '../kshetra/config';
+import {
+  selectGrantable,
+  addGrant,
+  type GrantPrompt,
+  type PersistGrant,
+} from './grant';
 import {
   classifyMatches,
   evolveStateFromOutcome,
@@ -58,6 +65,15 @@ export interface TurnDeps {
   // Locate an existing feature's doc when the model emits `locateFeature` (§8.1).
   // Optional — absent it, an evolve signal is a no-op (a new-doc interview).
   locate?: LocateFn;
+  // Interactive grant-on-demand (pmb.6). Called for each denied MCP read tool the
+  // capture surfaced this turn: it asks the operator `[y / always / N]`. Absent →
+  // denials are ignored and the turn proceeds on the text it already got (the
+  // pre-pmb.6 behaviour), so tests that don't exercise grants are unaffected.
+  askGrant?: GrantPrompt;
+  // Persist an `always` grant into kshetra.yaml (pmb.6). Called only for an
+  // `always` decision; absent (or throwing) → the grant stays session-only and a
+  // warning is recorded. Injected so tests never write real yaml.
+  persistGrant?: PersistGrant;
   // Clock injection for deterministic tests.
   now?: () => string;
   // How many prior transcript entries to include as a verbatim continuity window
@@ -72,11 +88,22 @@ export interface TurnResult {
   reply: string;
   // Set when this turn committed a confirmed bundle.
   committed?: CommitReport;
+  // The in-memory session grants as they stand AFTER this turn (pmb.6). Set on an
+  // ordinary interview turn so the REPL can carry the operator's `y`/`always`
+  // approvals into subsequent turns of the same session; absent on the confirm /
+  // doc-choice branches, which never touch grants (the caller keeps its map).
+  sessionGrants?: McpGrants;
   // Non-fatal distillation notes (dropped delta fields, a refused stage jump).
   warnings: string[];
 }
 
 const DEFAULT_WINDOW = 4;
+
+// Belt-and-suspenders cap on the grant/re-spawn loop. It already terminates on its
+// own — each round marks the tools it asked about, and only a fresh grant triggers
+// another re-spawn against a finite tool universe — but a hard bound guarantees a
+// turn can never spin indefinitely on a pathological denial stream.
+const MAX_GRANT_ROUNDS = 16;
 
 // The last-N transcript entries rendered as a short continuity block for the USER
 // prompt. Deliberately compact and clearly labelled so it reads as "recent
@@ -105,6 +132,11 @@ export async function runInterviewTurn(
   kshetra: KshetraConfig,
   message: string,
   deps: TurnDeps,
+  // The session grants accumulated so far this session (pmb.6). The REPL threads
+  // the map across turns; an ordinary turn returns the possibly-augmented map in
+  // TurnResult.sessionGrants. Defaults to none so existing 4-arg callers/tests are
+  // unaffected.
+  sessionGrants: McpGrants = {},
 ): Promise<TurnResult> {
   const now = deps.now ? deps.now() : new Date().toISOString();
   const windowN = deps.recentWindow ?? DEFAULT_WINDOW;
@@ -169,18 +201,63 @@ export async function runInterviewTurn(
   }
 
   // ── ordinary interview turn ─────────────────────────────────────────────────
-  const spec = buildInterviewSpawn(next, kshetra, userPrompt);
-  const captured = await deps.capture(spec);
-  // `captured.deniedTools` (allowlist-refused tool calls this turn) is surfaced by
-  // capture.ts for the interactive grant-on-demand prompt; wiring it into a
-  // [y / always / N] re-spawn is pmb.6. For now the ordinary turn uses the text.
+  let grants = sessionGrants;
+  const warnings: string[] = [];
+  let captured = await deps.capture(buildInterviewSpawn(next, kshetra, userPrompt, grants));
+
+  // ── interactive grant-on-demand (pmb.6, §4.2) ───────────────────────────────
+  // The turn reached for MCP tools the allowlist refused. Offer the operator each
+  // grantable one ([y / always / N]); a granted tool is merged into the in-memory
+  // session grants and the turn is RE-SPAWNED so the now-allowed tool_use runs.
+  // `always` additionally persists the per-role grant to kshetra.yaml. Only read
+  // tools are ever offered (selectGrantable filters mutation verbs and wildcards),
+  // so a keystroke can never open write-back. Absent an askGrant hook the denials
+  // are ignored and the turn proceeds on the text it already has. The loop marks
+  // each asked tool so a `deny` is not re-prompted, and only a fresh grant drives
+  // another re-spawn — so it converges once the operator stops granting.
+  if (deps.askGrant && captured.deniedTools.length > 0) {
+    const asked = new Set<string>();
+    for (let round = 0; round < MAX_GRANT_ROUNDS; round++) {
+      const grantable = selectGrantable(captured.deniedTools, grants, asked);
+      if (grantable.length === 0) break;
+      let grantedThisRound = false;
+      for (const g of grantable) {
+        asked.add(g.id);
+        const decision = await deps.askGrant(g.server, g.tool);
+        if (decision === 'deny') continue;
+        grants = addGrant(grants, g.server, g.tool);
+        grantedThisRound = true;
+        if (decision === 'always') {
+          if (deps.persistGrant) {
+            try {
+              deps.persistGrant(g.server, g.tool);
+            } catch (err) {
+              warnings.push(
+                `could not persist grant ${g.server}.${g.tool} to kshetra.yaml ` +
+                  `(${(err as Error).message}) — granted for this session only`,
+              );
+            }
+          } else {
+            warnings.push(
+              `'always' grant ${g.server}.${g.tool} kept for this session only — ` +
+                `no persistence configured`,
+            );
+          }
+        }
+      }
+      // Nothing new granted this round (all denied) → the re-spawn would be
+      // identical, so stop and let the model proceed without the tools.
+      if (!grantedThisRound) break;
+      captured = await deps.capture(buildInterviewSpawn(next, kshetra, userPrompt, grants));
+    }
+  }
+
   const { reply, delta } = parseTurnOutput(captured.text);
 
-  let warnings: string[] = [];
   if (delta) {
     const applied = applyDelta(next, delta, now);
     next = applied.state;
-    warnings = applied.warnings;
+    warnings.push(...applied.warnings);
   }
 
   // ── evolve locate (§8.1) ────────────────────────────────────────────────────
@@ -199,7 +276,7 @@ export async function runInterviewTurn(
   // control payload, then persist the distilled + transcript state.
   next = recordAssistantTurn(next, replyOut, now);
   deps.save(next);
-  return { state: next, reply: replyOut, warnings };
+  return { state: next, reply: replyOut, warnings, sessionGrants: grants };
 }
 
 // Whether the interview is waiting for the operator to pick which doc to evolve.

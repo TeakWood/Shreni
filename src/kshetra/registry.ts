@@ -83,3 +83,13 @@ export function unregisterKshetra(id: string): void {
   registry.kshetras = registry.kshetras.filter(k => k.id !== id);
   writeRegistry(registry);
 }
+
+// The absolute config path a Kshetra id resolves to, or null when unregistered.
+// The registry is the sole authority for `id → configPath` (project convention),
+// so a writer that must edit the on-disk kshetra.yaml — e.g. persisting an
+// interactive `always` MCP grant (pmb.6) — resolves the path here rather than
+// reconstructing it from repo.path.
+export function resolveConfigPath(id: string): string | null {
+  const registry = readRegistry();
+  return registry.kshetras.find(k => k.id === id)?.configPath ?? null;
+}
