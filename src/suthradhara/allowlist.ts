@@ -4,7 +4,10 @@
 // decomposition (xa0.4). Isolated here (rather than inlined into session.ts) so
 // the allowlist a turn runs under is a pure function of session state — that is
 // what makes "no bd write before confirm" a property we can test, not a promise.
-// xa0.5 adds a path-scoped design-doc write on top. Neither `bd close` nor
+// xa0.5's design-doc write is deliberately NOT here: the settled Q4 choice is
+// server-authors-the-file (designdoc.ts writeDesignDoc), so no native `Write`
+// grant is added to any allowlist — the model never holds a file-write tool.
+// Neither `bd close` nor
 // `bd update --claim` is EVER added: filing is create/link only, so a
 // Suthradhara session can never claim, close, or mutate an existing bead —
 // those stay Sthapathi's alone, out-of-loop by construction.
