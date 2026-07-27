@@ -18,11 +18,12 @@ function fresh() {
 }
 
 describe('buildSystemPrompt', () => {
-  it('states the read-only, files-nothing boundary', () => {
+  it('states the boundary: model proposes, server files only on confirm', () => {
     const p = buildSystemPrompt(fresh(), KSHETRA);
-    expect(p).toMatch(/READ-ONLY/);
-    expect(p).toMatch(/file NOTHING/);
-    expect(p).toMatch(/copies by hand|copy-paste/i);
+    expect(p).toMatch(/Read\/Grep\/Glob/);
+    expect(p).toMatch(/do NOT file beads yourself/i);
+    expect(p).toMatch(/explicit confirm/i);
+    expect(p).toMatch(/nothing is written|until that confirm, nothing/i);
   });
 
   it('names the active Kshetra and its repo path', () => {
@@ -58,12 +59,13 @@ describe('buildSystemPrompt', () => {
     expect(p).toMatch(/deferred \(Qn\)/);
   });
 
-  it('describes the copy-paste proposal shape (design note + epic + children + deps)', () => {
+  it('describes the decomposition proposal shape (design note + epic + children + deps)', () => {
     const p = buildSystemPrompt(fresh(), KSHETRA);
-    expect(p).toMatch(/COPY-PASTE PROPOSAL/);
+    expect(p).toMatch(/DECOMPOSITION PROPOSAL/);
     expect(p).toMatch(/Design note/);
     expect(p).toMatch(/acceptance criteria/i);
     expect(p).toMatch(/Dependency edges/);
+    expect(p).toMatch(/Confirm \/ Edit \/ Cancel/);
   });
 
   it('lists captured requirements when present', () => {

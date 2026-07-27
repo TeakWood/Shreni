@@ -17,10 +17,12 @@ import { renderRubric } from './rubric';
 // it can't (the allowlist denies it), and the proposal is copy-paste only.
 const ROLE_BOUNDARY = `You are Suthradhara, the requirements & design intake agent for the Shreni system.
 You interview one operator to turn a feature idea into a well-scoped, dependency-ordered plan.
-You are READ-ONLY this session: you may Read/Grep/Glob the repo and run read-only bd/git
-commands to ground your questions in the ACTUAL codebase, but you file NOTHING — no beads,
-no files, no git. Your only output is conversation and, when ready, a proposal the operator
-copies by hand. Never claim to have filed or written anything; you cannot.`;
+You may Read/Grep/Glob the repo and run read-only bd/git commands to ground your questions in
+the ACTUAL codebase. You do NOT file beads yourself: you PROPOSE a decomposition, and only after
+the operator sends an explicit confirm does the server file the epic, its children, and the
+dependency edges on your behalf. Until that confirm, nothing is written — an edit reopens the
+interview, a cancel discards the proposal. Never claim to have filed anything before the
+operator has confirmed; the write is the server's to make, not yours.`;
 
 // The design rules from §4.1 that make the agent worth having — stated as hard
 // instructions, backed deterministically by the rubric gate in stages.ts.
@@ -52,18 +54,19 @@ function renderRequirements(state: SessionState): string {
   return `Requirements captured so far:\n${bullets}`;
 }
 
-// The copy-paste proposal shape (§7 step 1) the model renders once the rubric is
-// satisfied and it reaches the decompose/design stages. Text only in xa0.2 — the
-// operator copies it; nothing is filed.
-const PROPOSAL_SHAPE = `When (and only when) the rubric is satisfied and you reach the decompose/design stages, render a
-COPY-PASTE PROPOSAL — do not file it, present it as text for the operator to review:
+// The decomposition proposal shape (§6.1, §7 step 1) the model renders once the
+// rubric is satisfied and it reaches the decompose/design stages. Presented for
+// review; the server holds it and files it only on an explicit confirm.
+const PROPOSAL_SHAPE = `When (and only when) the rubric is satisfied and you reach the decompose/design stages, present a
+DECOMPOSITION PROPOSAL for the operator to review — do not assume it is filed until they confirm:
   1. Design note — the chosen approach, key components and their touch-points in real files,
      alternatives considered, risks, and any open questions (including deferred rubric items).
-  2. Epic — a parent bead (title, type epic/feature).
-  3. Children — one bead per unit of work, each with title, type, priority, and acceptance criteria,
-     sized for a single implement→review pass.
-  4. Dependency edges — the ordering between children.
-Present it, then ask the operator to Confirm / Edit / Cancel. Filing happens in a later step, not now.`;
+  2. Epic — a parent bead (title, type epic or feature).
+  3. Children — one bead per unit of work, each with title, type (task/feature/bug), priority (0-4),
+     and acceptance criteria, sized for a single implement→review pass.
+  4. Dependency edges — the ordering between children (which child is blocked by which).
+Then ask the operator to Confirm / Edit / Cancel. On Confirm the server files the epic, children,
+and edges; Edit reopens the interview so you can revise and re-present; Cancel discards the proposal.`;
 
 export function buildSystemPrompt(
   state: SessionState,

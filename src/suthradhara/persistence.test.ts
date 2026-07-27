@@ -88,6 +88,26 @@ describe('saveSession / loadSession round trip', () => {
     expect(loaded.kshetraId).toBe('myapp');
   });
 
+  it('round-trips a pending decomposition proposal (resume mid-confirm-gate)', () => {
+    const state = newSessionState('myapp-20260727T140312-a3f2', 'myapp');
+    state.stage = 'confirm';
+    state.pending = {
+      presentedAt: '2026-07-27T10:00:00.000Z',
+      decomposition: {
+        epic: { ref: 'epic', title: 'CSV import', type: 'epic', priority: 2 },
+        children: [
+          { ref: 'parse', title: 'Parse CSV', type: 'task', priority: 1, acceptanceCriteria: 'rows parsed' },
+        ],
+        deps: [],
+      },
+    };
+
+    saveSession(state);
+    const loaded = loadSession(state.id);
+
+    expect(loaded.pending).toEqual(state.pending);
+  });
+
   it('always stamps updatedAt at save time', () => {
     const state = newSessionState('myapp-20260727T140312-a3f2', 'myapp', '2026-01-01T00:00:00.000Z');
     saveSession(state);

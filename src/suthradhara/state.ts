@@ -74,6 +74,21 @@ export interface OpenQuestion {
   rubricKey?: keyof RubricState;
 }
 
+// A decomposition the model has proposed and presented, held server-side while
+// the interview waits for the operator's confirm/edit/cancel (ARD §6.1, §7).
+// Its mere presence is the "commit-bearing turn" flag: while `pending` is set,
+// allowlistForTurn() unlocks the filing surface, and NOTHING is filed until a
+// confirm frame clears it (confirm.ts). It persists in the session so a resume
+// mid-gate still knows a proposal is awaiting confirmation rather than silently
+// dropping it. Optional/additive — old sessions load with `pending` absent.
+export interface PendingProposal {
+  // The full decomposition object (decomposition.ts); kept structured, not
+  // rendered text, so an "edit" can amend it in place.
+  decomposition: import('./decomposition').Decomposition;
+  // When it was presented to the operator (ISO-8601), for the audit trail.
+  presentedAt: string;
+}
+
 // Bumped when the on-disk shape changes in a way that isn't a pure additive
 // field. loadSession() rejects an unknown version rather than mis-hydrating.
 export const SESSION_STATE_VERSION = 1 as const;
@@ -92,6 +107,9 @@ export interface SessionState {
   requirements: string[];
   openQuestions: OpenQuestion[];
   transcript: TranscriptEntry[];
+  // A decomposition proposal awaiting the operator's confirm/edit/cancel.
+  // Absent whenever the interview is not at a confirm gate. See PendingProposal.
+  pending?: PendingProposal | null;
 }
 
 export function newSessionState(

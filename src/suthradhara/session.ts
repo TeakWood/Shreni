@@ -1,7 +1,7 @@
 import type { KshetraConfig } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
-import { readOnlyAllowlist } from './allowlist';
+import { readOnlyAllowlist, filingAllowlist } from './allowlist';
 import { buildSystemPrompt } from './prompt';
 import type { SessionState } from './state';
 
@@ -57,4 +57,28 @@ export function buildInterviewSpawn(
     systemPrompt: buildSystemPrompt(state, kshetra),
     userPrompt,
   });
+}
+
+// The allowlist an interview/proposal turn runs under. It is ALWAYS the
+// read-only surface — no persisted session state ever grants a conversational
+// turn the filing verbs. That is the concrete meaning of "server is authority
+// / no bd write before confirm" (ARD §6.1): the model can propose a
+// decomposition and have it held (`pending`), but it can never file one on its
+// own initiative. Filing is reachable only through the post-confirm step, which
+// builds its own spawn (buildFilingSpawn) after applyConfirmFrame returns
+// `confirmed` — a path the interview loop cannot enter by itself.
+export function allowlistForTurn(_state: SessionState): string[] {
+  return readOnlyAllowlist();
+}
+
+// The spawn for the server's post-confirm filing turn: the read-only surface
+// PLUS `bd create` / `bd dep add` (filingAllowlist). This is the ONLY spawn
+// that carries the write verbs, and the confirm handler is its only caller —
+// it is never built from persisted state, so it cannot be reached without an
+// explicit confirm frame having just been processed.
+export function buildFilingSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
+  const spec = buildClaudeSpawn(opts);
+  const idx = spec.args.indexOf('--allowedTools');
+  if (idx >= 0) spec.args[idx + 1] = filingAllowlist().join(',');
+  return spec;
 }

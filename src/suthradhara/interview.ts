@@ -5,9 +5,13 @@
 // file is the thin facade over the transcript and running requirement set plus a
 // re-export of the pieces a caller reaches for together.
 //
-// xa0.2 stops at "produces a proposal to copy-paste, files nothing": these
-// helpers evolve the interview and gate the jump to decomposition, but nothing
-// here writes a bead or a file. That surface arrives in xa0.4/xa0.5.
+// The interview-evolution helpers here (transcript, requirements, rubric,
+// stage gate) are still pure and file nothing. xa0.4 adds the filing surface
+// alongside them — confirm.ts holds a proposal until an explicit confirm frame,
+// decomposition.ts models/validates the proposal, and filing.ts compiles it to
+// argv `bd` commands — all re-exported below so a turn loop reaches for one
+// facade. A bead write is authorised ONLY by applyConfirmFrame returning
+// `confirmed`; none of these functions writes on its own.
 
 import type { SessionState, TranscriptEntry } from './state';
 
@@ -27,6 +31,26 @@ export {
   nextStage,
   STAGE_META,
 } from './stages';
+
+export {
+  parseConfirmFrame,
+  hasPendingProposal,
+  presentProposal,
+  applyConfirmFrame,
+} from './confirm';
+export type { ConfirmFrame, ConfirmOutcome, PresentResult } from './confirm';
+
+export { validateDecomposition } from './decomposition';
+export type {
+  Decomposition,
+  ProposedEpic,
+  ProposedChild,
+  ProposedDep,
+  BeadType,
+} from './decomposition';
+
+export { compileFilingPlan, resolveStepArgv, UnresolvedRefError } from './filing';
+export type { FilingPlan, FilingStep, CreateStep, DepStep } from './filing';
 
 function recordTurn(
   state: SessionState,

@@ -50,9 +50,9 @@ export const STAGE_META: Record<SuthradharaStage, StageMeta> = {
   confirm: {
     hat: '—',
     purpose:
-      'Present the full bundle (design note + epic + children + dependency edges); the operator edits/approves.',
+      'Present the full bundle (design note + epic + children + dependency edges); the operator confirms, edits, or cancels.',
     exit:
-      'Operator confirms. (Actual filing lands in a later bead; xa0.2 stops at a copy-paste proposal.)',
+      'Operator sends an explicit confirm frame, at which point the server files the epic + children + dependency edges. Edit reopens the interview; cancel discards.',
   },
 };
 

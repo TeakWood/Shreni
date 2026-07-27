@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { buildClaudeSpawn } from './session';
+import { buildClaudeSpawn, buildFilingSpawn, allowlistForTurn } from './session';
+import { newSessionState } from './state';
+import { presentProposal } from './confirm';
+import type { Decomposition } from './decomposition';
 import type { KshetraConfig } from '../kshetra/config';
 
 const KSHETRA = {
@@ -64,5 +67,56 @@ describe('buildClaudeSpawn', () => {
     const sysIdx = spec.args.indexOf('--append-system-prompt');
     expect(spec.args[sysIdx + 1]).toBe('You are Suthradhara.');
     expect(spec.args[spec.args.length - 1]).toBe('Hello');
+  });
+});
+
+function decomp(): Decomposition {
+  return {
+    epic: { ref: 'epic', title: 'X', type: 'epic', priority: 2 },
+    children: [{ ref: 'c', title: 'Y', type: 'task', priority: 1, acceptanceCriteria: 'done' }],
+    deps: [],
+  };
+}
+
+describe('allowlistForTurn — server is authority', () => {
+  it('is read-only for a fresh interview turn', () => {
+    const list = allowlistForTurn(newSessionState('myapp-20260727T100000-abcd', 'myapp'));
+    expect(list).toContain('Read');
+    expect(list.some(t => t.includes('bd create'))).toBe(false);
+    expect(list.some(t => t.includes('bd dep add'))).toBe(false);
+  });
+
+  it('stays read-only even while a proposal is pending confirmation', () => {
+    // The write surface is NEVER reachable from persisted session state — even
+    // at the confirm gate, the conversational turn cannot file. Filing is only
+    // the post-confirm step's buildFilingSpawn.
+    const held = presentProposal(newSessionState('myapp-20260727T100000-abcd', 'myapp'), decomp());
+    if (!held.ok) throw new Error('setup');
+    const list = allowlistForTurn(held.state);
+    expect(list.some(t => t.includes('bd create'))).toBe(false);
+    expect(list.some(t => t.includes('bd dep add'))).toBe(false);
+  });
+});
+
+describe('buildFilingSpawn', () => {
+  const spec = buildFilingSpawn({
+    kshetra: KSHETRA,
+    systemPrompt: 'You are Suthradhara, filing.',
+    userPrompt: 'file it',
+  });
+
+  it('carries the filing write verbs on --allowedTools', () => {
+    const idx = spec.args.indexOf('--allowedTools');
+    const list = spec.args[idx + 1] ?? '';
+    expect(list).toContain('Bash(bd create:*)');
+    expect(list).toContain('Bash(bd dep add:*)');
+  });
+
+  it('still never carries bd close / bd update / claim on the filing turn', () => {
+    const idx = spec.args.indexOf('--allowedTools');
+    const list = spec.args[idx + 1] ?? '';
+    for (const p of ['bd close', 'bd update', '--claim', 'bd remember']) {
+      expect(list).not.toContain(p);
+    }
   });
 });
