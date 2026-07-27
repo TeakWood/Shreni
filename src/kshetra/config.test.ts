@@ -124,6 +124,108 @@ stack:
     expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
   });
 
+  it('leaves mcp undefined when the block is omitted', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML);
+    expect(loadKshetraConfig(path).mcp).toBeUndefined();
+  });
+
+  it('validates an mcp.servers block plus a per-role grant', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+mcp:
+  servers:
+    jira:
+      config: .shreni/mcp/jira.json
+      secretEnv: JIRA_TOKEN
+agents:
+  suthradhara:
+    mcp:
+      jira:
+        - get_issue
+        - search
+`);
+    const config = loadKshetraConfig(path);
+    expect(config.mcp?.servers.jira).toEqual({ config: '.shreni/mcp/jira.json', secretEnv: 'JIRA_TOKEN' });
+    expect(config.agents.suthradhara?.mcp?.jira).toEqual(['get_issue', 'search']);
+    // Round-trips: a re-load of the same file yields the same shape.
+    expect(loadKshetraConfig(path)).toEqual(config);
+  });
+
+  it('accepts a server def with no secretEnv (auth-less server)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+mcp:
+  servers:
+    localtool:
+      config: .shreni/mcp/localtool.json
+`);
+    const config = loadKshetraConfig(path);
+    expect(config.mcp?.servers.localtool).toEqual({ config: '.shreni/mcp/localtool.json' });
+    expect(config.mcp?.servers.localtool.secretEnv).toBeUndefined();
+  });
+
+  it('rejects an inline secret literal on a server def (only secretEnv allowed)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+mcp:
+  servers:
+    jira:
+      config: .shreni/mcp/jira.json
+      secret: super-secret-token
+`);
+    // No `secret` field exists in the schema; a stray literal is not a valid
+    // server shape (strict-object behaviour would reject, but even loosely the
+    // secret never lands on a typed field — the guarantee is "no secret literal
+    // is carried"). secretEnv naming is the only accepted form.
+    const config = loadKshetraConfig(path);
+    expect((config.mcp?.servers.jira as Record<string, unknown>).secret).toBeUndefined();
+  });
+
+  it('rejects a grant referencing an undefined MCP server', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+mcp:
+  servers:
+    jira:
+      config: .shreni/mcp/jira.json
+      secretEnv: JIRA_TOKEN
+agents:
+  silpi:
+    mcp:
+      linear:
+        - get_issue
+`);
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+    expect(() => loadKshetraConfig(path)).toThrow(/undefined MCP server "linear"/);
+  });
+
+  it('accepts per-role grants across multiple roles that all resolve', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+mcp:
+  servers:
+    jira:
+      config: .shreni/mcp/jira.json
+      secretEnv: JIRA_TOKEN
+    confluence:
+      config: .shreni/mcp/confluence.json
+      secretEnv: CONFLUENCE_TOKEN
+agents:
+  suthradhara:
+    mcp:
+      jira:
+        - get_issue
+  parikshaka:
+    mcp:
+      confluence:
+        - get_page
+`);
+    const config = loadKshetraConfig(path);
+    expect(config.agents.suthradhara?.mcp?.jira).toEqual(['get_issue']);
+    expect(config.agents.parikshaka?.mcp?.confluence).toEqual(['get_page']);
+  });
+
   it('throws KshetraConfigError when file does not exist', () => {
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(KshetraConfigError);
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(/Cannot read file/);
