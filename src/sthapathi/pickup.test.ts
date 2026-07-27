@@ -178,6 +178,44 @@ describe('pickNext', () => {
     pickNext(tasks);
     expect(tasks).toEqual(original);
   });
+
+  // ── queue isolation (ARD §9.1): the load-bearing filter test ──────────────
+  // A suthradhara-session bead must NEVER be returned as executable work, even
+  // when it is the only ready bead and would otherwise win on priority.
+
+  it('never returns a suthradhara-session bead, even a lone ready P0 one', () => {
+    const session: Task = { id: 's', slug: 's', title: 'Suthradhara session', status: 'pending', priority: 0, type: 'suthradhara-session' };
+    expect(pickNext([session])).toBeNull();
+  });
+
+  it('skips a session bead and picks the next-highest real task', () => {
+    const session: Task = { id: 's', slug: 's', title: 'session', status: 'pending', priority: 0, type: 'suthradhara-session' };
+    const real: Task = { id: 'r', slug: 'r', title: 'Real work', status: 'pending', priority: 2, type: 'task' };
+    expect(pickNext([session, real])!.id).toBe('r');
+  });
+
+  it('excludes session beads whatever their status (type is the guarantee, not status)', () => {
+    const open: Task = { id: 'o', slug: 'o', title: 'open session', status: 'pending', priority: 1, type: 'suthradhara-session' };
+    const claimed: Task = { id: 'c', slug: 'c', title: 'in-progress session', status: 'in_progress', priority: 1, type: 'suthradhara-session' };
+    expect(pickNext([open, claimed])).toBeNull();
+  });
+});
+
+// ── parseReadyOutput carries issue_type through as Task.type ────────────────
+
+describe('parseReadyOutput issue_type', () => {
+  it('maps bd issue_type onto Task.type so the filter can see it', () => {
+    const raw = JSON.stringify([makeIssue({ id: 's', issue_type: 'suthradhara-session' })]);
+    const [task] = parseReadyOutput(raw);
+    expect(task.type).toBe('suthradhara-session');
+    // End-to-end: a ready payload containing only a session bead selects nothing.
+    expect(pickNext(parseReadyOutput(raw))).toBeNull();
+  });
+
+  it('leaves type undefined when the source omits issue_type', () => {
+    const [task] = parseReadyOutput(JSON.stringify([makeIssue()]));
+    expect(task.type).toBeUndefined();
+  });
 });
 
 // ── preFlightCheck ────────────────────────────────────────────────────────────

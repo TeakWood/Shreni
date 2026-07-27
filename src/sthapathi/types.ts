@@ -31,6 +31,11 @@ export interface Task {
   description?: string;
   status: 'pending' | 'in_progress' | 'blocked' | 'closed';
   priority: number;
+  // The bd issue type (`bug`/`feature`/`task`/`epic`/…), carried from
+  // `bd ready --json`'s `issue_type`. Used by pickNext to exclude non-executable
+  // beads — specifically Suthradhara's `suthradhara-session` spine (§9.1). Absent
+  // when the source did not report a type.
+  type?: string;
   round?: number;
   notes?: string;
   context?: {

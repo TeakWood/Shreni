@@ -5,6 +5,7 @@ import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
 import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
 import { recordProgress, recordStall } from '../kshetra/state.js';
+import { SUTHRADHARA_SESSION_TYPE } from '../suthradhara/sessionbead.js';
 
 export class PreFlightError extends Error {
   constructor(
@@ -23,6 +24,9 @@ const BeadsIssueSchema = z.object({
   status: z.string(),
   description: z.string().optional(),
   notes: z.string().optional(),
+  // bd names this `issue_type` in --json output. Optional so a source that omits
+  // it still parses; pickNext uses it to drop suthradhara-session beads (§9.1).
+  issue_type: z.string().optional(),
 });
 
 // Deterministic slug from a bead title — the same function that names bead
@@ -57,15 +61,27 @@ export function parseReadyOutput(raw: string): Task[] {
       status: 'pending',
       priority: r.priority,
       notes: r.notes,
+      type: r.issue_type,
     });
   }
   return tasks;
 }
 
-// Stable sort: P0 first, then preserve arrival order (FIFO) within same priority
+// Stable sort: P0 first, then preserve arrival order (FIFO) within same priority.
+//
+// QUEUE ISOLATION (ARD §9.1): a `suthradhara-session` bead is Suthradhara's own
+// tracking spine — never executable work — so it must never be handed to a
+// Silpi. Its type is set at the bead's creation, so this filter excludes it from
+// the very first instant, even during the sub-second window before the server
+// marks it in_progress (the structural half of isolation, which keeps it out of
+// the unclaimed `bd ready` pool). Filtering HERE, in pickNext, is the load-
+// bearing, race-proof guarantee and is asserted directly by test. This is the
+// single Suthradhara-driven touch to Sthapathi — a selection-path line, not a
+// state-machine change (§13.1).
 export function pickNext(tasks: Task[]): Task | null {
-  if (tasks.length === 0) return null;
-  const sorted = tasks.slice().sort((a, b) => a.priority - b.priority);
+  const eligible = tasks.filter(t => t.type !== SUTHRADHARA_SESSION_TYPE);
+  if (eligible.length === 0) return null;
+  const sorted = eligible.slice().sort((a, b) => a.priority - b.priority);
   return sorted[0] ?? null;
 }
 
