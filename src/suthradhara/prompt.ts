@@ -11,6 +11,7 @@ import type { SessionState } from './state';
 import { STAGES } from './state';
 import { STAGE_META, stageIndex } from './stages';
 import { renderRubric } from './rubric';
+import { DELTA_FENCE } from './distill';
 
 // The read-only boundary and the "you file nothing" contract, stated to the
 // model so it never claims to have created a bead or written a file — in xa0.2
@@ -68,6 +69,43 @@ DECOMPOSITION PROPOSAL for the operator to review — do not assume it is filed 
 Then ask the operator to Confirm / Edit / Cancel. On Confirm the server files the epic, children,
 and edges; Edit reopens the interview so you can revise and re-present; Cancel discards the proposal.`;
 
+// The per-turn state delta protocol (ARD §9.2, Q10). Each turn is a FRESH,
+// stateless invocation — there is no provider-native conversation memory. The
+// server's memory of the interview is the DISTILLED STATE shown above (stage,
+// rubric, requirements, open questions), NOT a replay of the chat. For that to
+// work, every turn must hand the server the NEW settled facts as structured
+// data, which it folds into the state before the next turn. That is this block.
+// It is stated last so the model always knows how to close a turn, and it is
+// deterministic to parse (a distinctive fenced tag, JSON body, additive only).
+function deltaProtocol(): string {
+  return `HOW TO CLOSE EVERY TURN — emit a state delta (this is how the server remembers the interview):
+Your natural-language reply to the operator comes first. Then, at the very end, append a single
+fenced block tagged \`${DELTA_FENCE}\` containing a JSON object with ONLY the NEW facts this turn
+settled. The distilled state above is a MONOTONIC LEDGER: never re-emit a requirement already
+listed, never re-check a rubric item already [x], never re-open a settled decision. If the turn
+settled nothing, emit \`{}\`. The operator never sees this block — it is stripped before display.
+
+Schema (every field optional):
+\`\`\`${DELTA_FENCE}
+{
+  "requirements": ["a newly-converged requirement bullet"],
+  "checkRubric": ["intent", "successCriteria"],
+  "deferRubric": [{ "key": "nonFunctional", "question": "what perf budget applies?" }],
+  "openQuestions": ["a free-standing unknown not tied to a rubric item"],
+  "advanceStage": "clarify",
+  "proposal": { "epic": { "ref": "...", "title": "...", "type": "epic", "priority": 2 },
+                "children": [ { "ref": "...", "title": "...", "type": "task", "priority": 2,
+                                "acceptanceCriteria": "..." } ],
+                "deps": [ { "blocked": "childRef", "blocker": "childRef" } ] }
+}
+\`\`\`
+Rules: rubric keys are exactly intent | usersStories | successCriteria | scopeBoundary |
+nonFunctional | dependenciesUnknowns. \`advanceStage\` is refused if it jumps past the readiness
+rubric — advance only when the stage's exit condition is met. Include \`proposal\` ONLY on the turn
+you present the DECOMPOSITION PROPOSAL (decompose/design stage, rubric satisfied); the server holds
+it for the operator's confirm and files nothing until then.`;
+}
+
 export function buildSystemPrompt(
   state: SessionState,
   kshetra: KshetraConfig,
@@ -92,5 +130,7 @@ export function buildSystemPrompt(
     DESIGN_RULES,
     '',
     PROPOSAL_SHAPE,
+    '',
+    deltaProtocol(),
   ].join('\n');
 }

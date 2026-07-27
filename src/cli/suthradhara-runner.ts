@@ -1,17 +1,27 @@
+import { createInterface } from 'readline';
 import { loadRegistry } from '../kshetra/registry';
 import { writeSuthradharaPid } from '../suthradhara/pid';
-import { loadSession, SessionNotFoundError } from '../suthradhara/persistence';
+import { loadSession, saveSession, SessionNotFoundError } from '../suthradhara/persistence';
 import type { SessionState } from '../suthradhara/state';
+import { runInterviewTurn, type TurnDeps } from '../suthradhara/turnloop';
+import { captureClaudeTurn } from '../suthradhara/capture';
+import { makeCommitFn } from '../suthradhara/commit';
+import type { KshetraConfig } from '../kshetra/config';
 
 // Detached entry point for a Suthradhara session. Reads the kshetra id from
 // argv[2] and the session id from argv[3], records its own PID, hydrates the
-// on-disk session state (xa0.3), then idles waiting for SIGTERM/SIGINT.
+// on-disk session state (xa0.3), then drives the interactive interview loop
+// (xa0.11).
 //
-// The actual interview turn loop (stage machine, rubric checks, transcript
-// updates) lands in xa0.2 — this file's job today is to prove the state made
-// it across the fork so `resume` continues the same conversation instead of
-// starting over. xa0.2 will consume `session` from here and call saveSession
-// after each turn.
+// TRANSPORT (Q11, resolved): an attached-TTY REPL. A design interview is an
+// inherently foreground, synchronous back-and-forth (ARD §10, CLI-first), so the
+// turn loop reads operator messages line-by-line from stdin and writes replies to
+// stdout. The detached pid/log/stop/status machinery (xa0.1/xa0.3) stays for
+// lifecycle bookkeeping; when the process is spawned detached with stdio
+// 'ignore', stdin is not readable, readline closes immediately, and the runner
+// falls back to the idle heartbeat — preserving xa0.3's resume-proof behaviour
+// with no interactive input. A Vichara-style socket/PWA transport stays deferred
+// (§10). Each turn folds the exchange into state and saveSession()s.
 
 const kshetraId = process.argv[2];
 const sessionId = process.argv[3];
@@ -58,15 +68,62 @@ console.log(
     `stage=${session.stage}, transcript-turns=${session.transcript.length}`,
 );
 
-// Keep the event loop alive until a signal arrives. A no-op setInterval is
-// cheaper than a leaked promise and mirrors worker.ts's own liveness pattern.
-const HEARTBEAT_MS = 30_000;
-const heartbeat = setInterval(() => { /* keep-alive */ }, HEARTBEAT_MS);
+runReplSession(kshetra, session);
 
-function shutdown(): void {
-  clearInterval(heartbeat);
-  process.exit(0);
+// Drive the interactive REPL over stdin/stdout. Serialises turns (a queue) so a
+// second line typed while a turn is still spawning `claude` waits rather than
+// racing the shared session state. On stdin close (EOF, or the detached
+// stdio-'ignore' case) it keeps the process alive on a heartbeat so `resume`
+// still works exactly as in xa0.3.
+export function runReplSession(
+  kshetra: KshetraConfig,
+  initial: SessionState,
+  deps: TurnDeps = { capture: captureClaudeTurn, commit: makeCommitFn(), save: saveSession },
+): void {
+  let state = initial;
+  let busy = false;
+  const queue: string[] = [];
+
+  const rl = createInterface({ input: process.stdin, terminal: false });
+
+  const drain = async (): Promise<void> => {
+    if (busy) return;
+    const message = queue.shift();
+    if (message === undefined) return;
+    busy = true;
+    try {
+      const result = await runInterviewTurn(state, kshetra, message, deps);
+      state = result.state;
+      process.stdout.write(`\n${result.reply}\n\n`);
+      for (const w of result.warnings) console.error(`[suthradhara:${kshetra.id}] ${w}`);
+    } catch (err) {
+      console.error(`[suthradhara:${kshetra.id}] turn failed: ${(err as Error).message}`);
+    } finally {
+      busy = false;
+      void drain();
+    }
+  };
+
+  rl.on('line', (line) => {
+    const message = line.trim();
+    if (message === '') return;
+    if (message === '/exit' || message === '/quit') { shutdown(); return; }
+    queue.push(message);
+    void drain();
+  });
+
+  // EOF / no interactive input: don't exit — a detached session must stay
+  // resumable. A no-op interval keeps the event loop alive (mirrors worker.ts).
+  const HEARTBEAT_MS = 30_000;
+  const heartbeat = setInterval(() => { /* keep-alive */ }, HEARTBEAT_MS);
+  rl.on('close', () => { /* keep the heartbeat; process stays alive for resume */ });
+
+  function shutdown(): void {
+    clearInterval(heartbeat);
+    rl.close();
+    process.exit(0);
+  }
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
-
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);

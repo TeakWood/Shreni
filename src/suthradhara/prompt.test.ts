@@ -74,4 +74,16 @@ describe('buildSystemPrompt', () => {
     expect(p).toMatch(/Requirements captured so far:/);
     expect(p).toMatch(/- accept CSV and TSV/);
   });
+
+  it('instructs the model to close every turn with a suthradhara-delta block (Q10)', () => {
+    const p = buildSystemPrompt(fresh(), KSHETRA);
+    expect(p).toMatch(/suthradhara-delta/);
+    expect(p).toMatch(/MONOTONIC LEDGER/);
+    expect(p).toMatch(/checkRubric/);
+    expect(p).toMatch(/advanceStage/);
+    // the rubric key vocabulary the distiller validates against
+    for (const key of ['intent', 'usersStories', 'successCriteria', 'scopeBoundary', 'nonFunctional', 'dependenciesUnknowns']) {
+      expect(p).toContain(key);
+    }
+  });
 });
