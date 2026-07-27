@@ -6,7 +6,7 @@ import type { SessionState } from '../suthradhara/state';
 import { runInterviewTurn, resumeInterruptedCommit, type TurnDeps } from '../suthradhara/turnloop';
 import { captureClaudeTurn } from '../suthradhara/capture';
 import { makeCommitFn } from '../suthradhara/commit';
-import { makeLocateFn } from '../suthradhara/evolve';
+import { makeLocateFn, makeSourceLocateFn } from '../suthradhara/evolve';
 import { parseGrantAnswer, renderGrantPrompt } from '../suthradhara/grant';
 import { resolveConfigPath } from '../kshetra/registry';
 import { persistMcpGrant } from '../kshetra/grant-persist';
@@ -113,6 +113,7 @@ export function runReplSession(
     commit: makeCommitFn(),
     save: saveSession,
     locate: makeLocateFn(kshetra),
+    locateBySource: makeSourceLocateFn(kshetra),
     askGrant: async (server, tool) =>
       parseGrantAnswer(await askOperatorLine(renderGrantPrompt(server, tool))),
     persistGrant: (server, tool) => {

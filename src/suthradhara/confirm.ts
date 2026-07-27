@@ -104,7 +104,7 @@ export function applyConfirmFrame(
       return {
         outcome: 'confirmed',
         state: cleared,
-        plan: compileFilingPlan(pending.decomposition),
+        plan: compileFilingPlan(pending.decomposition, state.source?.ref ?? undefined),
       };
     case 'edit':
       return { outcome: 'reopened', state: cleared };

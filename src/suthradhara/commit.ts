@@ -64,6 +64,11 @@ export interface CommitInput {
   // the target is resolved through evolveDocTarget — the EXISTING doc's path when
   // evolving — so the SAME file is rewritten rather than a parallel doc created.
   evolving?: EvolveState | null;
+  // The external source ref (pmb.7), e.g. `jira:PROJ-123`, when this interview was
+  // grounded in an external ticket. Stamped onto the epic and every child via
+  // `--external-ref` so the whole bundle traces back to its source of record and a
+  // re-consult of the same ticket finds it. Absent for a repo-only interview.
+  source?: string | null;
   // Resume an interrupted commit (§7, Q2). When set, this run does NOT create a
   // fresh session bead — it LOADS the existing one by id and reconciles against
   // its journal, filing only what is still missing (idempotent by reconcile). Set
@@ -164,7 +169,11 @@ export async function commitBundle(input: CommitInput, deps: CommitDeps = {}): P
       }
       record = loaded;
     } else {
-      const plspan: SessionPlan = { decomposition, docPath: docRelPath };
+      const plspan: SessionPlan = {
+        decomposition,
+        docPath: docRelPath,
+        externalRef: input.source ?? undefined,
+      };
       const created = await store.create(plspan);
       beadId = created.id;
       record = created.record;

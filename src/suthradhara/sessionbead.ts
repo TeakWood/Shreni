@@ -59,6 +59,10 @@ export const SESSION_BEAD_RECORD_VERSION = 1 as const;
 export interface SessionPlan {
   decomposition: Decomposition;
   docPath: string;
+  // The external source ref (pmb.7) stamped onto every filed bead via
+  // `--external-ref`. Part of the immutable spine so a resume recompiles the plan
+  // with the SAME ref (idempotent re-file). Absent for a repo-only interview.
+  externalRef?: string;
 }
 
 // The commit journal — what has landed so far, grown monotonically as each step
@@ -154,7 +158,7 @@ export interface ReconcilePlan {
 }
 
 export function reconcile(record: SessionBeadRecord): ReconcilePlan {
-  const full = compileFilingPlan(record.plan.decomposition);
+  const full = compileFilingPlan(record.plan.decomposition, record.plan.externalRef);
   const j = record.journal;
   const epicRef = record.plan.decomposition.epic.ref;
 

@@ -95,6 +95,32 @@ describe('commitBundle', () => {
     expect(childCall[childCall.indexOf('--parent') + 1]).toBe('myapp-1');
   });
 
+  it('stamps --external-ref onto every filed bead when a source ref is given (pmb.7)', async () => {
+    const { deps, calls } = fakeDeps();
+    const report = await commitBundle(
+      { kshetra: KSHETRA, decomposition: decomp(), source: 'jira:PROJ-123' },
+      deps,
+    );
+    expect(report.ok).toBe(true);
+    const creates = calls.filter(c => c[0] === 'create');
+    expect(creates.length).toBe(3); // epic + 2 children
+    for (const c of creates) {
+      expect(c).toContain('--external-ref');
+      expect(c[c.indexOf('--external-ref') + 1]).toBe('jira:PROJ-123');
+    }
+    // Dep adds carry no external ref (they take only two bead ids).
+    const depCall = calls.find(c => c[0] === 'dep');
+    expect(depCall).not.toContain('--external-ref');
+  });
+
+  it('files no --external-ref when the interview had no external source', async () => {
+    const { deps, calls } = fakeDeps();
+    await commitBundle({ kshetra: KSHETRA, decomposition: decomp() }, deps);
+    for (const c of calls.filter(c => c[0] === 'create')) {
+      expect(c).not.toContain('--external-ref');
+    }
+  });
+
   it('reports a partial failure with what already landed and stops', async () => {
     const { deps } = fakeDeps();
     // Make the SECOND create (first child) fail.

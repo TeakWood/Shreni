@@ -75,6 +75,17 @@ export interface LocateDeps {
   bdSearch: (query: string) => Promise<BeadHit[]>;
 }
 
+// The injectable read surface for a SOURCE locate (pmb.7): recover the design
+// doc(s) a prior consult of an external ticket already produced, by the beads it
+// filed carrying that ticket's external ref. Kept separate from LocateDeps (which
+// searches by feature name/content) so existing feature-locate callers are
+// unaffected. `bdSearchByExternalRef` may reject — the caller treats a search
+// failure as "no prior consult", never fatal.
+export interface SourceLocateDeps {
+  listDocs: () => DocFile[];
+  bdSearchByExternalRef: (ref: string) => Promise<BeadHit[]>;
+}
+
 // Split a feature name into lowercase alphanumeric tokens for overlap scoring.
 // Drops very short/stop-ish tokens so "the"/"for"/"a" don't create spurious
 // matches between unrelated features.
@@ -186,6 +197,49 @@ export async function locateExistingDocs(
     }
   }
 
+  return [...byPath.values()].sort(
+    (a, b) => b.score - a.score || a.relPath.localeCompare(b.relPath),
+  );
+}
+
+// LOCATE BY SOURCE (pmb.7, §3). Find the design doc(s) a PRIOR consult of an
+// external ticket already produced, by the beads it filed carrying that ticket's
+// external ref: `bd search --external-contains <ref>` hits whose descriptions link
+// a doc path (the same bead-link signal as §8.1, keyed on the external ref instead
+// of a feature name). This is what makes consulting the SAME ticket twice route to
+// evolve-in-place rather than fork a duplicate epic. A search failure degrades to
+// no matches (never throws). Returns matches sorted strongest-first. Pure over deps.
+export async function locateDocsBySource(
+  ref: string,
+  deps: SourceLocateDeps,
+): Promise<LocatedDoc[]> {
+  let hits: BeadHit[] = [];
+  try {
+    hits = await deps.bdSearchByExternalRef(ref);
+  } catch {
+    hits = [];
+  }
+  const contentByPath = new Map(deps.listDocs().map((d) => [d.relPath, d.content]));
+  const byPath = new Map<string, LocatedDoc>();
+  for (const hit of hits) {
+    const linked = parseDocLink(hit.description);
+    if (!linked) continue;
+    const content = contentByPath.get(linked);
+    if (content === undefined) continue; // bead links a doc no longer on disk
+    const existing = byPath.get(linked);
+    if (existing) {
+      existing.linkedBeadIds.push(hit.id);
+      existing.score += 6; // each bead pointing here strengthens the match
+    } else {
+      byPath.set(linked, {
+        relPath: linked,
+        content,
+        matchedVia: ['bead'],
+        linkedBeadIds: [hit.id],
+        score: 6,
+      });
+    }
+  }
   return [...byPath.values()].sort(
     (a, b) => b.score - a.score || a.relPath.localeCompare(b.relPath),
   );
@@ -386,6 +440,45 @@ function collapseContext(lines: DiffLine[]): DiffLine[] {
 export function makeLocateFn(kshetra: KshetraConfig): (feature: string) => Promise<LocatedDoc[]> {
   const deps = defaultLocateDeps(kshetra);
   return (feature) => locateExistingDocs(feature, deps);
+}
+
+// Bind the SOURCE locator to a Kshetra for the turn loop's `locateBySource` dep
+// (pmb.7): a `(ref) => Promise<LocatedDoc[]>` that finds the doc(s) a prior consult
+// of the external ticket produced, via the beads it filed carrying its external ref.
+export function makeSourceLocateFn(
+  kshetra: KshetraConfig,
+): (ref: string) => Promise<LocatedDoc[]> {
+  const deps = defaultSourceLocateDeps(kshetra);
+  return (ref) => locateDocsBySource(ref, deps);
+}
+
+// Real read deps for the source locate: the same doc lister as feature-locate,
+// plus a `bd search <ref> --external-contains <ref>` scoped to the Kshetra's beads
+// dir. `--external-contains` filters by external-ref substring, so the beads a
+// prior commit stamped with `--external-ref <ref>` are found; parseDocLink then
+// recovers the design doc they link.
+export function defaultSourceLocateDeps(kshetra: KshetraConfig): SourceLocateDeps {
+  const designDir = resolveDesignDir(kshetra);
+  return {
+    listDocs: () => listMarkdownDocs(kshetra.repo.path, designDir),
+    bdSearchByExternalRef: async (ref) => {
+      const { stdout } = await execFileAsync(
+        'bd',
+        ['search', ref, '--json', '--external-contains', ref, '--status', 'all'],
+        { env: { ...process.env, BEADS_DIR: kshetra.beads.path }, maxBuffer: 4 * 1024 * 1024 },
+      );
+      const parsed = JSON.parse(stdout.trim() || '[]');
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((x): x is Record<string, unknown> => x != null && typeof x === 'object')
+        .map((x) => ({
+          id: String(x.id ?? ''),
+          title: String(x.title ?? ''),
+          description: typeof x.description === 'string' ? x.description : undefined,
+        }))
+        .filter((h) => h.id !== '');
+    },
+  };
 }
 
 // Real read deps: list every `*.md` under the Kshetra's design dir, and run

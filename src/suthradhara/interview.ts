@@ -86,3 +86,17 @@ export function addRequirement(state: SessionState, text: string): SessionState 
   if (trimmed === '' || state.requirements.includes(trimmed)) return state;
   return { ...state, requirements: [...state.requirements, trimmed] };
 }
+
+// Record the external source of record this interview was grounded in (pmb.7).
+// Monotonic: the FIRST pull wins — once `source` is set, a later re-emit (of the
+// same or a different ref) is a no-op, so the ticket is distilled exactly once and
+// never re-fetched. An empty ref is ignored. Pure.
+export function setSource(
+  state: SessionState,
+  ref: string,
+  now: string = new Date().toISOString(),
+): SessionState {
+  const trimmed = ref.trim();
+  if (trimmed === '' || state.source) return state;
+  return { ...state, source: { ref: trimmed, pulledAt: now } };
+}

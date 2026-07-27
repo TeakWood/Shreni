@@ -31,6 +31,7 @@ import {
   checkRubricItem,
   deferRubricItem,
   addOpenQuestion,
+  setSource,
 } from './interview';
 import { tryEnterStage } from './stages';
 import { presentProposal } from './confirm';
@@ -65,6 +66,12 @@ export interface StateDelta {
   // running the locator (evolve.ts) and folding the outcome into `state.evolving`.
   // applyDelta leaves it untouched; the turn loop reads it off the validated delta.
   locateFeature?: string;
+  // The origin ref of an external ticket the model pulled over MCP this turn (§3,
+  // MCP grounding) — e.g. `jira:PROJ-123`. BOTH folded and a signal: applyDelta
+  // distils it into state.source (monotonic — the first pull wins, so the ticket
+  // is fetched once), AND the turn loop reads it off the validated delta to
+  // bd-search for a prior consult of the same ref (routing to evolve-in-place).
+  source?: string;
   // A stage the model wants to advance into. Gated by tryEnterStage — a jump
   // past the readiness rubric is refused and reported, never silently applied.
   advanceStage?: SuthradharaStage;
@@ -200,6 +207,12 @@ export function validateDelta(value: unknown): ValidatedDelta {
     } else warnings.push('locateFeature is not a non-empty string; ignored');
   }
 
+  if (v.source !== undefined) {
+    if (typeof v.source === 'string' && v.source.trim() !== '') {
+      delta.source = v.source.trim();
+    } else warnings.push('source is not a non-empty string; ignored');
+  }
+
   if (v.advanceStage !== undefined) {
     if (isStage(v.advanceStage)) delta.advanceStage = v.advanceStage;
     else warnings.push(`advanceStage: unknown stage ${JSON.stringify(v.advanceStage)}; ignored`);
@@ -252,6 +265,13 @@ export function applyDelta(
   }
   for (const q of delta.openQuestions ?? []) {
     next = addOpenQuestion(next, q, now);
+  }
+
+  // Distil the external source ref (pmb.7). setSource is monotonic — the first
+  // pull wins, so a re-emit on a later turn is a no-op and the ticket is recorded
+  // exactly once. The turn loop separately reads delta.source to run the consult.
+  if (delta.source !== undefined) {
+    next = setSource(next, delta.source, now);
   }
 
   if (delta.advanceStage !== undefined && delta.advanceStage !== next.stage) {

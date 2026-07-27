@@ -134,6 +134,22 @@ export interface EvolveState {
   locatedAt: string;
 }
 
+// External source of record (MCP grounding, ARD §3, bead pmb.7): the origin ref
+// of a ticket the model pulled over MCP during Discovery — e.g. `jira:PROJ-123`.
+// Distilled into the ledger so it is fetched ONCE (the settled requirements carry
+// forward each turn; the raw ticket is not re-pulled), stamped onto every filed
+// bead as an external ref at commit, and used to detect a re-consult of the SAME
+// ticket (routing the interview to evolve the existing design in place rather than
+// forking a duplicate epic). Monotonic: set on the first pull, never overwritten.
+export interface SessionSource {
+  // Normalized origin ref, `<server>:<id>` (e.g. `jira:PROJ-123`). Stamped onto
+  // every filed bead via `bd --external-ref`, and the query that bd-searches for a
+  // prior consult of this ticket.
+  ref: string;
+  // When the ticket was pulled (ISO-8601), for the audit trail.
+  pulledAt: string;
+}
+
 // Bumped when the on-disk shape changes in a way that isn't a pure additive
 // field. loadSession() rejects an unknown version rather than mis-hydrating.
 export const SESSION_STATE_VERSION = 1 as const;
@@ -164,6 +180,10 @@ export interface SessionState {
   // rather than starting over (§7, Q2). Absent whenever no commit is in flight.
   // See CommitInFlight.
   commit?: CommitInFlight | null;
+  // Set when this interview is grounded in an external source of record pulled
+  // over MCP (pmb.7). Absent for a plain repo-grounded interview. Survives resume
+  // (persisted with the session). See SessionSource.
+  source?: SessionSource | null;
 }
 
 export function newSessionState(

@@ -92,6 +92,14 @@ describe('validateDelta', () => {
     expect(blank.warnings.join(' ')).toMatch(/doc/);
     expect(validateDelta({ doc: 42 }).delta.doc).toBeUndefined();
   });
+
+  it('keeps a non-empty source ref (trimmed) and drops a blank/non-string one', () => {
+    expect(validateDelta({ source: '  jira:PROJ-123 ' }).delta.source).toBe('jira:PROJ-123');
+    const blank = validateDelta({ source: '   ' });
+    expect(blank.delta.source).toBeUndefined();
+    expect(blank.warnings.join(' ')).toMatch(/source/);
+    expect(validateDelta({ source: 42 }).delta.source).toBeUndefined();
+  });
 });
 
 describe('applyDelta — folds through the pure mutators', () => {
@@ -113,6 +121,14 @@ describe('applyDelta — folds through the pure mutators', () => {
     expect(state.openQuestions.map(q => q.question)).toContain('perf budget?');
     expect(state.openQuestions.map(q => q.question)).toContain('which auth provider?');
     expect(warnings).toEqual([]);
+  });
+
+  it('distils a source ref into state.source, monotonically (pmb.7)', () => {
+    const first = applyDelta(newSessionState(sid, 'myapp', NOW), { source: 'jira:PROJ-123' }, NOW);
+    expect(first.state.source).toEqual({ ref: 'jira:PROJ-123', pulledAt: NOW });
+    // A later re-emit is a no-op — the ticket is distilled exactly once.
+    const second = applyDelta(first.state, { source: 'jira:PROJ-999' }, '2026-07-27T11:00:00.000Z');
+    expect(second.state.source).toEqual({ ref: 'jira:PROJ-123', pulledAt: NOW });
   });
 
   it('refuses a gated stage jump when the rubric is unmet and warns', () => {

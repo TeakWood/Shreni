@@ -74,6 +74,37 @@ describe('compileFilingPlan', () => {
     expect(epic.argv).not.toContain('--acceptance');
   });
 
+  // ── External source ref (pmb.7) ──────────────────────────────────────────
+  it('stamps --external-ref on the epic AND every child when a source ref is given', () => {
+    const plan = compileFilingPlan(decomp(), 'jira:PROJ-123');
+    const creates = plan.steps.filter((s): s is CreateStep => s.kind === 'create');
+    expect(creates.length).toBe(3); // epic + 2 children
+    for (const step of creates) {
+      expect(step.argv).toContain('--external-ref');
+      expect(step.argv[step.argv.indexOf('--external-ref') + 1]).toBe('jira:PROJ-123');
+    }
+  });
+
+  it('the ref is a discrete argv element, immediately before --silent', () => {
+    const epic = compileFilingPlan(decomp(), 'jira:PROJ-123').steps[0] as CreateStep;
+    const i = epic.argv.indexOf('--external-ref');
+    expect(epic.argv[i + 1]).toBe('jira:PROJ-123');
+    // --silent stays last so bd prints only the new id.
+    expect(epic.argv[epic.argv.length - 1]).toBe('--silent');
+  });
+
+  it('omits --external-ref entirely when no source ref is given (repo-only interview)', () => {
+    for (const step of compileFilingPlan(decomp()).steps) {
+      if (step.kind !== 'create') continue;
+      expect(step.argv).not.toContain('--external-ref');
+    }
+  });
+
+  it('an empty source ref is treated as no ref (never a bare --external-ref)', () => {
+    const epic = compileFilingPlan(decomp(), '   ').steps[0] as CreateStep;
+    expect(epic.argv).not.toContain('--external-ref');
+  });
+
   // ── Argument hygiene (mandatory negative test, xa0.4) ────────────────────
   // A title packed with shell metacharacters must land as ONE verbatim argv
   // element — never split, never fused into a command string. Because the

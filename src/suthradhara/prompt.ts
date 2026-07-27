@@ -100,6 +100,22 @@ function renderEvolveContext(state: SessionState): string {
   return '';
 }
 
+// The external-source-of-record block (pmb.7, §3). Rendered only when the session
+// was grounded in a ticket pulled over MCP: it reminds the model the ticket is
+// already distilled (fetched once — do not re-pull it each turn) and that the ref
+// will be stamped onto every filed bead. Empty for a plain repo-grounded interview.
+function renderSourceContext(state: SessionState): string {
+  const src = state.source;
+  if (!src) return '';
+  return [
+    `GROUNDED IN AN EXTERNAL SOURCE OF RECORD (§3): ${src.ref}`,
+    'You pulled this ticket earlier in the interview; its settled requirements are already in the',
+    'distilled state above. Do NOT re-fetch it each turn — work from the distilled requirements.',
+    'On confirm the server stamps this ref onto every filed bead as its external reference, and a',
+    'later consult of the SAME ticket evolves the design in place rather than filing a duplicate.',
+  ].join('\n');
+}
+
 // The decomposition proposal shape (§6.1, §7 step 1) the model renders once the
 // rubric is satisfied and it reaches the decompose/design stages. Presented for
 // review; the server holds it and files it only on an explicit confirm.
@@ -143,6 +159,7 @@ Schema (every field optional):
   "deferRubric": [{ "key": "nonFunctional", "question": "what perf budget applies?" }],
   "openQuestions": ["a free-standing unknown not tied to a rubric item"],
   "locateFeature": "SSO login",
+  "source": "jira:PROJ-123",
   "advanceStage": "clarify",
   "proposal": { "epic": { "ref": "...", "title": "...", "type": "epic", "priority": 2 },
                 "children": [ { "ref": "...", "title": "...", "type": "task", "priority": 2,
@@ -154,7 +171,11 @@ Schema (every field optional):
 Rules: rubric keys are exactly intent | usersStories | successCriteria | scopeBoundary |
 nonFunctional | dependenciesUnknowns. Emit \`locateFeature\` ONCE, in discovery, when you judge
 this is a change to an EXISTING feature — the server locates its design doc and, if found, loads it
-so you evolve it in place. \`advanceStage\` is refused if it jumps past the readiness
+so you evolve it in place. Emit \`source\` ONCE, in discovery, the FIRST time you pull an external
+ticket over MCP — its origin ref as \`<server>:<id>\` (e.g. jira:PROJ-123). The server distils it
+(so you needn't re-pull the ticket), stamps it onto every filed bead, and checks whether this ticket
+was already turned into beads — routing you to evolve the existing design in place instead of filing
+a duplicate. \`advanceStage\` is refused if it jumps past the readiness
 rubric — advance only when the stage's exit condition is met. Include \`proposal\` ONLY on the turn
 you present the DECOMPOSITION PROPOSAL (decompose/design stage, rubric satisfied); the server holds
 it for the operator's confirm and files nothing until then. Emit \`doc\` WITH that same \`proposal\` —
@@ -182,6 +203,7 @@ export function buildSystemPrompt(
     renderRubric(state),
     '',
     renderRequirements(state),
+    ...(renderSourceContext(state) ? ['', renderSourceContext(state)] : []),
     ...(renderEvolveContext(state) ? ['', renderEvolveContext(state)] : []),
     '',
     DESIGN_RULES,

@@ -477,6 +477,101 @@ describe('runInterviewTurn — evolve locate (§8.1)', () => {
   });
 });
 
+function sourceDoc(relPath: string, content = 'body', score = 6): import('./evolve').LocatedDoc {
+  return { relPath, content, matchedVia: ['bead'], linkedBeadIds: ['X.1'], score };
+}
+
+describe('runInterviewTurn — source grounding + re-consult routing (pmb.7)', () => {
+  it('distils the source ref into state (fetched once) and carries it into the next prompt', async () => {
+    const { capture, specs } = scriptedCapture([
+      withDelta('Pulled PROJ-123.', '{"source":"jira:PROJ-123","requirements":["ship the widget"]}'),
+      withDelta('Next.', '{}'),
+    ]);
+    const locateBySource = vi.fn(async () => []); // first consult: nothing filed yet
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locateBySource };
+
+    const t1 = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, "let's work on PROJ-123", deps);
+    expect(t1.state.source).toEqual({ ref: 'jira:PROJ-123', pulledAt: NOW });
+    expect(locateBySource).toHaveBeenCalledWith('jira:PROJ-123');
+
+    // Turn 2: the source rides the system prompt as already-pulled context.
+    await runInterviewTurn(t1.state, KSHETRA, 'more detail', deps);
+    const sp = systemPromptOf(specs[1]);
+    expect(sp).toContain('GROUNDED IN AN EXTERNAL SOURCE OF RECORD');
+    expect(sp).toContain('jira:PROJ-123');
+    expect(sp).toMatch(/do NOT re-fetch/i);
+  });
+
+  it('re-searches only on the FIRST pull — a re-emitted ref does not consult again', async () => {
+    const { capture } = scriptedCapture([
+      withDelta('Pulled.', '{"source":"jira:PROJ-123"}'),
+      withDelta('Re-mentions it.', '{"source":"jira:PROJ-123"}'),
+    ]);
+    const locateBySource = vi.fn(async () => []);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locateBySource };
+
+    const t1 = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'a', deps);
+    await runInterviewTurn(t1.state, KSHETRA, 'b', deps);
+    expect(locateBySource).toHaveBeenCalledTimes(1);
+  });
+
+  it('a prior consult of the same ticket routes to evolve-in-place (no duplicate epic)', async () => {
+    const { capture } = scriptedCapture([
+      withDelta('Pulled PROJ-123 again.', '{"source":"jira:PROJ-123"}'),
+    ]);
+    const locateBySource = vi.fn(async () => [sourceDoc('.shreni/design/widget.md', '# Widget\nv1')]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locateBySource };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'work on PROJ-123', deps);
+    expect(res.state.evolving?.targetRelPath).toBe('.shreni/design/widget.md');
+    expect(res.state.evolving?.targetContent).toBe('# Widget\nv1');
+    expect(res.reply).toMatch(/consulted before/i);
+    expect(res.reply).toMatch(/evolve it in place/i);
+  });
+
+  it('several prior-consult docs park candidates and ask which to evolve', async () => {
+    const { capture } = scriptedCapture([withDelta('Pulled.', '{"source":"jira:PROJ-123"}')]);
+    const locateBySource = vi.fn(async () => [
+      sourceDoc('.shreni/design/a.md', 'a', 6),
+      sourceDoc('.shreni/design/b.md', 'b', 6),
+    ]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locateBySource };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'x', deps);
+    expect(res.state.evolving?.candidates).toEqual(['.shreni/design/a.md', '.shreni/design/b.md']);
+    expect(res.reply).toMatch(/which one should I evolve/i);
+  });
+
+  it('no locateBySource dep → the source is still distilled, no routing', async () => {
+    const { capture } = scriptedCapture([withDelta('ok', '{"source":"jira:PROJ-123"}')]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW };
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'x', deps);
+    expect(res.state.source).toEqual({ ref: 'jira:PROJ-123', pulledAt: NOW });
+    expect(res.state.evolving).toBeUndefined();
+  });
+
+  it('a confirmed commit stamps the source ref onto the filed bundle', async () => {
+    const commit = vi.fn(okCommit);
+    const deps: TurnDeps = { capture: vi.fn(), commit, save: () => {}, now: () => NOW };
+
+    // Seed a session grounded in a ticket with a pending proposal awaiting confirm.
+    let s = newSessionState(sid, 'myapp', NOW);
+    s = { ...s, source: { ref: 'jira:PROJ-123', pulledAt: NOW } };
+    const decomposition: Decomposition = {
+      epic: { ref: 'e', title: 'CSV import', type: 'epic', priority: 2 },
+      children: [{ ref: 'c1', title: 'parser', type: 'task', priority: 2, acceptanceCriteria: 'parses CSV' }],
+      deps: [],
+    };
+    const present = presentProposal(s, decomposition, NOW);
+    if (!present.ok) throw new Error('seed proposal invalid');
+    s = present.state;
+
+    await runInterviewTurn(s, KSHETRA, 'confirm', deps);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(commit.mock.calls[0][0].source).toBe('jira:PROJ-123');
+  });
+});
+
 describe('renderRecentWindow', () => {
   it('is empty when disabled or the transcript is empty', () => {
     expect(renderRecentWindow(newSessionState(sid, 'myapp', NOW), 0)).toBe('');

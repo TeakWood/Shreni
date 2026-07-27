@@ -4,6 +4,7 @@ import {
   recordUserTurn,
   recordAssistantTurn,
   addRequirement,
+  setSource,
 } from './interview';
 
 const NOW = '2026-07-27T10:00:00.000Z';
@@ -42,5 +43,28 @@ describe('addRequirement', () => {
     s = addRequirement(s, 'accept CSV');
     s = addRequirement(s, '   ');
     expect(s.requirements).toEqual(['accept CSV']);
+  });
+});
+
+describe('setSource (pmb.7)', () => {
+  it('records the trimmed source ref and pull time on the first pull', () => {
+    const s = setSource(fresh(), '  jira:PROJ-123  ', NOW);
+    expect(s.source).toEqual({ ref: 'jira:PROJ-123', pulledAt: NOW });
+  });
+
+  it('is monotonic — the first pull wins; a later ref is a no-op', () => {
+    let s = setSource(fresh(), 'jira:PROJ-123', NOW);
+    s = setSource(s, 'jira:PROJ-999', '2026-07-27T11:00:00.000Z');
+    expect(s.source).toEqual({ ref: 'jira:PROJ-123', pulledAt: NOW });
+  });
+
+  it('ignores an empty ref', () => {
+    expect(setSource(fresh(), '   ', NOW).source).toBeUndefined();
+  });
+
+  it('does not mutate the input state', () => {
+    const s0 = fresh();
+    setSource(s0, 'jira:PROJ-123', NOW);
+    expect(s0.source).toBeUndefined();
   });
 });

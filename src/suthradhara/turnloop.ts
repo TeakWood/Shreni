@@ -54,6 +54,10 @@ import {
 // Returns matches ranked strongest-first; the turn loop classifies + folds them.
 export type LocateFn = (feature: string) => Promise<LocatedDoc[]>;
 
+// Locate the design doc(s) a PRIOR consult of an external ticket produced, keyed
+// on its source ref (pmb.7, evolve.ts). Same ranked-matches shape as LocateFn.
+export type SourceLocateFn = (ref: string) => Promise<LocatedDoc[]>;
+
 export interface TurnDeps {
   // Spawn the interview turn and return the model's final assistant text.
   capture: CaptureFn;
@@ -65,6 +69,10 @@ export interface TurnDeps {
   // Locate an existing feature's doc when the model emits `locateFeature` (§8.1).
   // Optional — absent it, an evolve signal is a no-op (a new-doc interview).
   locate?: LocateFn;
+  // Locate the doc(s) a prior consult of an external ticket produced when the
+  // model emits `source` for the FIRST time (pmb.7). Optional — absent it, a
+  // source is still distilled (fetched once) but no re-consult routing happens.
+  locateBySource?: SourceLocateFn;
   // Interactive grant-on-demand (pmb.6). Called for each denied MCP read tool the
   // capture surfaced this turn: it asks the operator `[y / always / N]`. Absent →
   // denials are ignored and the turn proceeds on the text it already got (the
@@ -254,10 +262,30 @@ export async function runInterviewTurn(
 
   const { reply, delta } = parseTurnOutput(captured.text);
 
+  // Whether this turn is the FIRST to pull an external source (pmb.7): captured
+  // before applyDelta folds it into state, so the re-consult search runs exactly
+  // once — a later re-emit of the same ref finds state.source already set here.
+  const firstSourcePull = !!delta?.source && !next.source;
+
   if (delta) {
     const applied = applyDelta(next, delta, now);
     next = applied.state;
     warnings.push(...applied.warnings);
+  }
+
+  let replyOut = reply;
+
+  // ── source re-consult routing (pmb.7, §3) ───────────────────────────────────
+  // The model pulled an external ticket and named its origin ref. applyDelta has
+  // already distilled it into state.source (monotonic — fetched once; turn 2 works
+  // from the distilled requirements, not a re-pull). On the FIRST pull, bd-search
+  // for a PRIOR consult of the same ref: a single match routes this interview to
+  // evolve that design doc in place (no duplicate epic); >1 → ask which; none → a
+  // fresh interview grounded on the ticket.
+  if (firstSourcePull && deps.locateBySource) {
+    const consulted = await runSourceConsult(next, next.source!.ref, deps, now);
+    next = consulted.state;
+    if (consulted.note) replyOut = replyOut ? `${replyOut}\n\n${consulted.note}` : consulted.note;
   }
 
   // ── evolve locate (§8.1) ────────────────────────────────────────────────────
@@ -265,7 +293,6 @@ export async function runInterviewTurn(
   // feature's doc(s) and fold the outcome into `state.evolving`, appending a
   // server note to the reply so the operator sees what was found. Skipped when a
   // target is already chosen for this same feature (locate runs once per feature).
-  let replyOut = reply;
   if (delta?.locateFeature && deps.locate) {
     const located = await runLocate(next, delta.locateFeature, deps, now);
     next = located.state;
@@ -371,6 +398,45 @@ async function runLocate(
   };
 }
 
+// Re-consult routing for an external source ref (pmb.7). bd-search for a prior
+// consult of the same ticket and, when found, route the interview to evolve the
+// existing design doc in place. Mirrors runLocate but keyed on the source ref via
+// the bead external ref: one match sets the evolve target; >1 parks candidates for
+// the operator to choose; none leaves a plain new-feature interview grounded on the
+// pulled ticket. The evolve context is keyed on the source ref — a >1 disambiguation
+// re-locate (resolveDocChoice) then falls back to a content-less target, which still
+// evolves in place; the single-match path (the common case) carries full content.
+async function runSourceConsult(
+  state: SessionState,
+  ref: string,
+  deps: TurnDeps,
+  now: string,
+): Promise<{ state: SessionState; note: string }> {
+  let matches: LocatedDoc[];
+  try {
+    matches = await deps.locateBySource!(ref);
+  } catch {
+    return { state, note: '' };
+  }
+
+  const outcome = classifyMatches(matches);
+  if (outcome.kind === 'none') {
+    // First consult of this ticket — nothing filed against it yet. A fresh
+    // interview; the ref is still distilled (and stamped on the beads at commit).
+    return { state, note: '' };
+  }
+
+  const evolving = evolveStateFromOutcome(ref, outcome, now);
+  const nextState: SessionState = { ...state, evolving };
+  if (outcome.kind === 'one') {
+    return {
+      state: nextState,
+      note: `(This ticket has been consulted before — an existing design doc already covers it (${outcome.doc.relPath}). I will evolve it in place rather than file a duplicate.)`,
+    };
+  }
+  return { state: nextState, note: renderCandidateChoice(outcome.docs) };
+}
+
 // Run the confirmed commit for a state whose `pending` proposal is set, and fold
 // the outcome back into that state. Shared by the confirm branch and the
 // resume-on-startup path so both handle success/partial-failure identically:
@@ -394,6 +460,9 @@ async function executeCommit(
     decomposition: pending.decomposition,
     doc,
     evolving: state.evolving,
+    // Stamp the external source ref (pmb.7) onto every filed bead so the bundle
+    // traces back to its ticket and a re-consult routes to evolve.
+    source: state.source?.ref,
     resume: state.commit ?? undefined,
   });
   const reply = renderCommitReply(report);

@@ -5,6 +5,7 @@ import { join } from 'path';
 import {
   featureTokens,
   locateExistingDocs,
+  locateDocsBySource,
   classifyMatches,
   renderCandidateChoice,
   resolveCandidateChoice,
@@ -16,6 +17,7 @@ import {
   type DocFile,
   type BeadHit,
   type LocateDeps,
+  type SourceLocateDeps,
   type LocatedDoc,
 } from './evolve';
 import { writeDesignDoc, designDocRelPath, withDocLink, resolveDesignDir } from './designdoc';
@@ -97,6 +99,58 @@ describe('locateExistingDocs', () => {
     const deps: LocateDeps = { listDocs: () => docs, bdSearch: async () => { throw new Error('bd down'); } };
     const matches = await locateExistingDocs('SSO login', deps);
     expect(matches).toHaveLength(1);
+  });
+});
+
+// A source-locate-deps fake: a fixed doc list + a scripted external-ref search.
+function fakeSourceDeps(docs: DocFile[], hits: BeadHit[] = []): SourceLocateDeps {
+  return { listDocs: () => docs, bdSearchByExternalRef: async () => hits };
+}
+
+describe('locateDocsBySource (pmb.7)', () => {
+  it('finds the doc a prior consult filed, via a bead carrying the external ref', async () => {
+    const docs: DocFile[] = [
+      { relPath: '.shreni/design/sso-login.md', content: '# SSO login\nOIDC.' },
+    ];
+    const hits: BeadHit[] = [
+      { id: 'X.1', title: 'epic', description: withDocLink('the epic', '.shreni/design/sso-login.md') },
+    ];
+    const matches = await locateDocsBySource('jira:PROJ-123', fakeSourceDeps(docs, hits));
+    expect(matches).toHaveLength(1);
+    expect(matches[0].relPath).toBe('.shreni/design/sso-login.md');
+    expect(matches[0].matchedVia).toEqual(['bead']);
+    expect(matches[0].linkedBeadIds).toEqual(['X.1']);
+  });
+
+  it('merges several beads pointing at the same doc, strengthening the match', async () => {
+    const docs: DocFile[] = [{ relPath: '.shreni/design/a.md', content: '# A' }];
+    const hits: BeadHit[] = [
+      { id: 'X', title: 'epic', description: withDocLink('e', '.shreni/design/a.md') },
+      { id: 'X.1', title: 'child', description: withDocLink('c', '.shreni/design/a.md') },
+    ];
+    const matches = await locateDocsBySource('jira:PROJ-1', fakeSourceDeps(docs, hits));
+    expect(matches).toHaveLength(1);
+    expect(matches[0].linkedBeadIds).toEqual(['X', 'X.1']);
+  });
+
+  it('returns nothing on the first consult (no bead carries the ref yet)', async () => {
+    const docs: DocFile[] = [{ relPath: '.shreni/design/a.md', content: '# A' }];
+    expect(await locateDocsBySource('jira:NEW-1', fakeSourceDeps(docs, []))).toEqual([]);
+  });
+
+  it('skips a bead whose linked doc is no longer on disk', async () => {
+    const hits: BeadHit[] = [
+      { id: 'X.1', title: 't', description: withDocLink('d', '.shreni/design/gone.md') },
+    ];
+    expect(await locateDocsBySource('jira:PROJ-1', fakeSourceDeps([], hits))).toEqual([]);
+  });
+
+  it('degrades to no matches when the external-ref search throws', async () => {
+    const deps: SourceLocateDeps = {
+      listDocs: () => [{ relPath: '.shreni/design/a.md', content: '# A' }],
+      bdSearchByExternalRef: async () => { throw new Error('bd down'); },
+    };
+    expect(await locateDocsBySource('jira:PROJ-1', deps)).toEqual([]);
   });
 });
 

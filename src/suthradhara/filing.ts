@@ -55,6 +55,7 @@ function createArgv(opts: {
   priority: number;
   acceptanceCriteria?: string;
   description?: string;
+  externalRef?: string;
 }): string[] {
   const argv = ['create', opts.title, '-t', opts.type, '-p', String(opts.priority)];
   if (opts.acceptanceCriteria !== undefined && opts.acceptanceCriteria.trim() !== '') {
@@ -62,6 +63,13 @@ function createArgv(opts: {
   }
   if (opts.description !== undefined && opts.description.trim() !== '') {
     argv.push('-d', opts.description);
+  }
+  // pmb.7: stamp the external source ref (e.g. jira:PROJ-123) onto the bead so a
+  // later consult of the same ticket finds it (route-to-evolve) and the bead
+  // traces back to where the requirement lives. Its own argv element — the
+  // argument-hygiene guarantee carries through.
+  if (opts.externalRef !== undefined && opts.externalRef.trim() !== '') {
+    argv.push('--external-ref', opts.externalRef);
   }
   argv.push('--silent');
   return argv;
@@ -71,7 +79,10 @@ function createArgv(opts: {
 // dependency the executor relies on: the epic first (children need its id for
 // `--parent`), then every child (deps need their ids), then the edges. Within
 // each group, source order is preserved so the plan reads like the proposal.
-export function compileFilingPlan(d: Decomposition): FilingPlan {
+// `externalRef` (pmb.7), when set, is stamped onto the epic AND every child so
+// the whole filed bundle traces back to its external source of record (e.g.
+// jira:PROJ-123) — the same ref a re-consult bd-searches to route to evolve.
+export function compileFilingPlan(d: Decomposition, externalRef?: string): FilingPlan {
   const steps: FilingStep[] = [];
 
   steps.push({
@@ -82,6 +93,7 @@ export function compileFilingPlan(d: Decomposition): FilingPlan {
       type: d.epic.type,
       priority: d.epic.priority,
       description: d.epic.description,
+      externalRef,
     }),
   });
 
@@ -96,6 +108,7 @@ export function compileFilingPlan(d: Decomposition): FilingPlan {
         priority: c.priority,
         acceptanceCriteria: c.acceptanceCriteria,
         description: c.description,
+        externalRef,
       }),
     });
   }
