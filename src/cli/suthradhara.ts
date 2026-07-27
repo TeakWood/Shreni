@@ -1,6 +1,12 @@
 import { loadRegistry } from '../kshetra/registry';
 import { resolveKshetra } from './status';
-import { startSession, stopSession, statusSession } from '../suthradhara/lifecycle';
+import {
+  startSession,
+  stopSession,
+  statusSession,
+  resumeSession,
+} from '../suthradhara/lifecycle';
+import { listSessions } from '../suthradhara/persistence';
 import type { KshetraConfig } from '../kshetra/config';
 
 // Resolve the target Kshetra for a Suthradhara subcommand. Precedence:
@@ -48,10 +54,28 @@ export function resolveTargetKshetra(
   );
 }
 
-export type SuthradharaSubcommand = 'start' | 'stop' | 'status';
+export type SuthradharaSubcommand = 'start' | 'stop' | 'status' | 'resume' | 'list';
 
 export function isSubcommand(x: string | undefined): x is SuthradharaSubcommand {
-  return x === 'start' || x === 'stop' || x === 'status';
+  return x === 'start' || x === 'stop' || x === 'status' || x === 'resume' || x === 'list';
+}
+
+// A session id lands as a bare positional (no leading @), sitting alongside an
+// optional @<kshetra> mention on `resume`. Distinguish by the id shape — the
+// generator's format matches this pattern exactly.
+const SESSION_ID_ARG_RE = /^[a-z0-9-]+-\d{8}T\d{6}-[0-9a-f]{4}$/;
+
+export function parseSessionId(args: string[]): string | undefined {
+  for (const arg of args) {
+    if (SESSION_ID_ARG_RE.test(arg)) return arg;
+  }
+  return undefined;
+}
+
+// The kshetra id is embedded in the session id — infer it so `resume <id>`
+// works without a redundant @<kshetra> mention.
+export function kshetraIdFromSessionId(sessionId: string): string {
+  return sessionId.replace(/-\d{8}T\d{6}-[0-9a-f]{4}$/, '');
 }
 
 export interface RunOpts {
@@ -63,9 +87,22 @@ export interface RunOpts {
 
 export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
   if (!isSubcommand(sub)) {
-    throw new Error('Usage: shreni suthradhara <start|stop|status> [@<id> | --kshetra <id>]');
+    throw new Error(
+      'Usage: shreni suthradhara <start|resume <session-id>|stop|status|list> [@<id> | --kshetra <id>]',
+    );
   }
   const kshetras = opts.kshetras ?? loadRegistry();
+
+  if (sub === 'resume') {
+    runResume(opts, kshetras);
+    return;
+  }
+
+  if (sub === 'list') {
+    runList(opts, kshetras);
+    return;
+  }
+
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
 
   if (sub === 'start') {
@@ -74,6 +111,8 @@ export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
       console.log(`suthradhara[${result.kshetraId}]: already running (pid ${result.pid})`);
     } else {
       console.log(`suthradhara[${result.kshetraId}]: started (pid ${result.pid})`);
+      console.log(`Session: ${result.sessionId}`);
+      console.log(`Resume with: shreni suthradhara resume ${result.sessionId}`);
     }
   } else if (sub === 'stop') {
     const result = stopSession(kshetra.id);
@@ -92,5 +131,46 @@ export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
     } else {
       console.log(`suthradhara[${result.kshetraId}]: not running`);
     }
+  }
+}
+
+function runResume(opts: RunOpts, kshetras: KshetraConfig[]): void {
+  const sessionId = parseSessionId(opts.args);
+  if (!sessionId) {
+    throw new Error(
+      'Usage: shreni suthradhara resume <session-id>\n' +
+        'Hint: run `shreni suthradhara list` to see available sessions.',
+    );
+  }
+  const kshetraId = kshetraIdFromSessionId(sessionId);
+  const kshetra = kshetras.find(k => k.id === kshetraId);
+  if (!kshetra) {
+    throw new Error(
+      `Session "${sessionId}" refers to kshetra "${kshetraId}", which is not registered.`,
+    );
+  }
+
+  const result = resumeSession(kshetra, sessionId);
+  if (result.status === 'already_running') {
+    console.log(
+      `suthradhara[${result.kshetraId}]: already running (pid ${result.pid}); resume is a no-op`,
+    );
+  } else {
+    console.log(`suthradhara[${result.kshetraId}]: resumed (pid ${result.pid})`);
+    console.log(`Session: ${result.sessionId}`);
+  }
+}
+
+function runList(opts: RunOpts, kshetras: KshetraConfig[]): void {
+  // A kshetra filter is optional — with no @<id> or --kshetra, we list every
+  // session on disk so the operator can pick from across projects.
+  const atId = parseAtMention(opts.args) ?? opts.flagKshetra;
+  const sessions = listSessions(atId);
+  if (sessions.length === 0) {
+    console.log(atId ? `No suthradhara sessions for ${atId}.` : 'No suthradhara sessions.');
+    return;
+  }
+  for (const s of sessions) {
+    console.log(`${s.id}  kshetra=${s.kshetraId}  stage=${s.stage}  updated=${s.updatedAt}`);
   }
 }
