@@ -112,6 +112,11 @@ session abstraction already exists — then shapes the beads around what it find
 Grounding uses live `Read`/`Grep`/`Glob`, not RAG — a RAG index would sharpen
 decomposition but is not required to ship.
 
+Grounding also reaches **past the repo boundary**: the operator can ground a session
+in an external source of record (a Jira/Linear/Confluence ticket) over MCP — *"let's
+work on PROJ-123"* — with interactive, grant-on-demand authorization. See
+[MCP grounding](./mcp-grounding.md).
+
 ---
 
 ## The write surface & boundary
@@ -419,5 +424,8 @@ Tests ship with each module (Vitest), with emphasis on the boundary:
 - **Vichara** — the lightweight <30s capture surface. Complementary, not overlapping: a bug goes
   to Vichara, a feature to Suthradhara. They share the CLI agentic loop, the `--allowedTools`
   boundary, the server-side confirm gate, and the token/PID model.
+- **MCP grounding** ([mcp-grounding.md](./mcp-grounding.md)) — grounds a session in an external
+  MCP server (Jira/Linear/Confluence) with interactive grant-on-demand; a general per-agent MCP
+  capability, not a bespoke tracker integration.
 - **Extension seams** ([extension-points.md](./extension-points.md)) — Suthradhara runs entirely
   on the core's local defaults; it needs no optional package.
