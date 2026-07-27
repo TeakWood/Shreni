@@ -333,7 +333,7 @@ export const COMMANDS: Command[] = [
   {
     name: 'suthradhara',
     summary: 'Control a Suthradhara interview session for a kshetra',
-    usage: '<start|stop|status> [@<id> | --kshetra <id>]',
+    usage: '<start|resume <session-id>|stop|status|list> [@<id> | --kshetra <id>]',
     run(ctx) {
       runSuthradhara(ctx.args[0], {
         args: ctx.args.slice(1),

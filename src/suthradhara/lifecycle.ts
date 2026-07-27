@@ -10,16 +10,30 @@ import {
 } from './pid';
 import { kshetraDir } from '../cli/pid';
 import { selfExec, type Launch } from '../cli/self-exec';
+import {
+  generateSessionId,
+  loadSession,
+  saveSession,
+  SessionNotFoundError,
+} from './persistence';
+import { newSessionState } from './state';
 
 // Detached-process lifecycle for one Suthradhara session, per Kshetra. Mirrors
 // the Phalaka precedent: `start` is idempotent on a live PID; `stop` clears a
 // stale PID file; `status` reports the running-or-not state without side
-// effects. The detached child (see cli/suthradhara-runner) writes its own PID
-// once it comes up; the parent writes the PID here too so `status` reports
-// correctly the moment start returns.
+// effects.
+//
+// xa0.3 threads a session id through here so the runner can hydrate Layer-1
+// state on boot. Only one live session per Kshetra at a time (the pid file
+// enforces it), but each Kshetra accumulates many persisted transcripts —
+// `resume <session-id>` re-spawns the runner pointed at a specific one.
 
 export type SessionStartResult =
-  | { status: 'started'; kshetraId: string; pid: number }
+  | { status: 'started'; kshetraId: string; sessionId: string; pid: number }
+  | { status: 'already_running'; kshetraId: string; pid: number };
+
+export type SessionResumeResult =
+  | { status: 'resumed'; kshetraId: string; sessionId: string; pid: number }
   | { status: 'already_running'; kshetraId: string; pid: number };
 
 export type SessionStopResult =
@@ -34,23 +48,87 @@ export interface SessionStatusResult {
   logPath: string;
 }
 
+// The lifecycle needs to build the child-process command with a session id
+// that's chosen inside startSession. Callers (production and tests) supply a
+// factory rather than a fixed Launch so the id can flow through cleanly.
+export type LaunchFactory = (sessionId: string) => Launch;
+
+const defaultLaunch: LaunchFactory = (sessionId) =>
+  selfExec('__suthradhara-runner', [kshetraIdFromSessionArg(sessionId), sessionId]);
+
+// Session ids are `<kshetraId>-<yyyymmddThhmmss>-<hex>`, so the kshetra id is
+// everything up to the trailing timestamp+hex tail. Kept local — no other
+// caller needs to parse a session id apart.
+function kshetraIdFromSessionArg(sessionId: string): string {
+  return sessionId.replace(/-\d{8}T\d{6}-[0-9a-f]{4}$/, '');
+}
+
 export function startSession(
   kshetra: KshetraConfig,
-  launch: Launch = selfExec('__suthradhara-runner', [kshetra.id]),
+  launchFactory: LaunchFactory = defaultLaunch,
 ): SessionStartResult {
   const existing = readSuthradharaPid(kshetra.id);
   if (existing !== null && isAlive(existing)) {
     return { status: 'already_running', kshetraId: kshetra.id, pid: existing };
   }
 
-  // Fail loudly before spawning if the target repo is gone — a session whose
-  // cwd doesn't exist would exit immediately and confuse the operator.
   if (!existsSync(kshetra.repo.path)) {
     throw new Error(
       `Kshetra "${kshetra.id}" repo path does not exist: ${kshetra.repo.path}`,
     );
   }
 
+  // Create the session state on disk before spawning so that `list` sees it
+  // immediately and a crash between spawn and first save can't leave the
+  // operator with a session id they can't resume.
+  const sessionId = generateSessionId(kshetra.id);
+  saveSession(newSessionState(sessionId, kshetra.id));
+
+  const pid = spawnRunner(kshetra, launchFactory(sessionId));
+  return { status: 'started', kshetraId: kshetra.id, sessionId, pid };
+}
+
+// Resume an existing session's transcript. The state file must already exist
+// and must belong to this Kshetra; otherwise fail loudly rather than silently
+// creating a fresh state under the same id.
+export function resumeSession(
+  kshetra: KshetraConfig,
+  sessionId: string,
+  launchFactory: LaunchFactory = defaultLaunch,
+): SessionResumeResult {
+  const existing = readSuthradharaPid(kshetra.id);
+  if (existing !== null && isAlive(existing)) {
+    return { status: 'already_running', kshetraId: kshetra.id, pid: existing };
+  }
+
+  if (!existsSync(kshetra.repo.path)) {
+    throw new Error(
+      `Kshetra "${kshetra.id}" repo path does not exist: ${kshetra.repo.path}`,
+    );
+  }
+
+  let state;
+  try {
+    state = loadSession(sessionId);
+  } catch (err) {
+    if (err instanceof SessionNotFoundError) {
+      throw new Error(
+        `Cannot resume: session "${sessionId}" not found under ~/.shreni/suthradhara/.`,
+      );
+    }
+    throw err;
+  }
+  if (state.kshetraId !== kshetra.id) {
+    throw new Error(
+      `Session "${sessionId}" belongs to kshetra "${state.kshetraId}", not "${kshetra.id}".`,
+    );
+  }
+
+  const pid = spawnRunner(kshetra, launchFactory(sessionId));
+  return { status: 'resumed', kshetraId: kshetra.id, sessionId, pid };
+}
+
+function spawnRunner(kshetra: KshetraConfig, launch: Launch): number {
   mkdirSync(kshetraDir(kshetra.id), { recursive: true });
   const logFd = openSync(suthradharaLogPath(kshetra.id), 'a');
 
@@ -66,8 +144,7 @@ export function startSession(
 
   writeSuthradharaPid(kshetra.id, child.pid);
   child.unref();
-
-  return { status: 'started', kshetraId: kshetra.id, pid: child.pid };
+  return child.pid;
 }
 
 export function stopSession(kshetraId: string): SessionStopResult {
