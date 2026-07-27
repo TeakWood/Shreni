@@ -2,6 +2,8 @@ import type { KshetraConfig } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
 import { readOnlyAllowlist } from './allowlist';
+import { buildSystemPrompt } from './prompt';
+import type { SessionState } from './state';
 
 // Compose the claude-CLI invocation for a Suthradhara interview turn. Pure —
 // exported so xa0.2 (stage-aware prompt) can call it per turn and later beads
@@ -39,4 +41,20 @@ export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
     args,
     env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
   };
+}
+
+// The single entry point a turn loop calls: derive the stage-aware system prompt
+// from the live session state (xa0.2) and compose the read-only spawn. Kept here
+// so the runner doesn't need to know how the prompt is assembled — it hands over
+// state + the operator's message and gets a ready-to-spawn spec back.
+export function buildInterviewSpawn(
+  state: SessionState,
+  kshetra: KshetraConfig,
+  userPrompt: string,
+): SpawnSpec {
+  return buildClaudeSpawn({
+    kshetra,
+    systemPrompt: buildSystemPrompt(state, kshetra),
+    userPrompt,
+  });
 }

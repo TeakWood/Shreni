@@ -68,6 +68,10 @@ export interface OpenQuestion {
   id: string;
   question: string;
   raisedAt: string;
+  // When this question exists because a rubric item was deferred, the item it
+  // stands in for. Absent for free-standing unknowns. Optional (additive), so
+  // the on-disk schema version is unchanged — old sessions load fine.
+  rubricKey?: keyof RubricState;
 }
 
 // Bumped when the on-disk shape changes in a way that isn't a pure additive
