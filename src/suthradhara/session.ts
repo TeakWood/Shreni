@@ -36,8 +36,9 @@ export class SuthradharaSpawnError extends Error {
 // `--strict-mcp-config` — so an operator's ambient project `.mcp.json` also
 // connects. Connection injects the server's tool SCHEMAS into the model (the
 // model SEES `mcp__jira__get_issue`) while callability stays gated by
-// --allowedTools, which still carries only the read-only surface here: an
-// ungranted MCP tool is visible-but-denied until pmb.5/pmb.6 grant it. Verified
+// --allowedTools, which carries the read-only surface plus Suthradhara's
+// statically-granted MCP tools (pmb.5): an ungranted MCP tool stays
+// visible-but-denied until pmb.6 grants it interactively. Verified
 // against claude 2.1.212: a denied MCP tool_use rides `permission_denials` in the
 // `result` message and does NOT error the turn (capture.ts reads exactly that).
 export interface SuthradharaSpawnOpts {
@@ -48,7 +49,13 @@ export interface SuthradharaSpawnOpts {
 
 export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
   const { kshetra } = opts;
-  const allowlist = readOnlyAllowlist();
+  // Read-only surface PLUS Suthradhara's statically-configured MCP grants
+  // (agents.suthradhara.mcp), compiled to exact `mcp__<server>__<tool>` ids
+  // (pmb.5). buildFilingSpawn swaps this whole value for filingAllowlist(), which
+  // takes no grants — so the granted tracker-read tools ride only the interview
+  // turn, never the bd-write turn. Interactive grant-on-demand (pmb.6) will layer
+  // session-scoped grants on top of these config ones.
+  const allowlist = readOnlyAllowlist(kshetra.agents.suthradhara?.mcp);
 
   // Ambient MCP connect + secret injection. --mcp-config points claude at each
   // server's def file (repo-relative in yaml → absolute against repo.path so it

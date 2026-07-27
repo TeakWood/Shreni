@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { readOnlyAllowlist, filingAllowlist } from './allowlist';
+import {
+  readOnlyAllowlist,
+  filingAllowlist,
+  compileMcpGrants,
+  McpGrantError,
+} from './allowlist';
 
 describe('readOnlyAllowlist', () => {
   const list = readOnlyAllowlist();
@@ -94,5 +99,95 @@ describe('filingAllowlist', () => {
     // the other by prefix match.
     expect('bd deps'.startsWith('bd dep add')).toBe(false);
     expect('bd dep add'.startsWith('bd deps')).toBe(false);
+  });
+});
+
+describe('compileMcpGrants', () => {
+  it('compiles a grant to exactly the named mcp__server__tool ids, in order', () => {
+    expect(compileMcpGrants({ jira: ['get_issue', 'search'] })).toEqual([
+      'mcp__jira__get_issue',
+      'mcp__jira__search',
+    ]);
+  });
+
+  it('compiles across multiple servers', () => {
+    expect(
+      compileMcpGrants({ jira: ['get_issue'], linear: ['issue', 'search_issues'] }),
+    ).toEqual(['mcp__jira__get_issue', 'mcp__linear__issue', 'mcp__linear__search_issues']);
+  });
+
+  it('returns [] for undefined grants and for a server named with no tools', () => {
+    expect(compileMcpGrants(undefined)).toEqual([]);
+    expect(compileMcpGrants({})).toEqual([]);
+    expect(compileMcpGrants({ jira: [] })).toEqual([]);
+  });
+
+  it('dedupes a tool named twice', () => {
+    expect(compileMcpGrants({ jira: ['get_issue', 'get_issue'] })).toEqual([
+      'mcp__jira__get_issue',
+    ]);
+  });
+
+  it('rejects a whole-server wildcard grant', () => {
+    expect(() => compileMcpGrants({ jira: ['*'] })).toThrow(McpGrantError);
+  });
+
+  it('rejects a wildcard embedded in a tool name', () => {
+    expect(() => compileMcpGrants({ jira: ['get_*'] })).toThrow(McpGrantError);
+    expect(() => compileMcpGrants({ jira: ['*_issue'] })).toThrow(McpGrantError);
+  });
+
+  it('rejects a wildcard in a server name', () => {
+    expect(() => compileMcpGrants({ 'jira*': ['get_issue'] })).toThrow(McpGrantError);
+  });
+
+  it('rejects an empty/whitespace tool name', () => {
+    expect(() => compileMcpGrants({ jira: [''] })).toThrow(McpGrantError);
+    expect(() => compileMcpGrants({ jira: ['  '] })).toThrow(McpGrantError);
+  });
+});
+
+// The load-bearing boundary (pmb.5 acceptance): granted tracker-READ tools ride
+// the read surface only, mutation verbs never enter any Suthradhara allowlist,
+// and no grant reaches the filing turn.
+describe('MCP grants on the Suthradhara surfaces', () => {
+  const grants = { jira: ['get_issue', 'search'] };
+
+  it('appends the compiled ids to the read-only surface', () => {
+    const list = readOnlyAllowlist(grants);
+    expect(list).toContain('mcp__jira__get_issue');
+    expect(list).toContain('mcp__jira__search');
+    // The base read-only surface is still fully present.
+    for (const base of readOnlyAllowlist()) {
+      expect(list).toContain(base);
+    }
+  });
+
+  it('never appears on the filing surface — filing writes go to bd, not the tracker', () => {
+    const filing = filingAllowlist();
+    for (const t of filing) {
+      expect(t.startsWith('mcp__')).toBe(false);
+    }
+    // Concretely: the ids that were granted to the read turn are absent here.
+    for (const id of compileMcpGrants(grants)) {
+      expect(filing).not.toContain(id);
+    }
+  });
+
+  it('NEVER admits a tracker mutation verb — not in the read set, not in filing', () => {
+    const readSurfaces = [readOnlyAllowlist(), readOnlyAllowlist(grants)];
+    for (const list of [...readSurfaces, filingAllowlist()]) {
+      expect(list).not.toContain('mcp__jira__update_issue');
+      expect(list).not.toContain('mcp__jira__create_issue');
+      expect(list).not.toContain('mcp__jira__delete_issue');
+      expect(list).not.toContain('mcp__jira__add_comment');
+    }
+  });
+
+  it('cannot sweep in mutation verbs via a wildcard — the wildcard is rejected', () => {
+    // The only way update_issue/create_issue could reach the allowlist is a
+    // whole-server grant; that is rejected, so they can only ever appear if named
+    // one by one (which no read-only grounding grant does).
+    expect(() => readOnlyAllowlist({ jira: ['*'] })).toThrow(McpGrantError);
   });
 });

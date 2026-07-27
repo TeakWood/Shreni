@@ -223,6 +223,10 @@ export type StackConfig = z.infer<typeof StackConfigSchema>;
 export type GatesConfig = z.infer<typeof GatesConfigSchema>;
 export type McpServer = z.infer<typeof McpServerSchema>;
 export type McpConfig = z.infer<typeof McpConfigSchema>;
+// A per-role grant map (server name → granted tool names). Consumed by the
+// allowlist compiler (pmb.5, src/suthradhara/allowlist.ts) to produce exact
+// `mcp__<server>__<tool>` callability ids.
+export type McpGrants = z.infer<typeof McpGrantsSchema>;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
 export class KshetraConfigError extends Error {
