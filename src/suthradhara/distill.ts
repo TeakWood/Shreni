@@ -72,6 +72,11 @@ export interface StateDelta {
   // and is presenting a proposal. Held server-side via presentProposal (the
   // confirm gate); NOTHING is filed until an explicit confirm frame.
   proposal?: Decomposition;
+  // The design-doc BODY, emitted on the same turn as `proposal` (§8). The full
+  // doc content — as deep as the interview warranted — the server writes to the
+  // guarded design-docs path on confirm. Only meaningful WITH a proposal (it is
+  // that decomposition's design note); a `doc` without a `proposal` is dropped.
+  doc?: string;
 }
 
 // The result of splitting a turn's raw output: what to show/persist as the
@@ -205,6 +210,11 @@ export function validateDelta(value: unknown): ValidatedDelta {
     else warnings.push('proposal is not an object; ignored');
   }
 
+  if (v.doc !== undefined) {
+    if (typeof v.doc === 'string' && v.doc.trim() !== '') delta.doc = v.doc;
+    else warnings.push('doc is not a non-empty string; ignored');
+  }
+
   return { delta, warnings };
 }
 
@@ -251,9 +261,14 @@ export function applyDelta(
   }
 
   if (delta.proposal !== undefined) {
-    const res = presentProposal(next, delta.proposal, now);
+    // The doc body rides with the proposal — held in `pending` so the confirm
+    // commits the note and the decomposition as one unit (§7). A `doc` emitted
+    // WITHOUT a proposal has nothing to attach to, so it is dropped here.
+    const res = presentProposal(next, delta.proposal, now, delta.doc);
     if (res.ok) next = res.state;
     else warnings.push(`Proposal not held (invalid): ${res.errors.join('; ')}`);
+  } else if (delta.doc !== undefined) {
+    warnings.push('doc emitted without a proposal; ignored (a design note needs its decomposition)');
   }
 
   return { state: next, warnings };

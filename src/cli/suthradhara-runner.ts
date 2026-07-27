@@ -3,7 +3,7 @@ import { loadRegistry } from '../kshetra/registry';
 import { writeSuthradharaPid } from '../suthradhara/pid';
 import { loadSession, saveSession, SessionNotFoundError } from '../suthradhara/persistence';
 import type { SessionState } from '../suthradhara/state';
-import { runInterviewTurn, type TurnDeps } from '../suthradhara/turnloop';
+import { runInterviewTurn, resumeInterruptedCommit, type TurnDeps } from '../suthradhara/turnloop';
 import { captureClaudeTurn } from '../suthradhara/capture';
 import { makeCommitFn } from '../suthradhara/commit';
 import { makeLocateFn } from '../suthradhara/evolve';
@@ -109,6 +109,28 @@ export function runReplSession(
       void drain();
     }
   };
+
+  // Resume-time reconcile (ARD §7, Q2): if a prior confirm's commit was
+  // interrupted, the session persisted its pending proposal + an in-flight commit
+  // marker. Reconcile against the SAME session bead and file the remainder before
+  // accepting new input — a crash mid-commit heals on the next start rather than
+  // waiting for the operator to notice and re-confirm. `busy` is held for the
+  // duration so an operator line typed meanwhile queues instead of racing state.
+  busy = true;
+  void resumeInterruptedCommit(state, kshetra, deps)
+    .then((result) => {
+      if (result) {
+        state = result.state;
+        process.stdout.write(`\n${result.reply}\n\n`);
+      }
+    })
+    .catch((err) => {
+      console.error(`[suthradhara:${kshetra.id}] resume failed: ${(err as Error).message}`);
+    })
+    .finally(() => {
+      busy = false;
+      void drain();
+    });
 
   rl.on('line', (line) => {
     const message = line.trim();

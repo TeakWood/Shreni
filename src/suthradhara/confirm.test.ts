@@ -77,6 +77,16 @@ describe('presentProposal', () => {
     if (!r.ok) expect(r.errors.length).toBeGreaterThan(0);
   });
 
+  it('holds the design-doc body when one is supplied, and omits it when blank', () => {
+    const withDoc = presentProposal(fresh(), decomp(), NOW, '# CSV import\n\nDesign.');
+    expect(withDoc.ok).toBe(true);
+    if (withDoc.ok) expect(withDoc.state.pending?.docContent).toBe('# CSV import\n\nDesign.');
+
+    const blank = presentProposal(fresh(), decomp(), NOW, '   ');
+    expect(blank.ok).toBe(true);
+    if (blank.ok) expect(blank.state.pending?.docContent).toBeUndefined();
+  });
+
   it('re-presenting replaces the previously held proposal', () => {
     const first = presentProposal(fresh(), decomp(), NOW);
     expect(first.ok).toBe(true);

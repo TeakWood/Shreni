@@ -106,13 +106,18 @@ function renderEvolveContext(state: SessionState): string {
 const PROPOSAL_SHAPE = `When (and only when) the rubric is satisfied and you reach the decompose/design stages, present a
 DECOMPOSITION PROPOSAL for the operator to review — do not assume it is filed until they confirm:
   1. Design note — the chosen approach, key components and their touch-points in real files,
-     alternatives considered, risks, and any open questions (including deferred rubric items).
+     alternatives considered, risks, and any open questions (including deferred rubric items). This
+     is the DESIGN DOC the server writes on confirm; emit its FULL body in the delta's \`doc\` field
+     (below) on the same turn as the proposal — as deep as the design warrants (a short doc for a
+     small feature, a full technical design for a substantial one), never a stub. Show the operator
+     the note (or, when evolving, a diff) in your prose reply; the \`doc\` field carries the whole file.
   2. Epic — a parent bead (title, type epic or feature).
   3. Children — one bead per unit of work, each with title, type (task/feature/bug), priority (0-4),
      and acceptance criteria, sized for a single implement→review pass.
   4. Dependency edges — the ordering between children (which child is blocked by which).
-Then ask the operator to Confirm / Edit / Cancel. On Confirm the server files the epic, children,
-and edges; Edit reopens the interview so you can revise and re-present; Cancel discards the proposal.`;
+Then ask the operator to Confirm / Edit / Cancel. On Confirm the server writes the design doc, files
+the epic, children, and edges — stamping the doc path into each bead — then Edit reopens the interview
+so you can revise and re-present; Cancel discards the proposal.`;
 
 // The per-turn state delta protocol (ARD §9.2, Q10). Each turn is a FRESH,
 // stateless invocation — there is no provider-native conversation memory. The
@@ -142,7 +147,8 @@ Schema (every field optional):
   "proposal": { "epic": { "ref": "...", "title": "...", "type": "epic", "priority": 2 },
                 "children": [ { "ref": "...", "title": "...", "type": "task", "priority": 2,
                                 "acceptanceCriteria": "..." } ],
-                "deps": [ { "blocked": "childRef", "blocker": "childRef" } ] }
+                "deps": [ { "blocked": "childRef", "blocker": "childRef" } ] },
+  "doc": "# Feature\\n\\nThe full design-doc body (markdown). Written to the design-docs dir on confirm."
 }
 \`\`\`
 Rules: rubric keys are exactly intent | usersStories | successCriteria | scopeBoundary |
@@ -151,7 +157,9 @@ this is a change to an EXISTING feature — the server locates its design doc an
 so you evolve it in place. \`advanceStage\` is refused if it jumps past the readiness
 rubric — advance only when the stage's exit condition is met. Include \`proposal\` ONLY on the turn
 you present the DECOMPOSITION PROPOSAL (decompose/design stage, rubric satisfied); the server holds
-it for the operator's confirm and files nothing until then.`;
+it for the operator's confirm and files nothing until then. Emit \`doc\` WITH that same \`proposal\` —
+its full markdown body; when evolving, emit the COMPLETE rewritten file (the server writes the whole
+doc, not a patch). A \`doc\` without a \`proposal\` is dropped.`;
 }
 
 export function buildSystemPrompt(

@@ -11,11 +11,13 @@
 //     (idempotent by reconcile, not replay — Q2).
 //
 // SCOPE LINE: this is the executor the turn loop calls THROUGH a seam (CommitFn).
-// The design-doc write (xa0.5) and the exhaustive partial-failure / resume-
-// reconcile hardening are xa0.6's to complete; here the doc is optional and the
-// report is the straightforward "what landed / where it stopped". Everything runs
-// via execFile('bd', argv) with NO shell — the argument-hygiene guarantee
-// filing.ts documents carries through unchanged.
+// It ties the whole confirmed bundle into ONE journaled transaction (xa0.6): the
+// design doc (§6.2, written when the model emitted a body), the epic, its
+// children, and the dep edges — each recorded into the session bead as it lands.
+// A crash mid-commit is recovered by RESUMING against that bead (input.resume):
+// load its journal, reconcile, and file only the remainder — each item exactly
+// once (§7, Q2). Everything runs via execFile('bd', argv) with NO shell — the
+// argument-hygiene guarantee filing.ts documents carries through unchanged.
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -26,7 +28,6 @@ import type { EvolveState } from './state';
 import { resolveStepArgv, type FilingPlan } from './filing';
 import { writeDesignDoc, linkDocIntoDecomposition } from './designdoc';
 import { evolveDocTarget } from './evolve';
-import { compileFilingPlan } from './filing';
 import {
   SessionBeadStore,
   newSessionBeadRecord,
@@ -63,6 +64,12 @@ export interface CommitInput {
   // the target is resolved through evolveDocTarget — the EXISTING doc's path when
   // evolving — so the SAME file is rewritten rather than a parallel doc created.
   evolving?: EvolveState | null;
+  // Resume an interrupted commit (§7, Q2). When set, this run does NOT create a
+  // fresh session bead — it LOADS the existing one by id and reconciles against
+  // its journal, filing only what is still missing (idempotent by reconcile). Set
+  // by the runner/turn loop after a partial-failure commit recorded its bead id.
+  // Absent for a first, fresh commit.
+  resume?: { sessionBeadId: string } | null;
 }
 
 // What did (and didn't) land, straight from the journal. `ok` is true only when
@@ -90,6 +97,9 @@ export interface CommitDeps {
   sessionBead?: {
     create(plan: SessionPlan): Promise<{ id: string; record: SessionBeadRecord }>;
     journal(id: string, record: SessionBeadRecord): Promise<void>;
+    // Reconstruct the record for a resume (§7, Q2). Returns null when the bead
+    // carries no payload. Only called when input.resume is set.
+    load(id: string): Promise<SessionBeadRecord | null>;
   };
 }
 
@@ -135,36 +145,55 @@ export async function commitBundle(input: CommitInput, deps: CommitDeps = {}): P
   const decomposition = input.doc
     ? linkDocIntoDecomposition(input.decomposition, docRelPath)
     : input.decomposition;
-  const plan: FilingPlan = compileFilingPlan(decomposition);
 
   const report: CommitReport = { ok: false, childIds: {}, depsAdded: [], errors: [] };
 
-  // Create the spine. A failure here means nothing downstream can be journaled —
-  // report and bail.
+  // The spine. A FRESH commit creates the session bead (its plan + empty journal);
+  // a RESUME loads the existing bead by id and reconciles against its journal, so
+  // a mid-commit crash files only the remainder and never a second bundle (§7, Q2).
+  // A failure here means nothing downstream can be journaled — report and bail.
   let record: SessionBeadRecord;
   let beadId: string;
   try {
-    const plspan: SessionPlan = { decomposition, docPath: docRelPath };
-    const created = await store.create(plspan);
-    beadId = created.id;
-    record = created.record;
-    report.sessionBeadId = beadId;
+    if (input.resume?.sessionBeadId) {
+      beadId = input.resume.sessionBeadId;
+      report.sessionBeadId = beadId;
+      const loaded = await store.load(beadId);
+      if (!loaded) {
+        throw new Error(`session bead ${beadId} carries no commit journal to resume`);
+      }
+      record = loaded;
+    } else {
+      const plspan: SessionPlan = { decomposition, docPath: docRelPath };
+      const created = await store.create(plspan);
+      beadId = created.id;
+      record = created.record;
+      report.sessionBeadId = beadId;
+    }
   } catch (err) {
-    report.errors.push(`session bead create failed: ${(err as Error).message}`);
+    report.errors.push(
+      `${input.resume ? 'session bead resume' : 'session bead create'} failed: ${(err as Error).message}`,
+    );
     return report;
   }
 
-  // Write the doc (server authors the file — §6.2) before filing beads, and
-  // journal its sha so a resume knows it landed.
+  // Write the doc (server authors the file — §6.2) before filing beads, journaling
+  // its sha so a resume knows it landed. Gated on reconcile: a resume whose journal
+  // already records the doc sha skips the re-write (written exactly once), but the
+  // report still surfaces the path so the operator sees the full committed set.
   if (input.doc) {
-    try {
-      const ref = writeDesignDoc({ kshetra, relPath: docRelPath, content: input.doc.content });
-      record = recordDocWritten(record, shortSha(input.doc.content));
-      await store.journal(beadId, record);
-      report.docRelPath = ref.relPath;
-    } catch (err) {
-      report.errors.push(`design-doc write failed: ${(err as Error).message}`);
-      return report;
+    if (reconcile(record).writeDoc) {
+      try {
+        const ref = writeDesignDoc({ kshetra, relPath: docRelPath, content: input.doc.content });
+        record = recordDocWritten(record, shortSha(input.doc.content));
+        await store.journal(beadId, record);
+        report.docRelPath = ref.relPath;
+      } catch (err) {
+        report.errors.push(`design-doc write failed: ${(err as Error).message}`);
+        return report;
+      }
+    } else {
+      report.docRelPath = record.plan.docPath;
     }
   }
 

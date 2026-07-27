@@ -84,6 +84,14 @@ describe('validateDelta', () => {
     expect(delta.locateFeature).toBeUndefined();
     expect(warnings.join(' ')).toMatch(/locateFeature/);
   });
+
+  it('keeps a non-empty doc body and drops a blank/non-string one', () => {
+    expect(validateDelta({ doc: '# body' }).delta.doc).toBe('# body');
+    const blank = validateDelta({ doc: '   ' });
+    expect(blank.delta.doc).toBeUndefined();
+    expect(blank.warnings.join(' ')).toMatch(/doc/);
+    expect(validateDelta({ doc: 42 }).delta.doc).toBeUndefined();
+  });
 });
 
 describe('applyDelta — folds through the pure mutators', () => {
@@ -152,5 +160,29 @@ describe('applyDelta — folds through the pure mutators', () => {
     const { state, warnings } = applyDelta(newSessionState(sid, 'myapp', NOW), { proposal: bad }, NOW);
     expect(hasPendingProposal(state)).toBe(false);
     expect(warnings.join(' ')).toMatch(/invalid/i);
+  });
+
+  it('holds the doc body alongside the proposal (§8)', () => {
+    const decomposition: Decomposition = {
+      epic: { ref: 'e', title: 'CSV import', type: 'epic', priority: 2 },
+      children: [{ ref: 'c1', title: 'parser', type: 'task', priority: 2, acceptanceCriteria: 'parses CSV' }],
+      deps: [],
+    };
+    const { state } = applyDelta(
+      newSessionState(sid, 'myapp', NOW),
+      { proposal: decomposition, doc: '# CSV import\n\nThe design.' },
+      NOW,
+    );
+    expect(state.pending?.docContent).toBe('# CSV import\n\nThe design.');
+  });
+
+  it('drops a doc emitted without a proposal (with a warning)', () => {
+    const { state, warnings } = applyDelta(
+      newSessionState(sid, 'myapp', NOW),
+      { doc: '# orphan note' },
+      NOW,
+    );
+    expect(state.pending).toBeUndefined();
+    expect(warnings.join(' ')).toMatch(/doc emitted without a proposal/i);
   });
 });

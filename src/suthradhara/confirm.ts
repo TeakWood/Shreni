@@ -52,12 +52,23 @@ export function presentProposal(
   state: SessionState,
   decomposition: Decomposition,
   now: string = new Date().toISOString(),
+  docContent?: string,
 ): PresentResult {
   const validation = validateDecomposition(decomposition);
   if (!validation.ok) return { ok: false, errors: validation.errors };
+  const trimmed = docContent?.trim();
   return {
     ok: true,
-    state: { ...state, pending: { decomposition, presentedAt: now } },
+    state: {
+      ...state,
+      pending: {
+        decomposition,
+        // Keep the doc body only when non-empty — a blank note is exactly what
+        // writeDesignDoc refuses, so we never hold one for the commit.
+        ...(trimmed ? { docContent } : {}),
+        presentedAt: now,
+      },
+    },
   };
 }
 

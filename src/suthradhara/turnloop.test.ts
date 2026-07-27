@@ -1,8 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { newSessionState, type SessionState } from './state';
 import { presentProposal } from './confirm';
-import { runInterviewTurn, renderRecentWindow, type TurnDeps } from './turnloop';
-import { DELTA_FENCE } from './distill';
+import { runInterviewTurn, resumeInterruptedCommit, renderRecentWindow, type TurnDeps } from './turnloop';
+import { applyDelta, DELTA_FENCE } from './distill';
+import { makeCommitFn, type CommitDeps } from './commit';
+import { newSessionBeadRecord, type SessionPlan, type SessionBeadRecord } from './sessionbead';
+import { resolveDesignDir } from './designdoc';
 import type { SpawnSpec } from '../agents/providers/types';
 import type { CommitReport } from './commit';
 import type { Decomposition } from './decomposition';
@@ -188,6 +194,174 @@ describe('runInterviewTurn — confirm gate routing', () => {
     expect(res.reply).toBe('Answering your question.');
     // proposal is still held (a question mid-gate doesn’t clear it)
     expect(res.state.pending).not.toBeNull();
+  });
+});
+
+// A pending state whose held proposal also carries a design-doc body (§8).
+function pendingStateWithDoc(docContent = '# CSV import\n\nThe design.'): SessionState {
+  const decomposition: Decomposition = {
+    epic: { ref: 'e', title: 'CSV import', type: 'epic', priority: 2 },
+    children: [{ ref: 'c1', title: 'parser', type: 'task', priority: 2, acceptanceCriteria: 'parses CSV' }],
+    deps: [],
+  };
+  const held = presentProposal(newSessionState(sid, 'myapp', NOW), decomposition, NOW, docContent);
+  if (!held.ok) throw new Error('setup');
+  return held.state;
+}
+
+const partialCommit = (sessionBeadId = 'myapp-sess'): Promise<CommitReport> =>
+  Promise.resolve({ ok: false, sessionBeadId, epicId: 'x', childIds: {}, depsAdded: [], errors: ['bd down'] });
+
+describe('runInterviewTurn — commit doc emission & resume (§7, §8)', () => {
+  it('threads the pending doc body into the commit as input.doc', async () => {
+    const commit = vi.fn(okCommit);
+    const deps: TurnDeps = { capture: vi.fn(), commit, save: () => {}, now: () => NOW };
+    await runInterviewTurn(pendingStateWithDoc('# CSV\n\nBODY'), KSHETRA, 'confirm', deps);
+    expect(commit).toHaveBeenCalledWith(
+      expect.objectContaining({ doc: { content: '# CSV\n\nBODY' } }),
+    );
+  });
+
+  it('a proposal with no doc body commits with input.doc undefined', async () => {
+    const commit = vi.fn(okCommit);
+    const deps: TurnDeps = { capture: vi.fn(), commit, save: () => {}, now: () => NOW };
+    await runInterviewTurn(pendingState(), KSHETRA, 'confirm', deps);
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ doc: undefined }));
+  });
+
+  it('a partial-failure commit KEEPS pending and records the in-flight commit marker', async () => {
+    const commit = vi.fn(() => partialCommit('myapp-sess'));
+    const deps: TurnDeps = { capture: vi.fn(), commit, save: vi.fn(), now: () => NOW };
+    const res = await runInterviewTurn(pendingStateWithDoc(), KSHETRA, 'confirm', deps);
+
+    expect(res.committed?.ok).toBe(false);
+    expect(res.state.pending).not.toBeNull();                  // still confirmable
+    expect(res.state.commit).toEqual({ sessionBeadId: 'myapp-sess' });
+    expect(res.reply).toMatch(/did not fully complete/i);
+  });
+
+  it('a re-confirm after a partial failure resumes against the SAME session bead', async () => {
+    const commit = vi
+      .fn<(input: import('./commit').CommitInput) => Promise<CommitReport>>()
+      .mockImplementationOnce(() => partialCommit('myapp-sess'))
+      .mockImplementationOnce(okCommit);
+    const deps: TurnDeps = { capture: vi.fn(), commit, save: vi.fn(), now: () => NOW };
+
+    const first = await runInterviewTurn(pendingStateWithDoc(), KSHETRA, 'confirm', deps);
+    const second = await runInterviewTurn(first.state, KSHETRA, 'confirm', deps);
+
+    // Second commit carried the resume handle for the same bead.
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ resume: { sessionBeadId: 'myapp-sess' } }),
+    );
+    // On success the marker and pending are cleared.
+    expect(second.committed?.ok).toBe(true);
+    expect(second.state.commit).toBeNull();
+    expect(second.state.pending).toBeNull();
+  });
+
+  it('a full-success commit clears pending and never sets a commit marker', async () => {
+    const deps: TurnDeps = { capture: vi.fn(), commit: vi.fn(okCommit), save: () => {}, now: () => NOW };
+    const res = await runInterviewTurn(pendingStateWithDoc(), KSHETRA, 'confirm', deps);
+    expect(res.state.pending).toBeNull();
+    expect(res.state.commit).toBeNull();
+  });
+
+  // The whole wire, end to end: a model turn emits {proposal, doc} → distilled
+  // into a pending proposal → a confirm routes through the REAL commit executor →
+  // the design doc lands on disk under the guarded design dir (server-authors).
+  it('a model-emitted doc reaches disk through the real commit executor on confirm', async () => {
+    const REPO = mkdtempSync(join(tmpdir(), 'suthradhara-turnloop-e2e-'));
+    const kshetra = { ...KSHETRA, repo: { path: REPO }, beads: { path: `${REPO}-beads` } } as KshetraConfig;
+    try {
+      // Fake bd + session bead so only the doc write touches the real filesystem.
+      const stored = new Map<string, SessionBeadRecord>();
+      const sessionBead: NonNullable<CommitDeps['sessionBead']> = {
+        create(plan: SessionPlan) {
+          const record = newSessionBeadRecord(plan);
+          stored.set('s', record);
+          return Promise.resolve({ id: 's', record });
+        },
+        journal(id, r) { stored.set(id, r); return Promise.resolve(); },
+        load(id) { return Promise.resolve(stored.get(id) ?? null); },
+      };
+      let n = 0;
+      const bd = (args: string[]) => Promise.resolve(args[0] === 'create' ? `myapp-${++n}` : '');
+
+      const deps: TurnDeps = {
+        capture: vi.fn(),
+        commit: makeCommitFn({ bd, sessionBead }),
+        save: () => {},
+        now: () => NOW,
+      };
+
+      // Distill a model turn that presents a proposal WITH a doc body.
+      const decomposition: Decomposition = {
+        epic: { ref: 'e', title: 'CSV import', type: 'epic', priority: 2 },
+        children: [{ ref: 'c1', title: 'parser', type: 'task', priority: 2, acceptanceCriteria: 'parses CSV' }],
+        deps: [],
+      };
+      const { state } = applyDelta(
+        newSessionState(sid, 'myapp', NOW),
+        { proposal: decomposition, doc: '# CSV import\n\nThe vetted design.' },
+        NOW,
+      );
+
+      const res = await runInterviewTurn(state, kshetra, 'confirm', { ...deps });
+
+      expect(res.committed?.ok).toBe(true);
+      expect(res.committed?.docRelPath).toBe('.shreni/design/csv-import.md');
+      const abs = join(resolveDesignDir(kshetra), 'csv-import.md');
+      expect(existsSync(abs)).toBe(true);
+      expect(readFileSync(abs, 'utf8')).toContain('The vetted design.');
+    } finally {
+      rmSync(REPO, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resumeInterruptedCommit (§7, Q2)', () => {
+  const withInflight = (): SessionState => ({
+    ...pendingStateWithDoc(),
+    commit: { sessionBeadId: 'myapp-sess' },
+  });
+
+  it('is a no-op (null) when there is no in-flight commit', async () => {
+    const commit = vi.fn(okCommit);
+    const deps: TurnDeps = { capture: vi.fn(), commit, save: vi.fn(), now: () => NOW };
+    // pending but no commit marker → nothing to resume.
+    expect(await resumeInterruptedCommit(pendingStateWithDoc(), KSHETRA, deps)).toBeNull();
+    // commit marker but no pending → nothing to resume either.
+    const noPending: SessionState = { ...newSessionState(sid, 'myapp', NOW), commit: { sessionBeadId: 'x' } };
+    expect(await resumeInterruptedCommit(noPending, KSHETRA, deps)).toBeNull();
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('reconciles against the marked bead and clears state on success', async () => {
+    const commit = vi.fn(okCommit);
+    const save = vi.fn();
+    const deps: TurnDeps = { capture: vi.fn(), commit, save, now: () => NOW };
+
+    const res = await resumeInterruptedCommit(withInflight(), KSHETRA, deps);
+
+    expect(commit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resume: { sessionBeadId: 'myapp-sess' },
+        doc: { content: '# CSV import\n\nThe design.' },
+      }),
+    );
+    expect(res?.committed?.ok).toBe(true);
+    expect(res?.state.commit).toBeNull();
+    expect(res?.state.pending).toBeNull();
+    expect(save).toHaveBeenCalledWith(res?.state);
+  });
+
+  it('keeps the marker when the resume also fails partway', async () => {
+    const commit = vi.fn(() => partialCommit('myapp-sess'));
+    const deps: TurnDeps = { capture: vi.fn(), commit, save: vi.fn(), now: () => NOW };
+    const res = await resumeInterruptedCommit(withInflight(), KSHETRA, deps);
+    expect(res?.state.commit).toEqual({ sessionBeadId: 'myapp-sess' });
+    expect(res?.state.pending).not.toBeNull();
   });
 });
 

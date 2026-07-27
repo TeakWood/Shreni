@@ -85,8 +85,25 @@ export interface PendingProposal {
   // The full decomposition object (decomposition.ts); kept structured, not
   // rendered text, so an "edit" can amend it in place.
   decomposition: import('./decomposition').Decomposition;
+  // The design-doc body the model emitted alongside the proposal (§8) — the full
+  // doc content the server writes on confirm (writeDesignDoc). Held here, not on
+  // disk, until the commit: the proposal and its design note are confirmed as one
+  // unit (§7). Absent when the model proposed a decomposition with no doc body
+  // (then no doc is written). Optional/additive — old pending states load fine.
+  docContent?: string;
   // When it was presented to the operator (ISO-8601), for the audit trail.
   presentedAt: string;
+}
+
+// An in-flight commit's session bead id, recorded once a confirmed commit has
+// created (or resumed) its session bead but has NOT yet fully landed (§7, Q2).
+// Its presence means "a commit is mid-flight against this bead" — a re-confirm or
+// a resume reconciles against the SAME bead and files only the remainder rather
+// than creating a second one. Cleared on full success (and on cancel). The
+// proposal stays `pending` while this is set, so the commit can be re-driven.
+// Optional/additive — old sessions load with `commit` absent.
+export interface CommitInFlight {
+  sessionBeadId: string;
 }
 
 // Evolve-in-place context (ARD §8.1, G9): set when the interview is a CHANGE to
@@ -142,6 +159,11 @@ export interface SessionState {
   // Absent for a brand-new feature (the §8 default: create a fresh doc). See
   // EvolveState.
   evolving?: EvolveState | null;
+  // Set while a confirmed commit is mid-flight (its session bead created but the
+  // bundle not fully landed). A resume/re-confirm reconciles against this bead
+  // rather than starting over (§7, Q2). Absent whenever no commit is in flight.
+  // See CommitInFlight.
+  commit?: CommitInFlight | null;
 }
 
 export function newSessionState(

@@ -139,27 +139,28 @@ export async function runInterviewTurn(
   if (hasPendingProposal(next)) {
     const frame = parseConfirmFrame(message);
     if (frame !== null) {
-      // Grab the decomposition before applyConfirmFrame clears `pending` — the
-      // commit needs it for the session-bead spine.
-      const decomposition = next.pending?.decomposition;
       const outcome = applyConfirmFrame(next, frame);
 
-      if (outcome.outcome === 'confirmed' && decomposition) {
-        const report = await deps.commit({ kshetra, decomposition, evolving: next.evolving });
-        const reply = renderCommitReply(report);
-        next = recordAssistantTurn(outcome.state, reply, now);
+      if (outcome.outcome === 'confirmed') {
+        // Commit `next` (which still holds `pending` + its doc body) — NOT
+        // outcome.state, whose pending was cleared by applyConfirmFrame. On full
+        // success executeCommit clears pending; on partial failure it keeps
+        // pending and records the session bead so a re-confirm resumes (§7, Q2).
+        const done = await executeCommit(next, kshetra, deps, now);
+        next = recordAssistantTurn(done.state, done.reply, now);
         deps.save(next);
-        return { state: next, reply, committed: report, warnings: [] };
+        return { state: next, reply: done.reply, committed: done.report, warnings: [] };
       }
       if (outcome.outcome === 'reopened') {
         const reply = 'Proposal set aside — the interview is reopened so we can revise it. Tell me what to change.';
-        next = recordAssistantTurn(outcome.state, reply, now);
+        // Drop any in-flight commit marker: a revised proposal is a new bundle.
+        next = recordAssistantTurn({ ...outcome.state, commit: null }, reply, now);
         deps.save(next);
         return { state: next, reply, warnings: [] };
       }
       if (outcome.outcome === 'discarded') {
         const reply = 'Proposal discarded. Nothing was filed. We can start a new decomposition when you are ready.';
-        next = recordAssistantTurn(outcome.state, reply, now);
+        next = recordAssistantTurn({ ...outcome.state, commit: null }, reply, now);
         deps.save(next);
         return { state: next, reply, warnings: [] };
       }
@@ -288,6 +289,60 @@ async function runLocate(
     state: nextState,
     note: `(No existing design doc found for "${feature}" — I will create a new one.)`,
   };
+}
+
+// Run the confirmed commit for a state whose `pending` proposal is set, and fold
+// the outcome back into that state. Shared by the confirm branch and the
+// resume-on-startup path so both handle success/partial-failure identically:
+//   • full success → clear `pending` and the in-flight `commit` marker (the
+//     bundle is filed, nothing left to resume);
+//   • partial failure → KEEP `pending` (so a re-confirm re-drives it) and record
+//     the session bead id in `commit` so the retry reconciles against the SAME
+//     bead (§7, Q2) instead of filing a second bundle.
+// `state.commit` (when already set from a prior partial attempt) is passed as the
+// resume handle, so the very first partial failure and every retry share one bead.
+async function executeCommit(
+  state: SessionState,
+  kshetra: KshetraConfig,
+  deps: TurnDeps,
+  now: string,
+): Promise<{ state: SessionState; reply: string; report: CommitReport }> {
+  const pending = state.pending!;
+  const doc = pending.docContent ? { content: pending.docContent } : undefined;
+  const report = await deps.commit({
+    kshetra,
+    decomposition: pending.decomposition,
+    doc,
+    evolving: state.evolving,
+    resume: state.commit ?? undefined,
+  });
+  const reply = renderCommitReply(report);
+  const nextState: SessionState = report.ok
+    ? { ...state, pending: null, commit: null }
+    : {
+        ...state,
+        commit: report.sessionBeadId ? { sessionBeadId: report.sessionBeadId } : state.commit,
+      };
+  return { state: nextState, reply, report };
+}
+
+// Resume an interrupted commit on session startup (§7, Q2). A prior turn confirmed
+// a bundle whose commit only partially landed; the session persisted `pending` +
+// an in-flight `commit` marker. Reconcile against the SAME session bead and file
+// the remainder WITHOUT waiting for the operator to re-confirm. Returns null when
+// there is nothing to resume (no in-flight commit), so the runner can call it
+// unconditionally on load. Records an assistant turn describing the outcome.
+export async function resumeInterruptedCommit(
+  state: SessionState,
+  kshetra: KshetraConfig,
+  deps: TurnDeps,
+): Promise<TurnResult | null> {
+  if (!state.commit || !state.pending) return null;
+  const now = deps.now ? deps.now() : new Date().toISOString();
+  const done = await executeCommit(state, kshetra, deps, now);
+  const next = recordAssistantTurn(done.state, done.reply, now);
+  deps.save(next);
+  return { state: next, reply: done.reply, committed: done.report, warnings: [] };
 }
 
 function renderCommitReply(report: CommitReport): string {
