@@ -5,8 +5,9 @@ front door of a Kshetra. It is an interactive, human-in-the-loop agent that
 **interviews** the operator to turn a raw feature idea into a correctly-scoped,
 dependency-ordered set of ready beads — plus a per-feature design doc — that
 Sthapathi's `Silpi ↔ Viharapala` loop then executes. In the Shilpa/Vastu tradition
-the *Suthradhara* is the master builder who lays out the plan before the **Silpis**
-carve the stone; the etymology is exact.
+the *Suthradhara* is the draughtsman who holds the measuring cord and lays out the
+plan before the **Silpis** carve the stone — subordinate to the Sthapati (the master
+builder), who directs the construction; the etymology is exact.
 
 Suthradhara sits **entirely outside the Sthapathi poll loop**. It is a *producer*
 of beads and design docs; Sthapathi is the *consumer* that picks them up on its next

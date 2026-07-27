@@ -140,8 +140,8 @@ will see in logs, config, and the dashboard:
 
 | Component | Plain-English role |
 |---|---|
-| **Suthradhara** (master builder) | Requirements & design intake agent. Interviews you to turn a feature idea into a dependency-ordered epic of ready beads plus a per-feature design doc. Runs *outside* the poll loop as a producer — it files work for Sthapathi to pick up; it never claims or closes. |
-| **Sthapathi** (architect) | Orchestrator. Polls `bd` for tasks, dispatches agents, drives the review loop, and owns the task lifecycle and git workflow. |
+| **Suthradhara** (draughtsman / layout-planner) | Requirements & design intake agent. Interviews you to turn a feature idea into a dependency-ordered epic of ready beads plus a per-feature design doc. Runs *outside* the poll loop as a producer — it files work for Sthapathi to pick up; it never claims or closes. |
+| **Sthapathi** (master builder / chief architect) | Orchestrator. Polls `bd` for tasks, dispatches agents, drives the review loop, and owns the task lifecycle and git workflow. |
 | **Silpi** (craftsman) | Coding agent. Writes implementation code and unit tests, runs lint and tests, submits for review. |
 | **Viharapala** (guardian) | Review agent. Judges Silpi's output against acceptance criteria, quality, and coverage; returns `APPROVE` or `REJECT` with structured feedback. |
 | **Parikshaka** (examiner) | Test agent. Runs asynchronously after each merge; backfills tests and surfaces coverage gaps. |
