@@ -5,6 +5,7 @@ import { join } from 'path';
 import { newSessionState, type SessionState } from './state';
 import { presentProposal } from './confirm';
 import { runInterviewTurn, resumeInterruptedCommit, renderRecentWindow, type TurnDeps } from './turnloop';
+import type { CaptureResult } from './capture';
 import { applyDelta, DELTA_FENCE } from './distill';
 import { makeCommitFn, type CommitDeps } from './commit';
 import { newSessionBeadRecord, type SessionPlan, type SessionBeadRecord } from './sessionbead';
@@ -37,13 +38,14 @@ function withDelta(reply: string, json: string): string {
 }
 
 // A capture fake that records every SpawnSpec it received and replies with a
-// scripted sequence (one canned raw output per turn).
+// scripted sequence (one canned raw output per turn). Wraps each canned text in
+// the CaptureResult shape the turn loop now consumes; no denials by default.
 function scriptedCapture(replies: string[]) {
   const specs: SpawnSpec[] = [];
   let i = 0;
-  const capture = (spec: SpawnSpec): Promise<string> => {
+  const capture = (spec: SpawnSpec): Promise<CaptureResult> => {
     specs.push(spec);
-    return Promise.resolve(replies[i++] ?? '{}');
+    return Promise.resolve({ text: replies[i++] ?? '{}', deniedTools: [] });
   };
   return { capture, specs };
 }
