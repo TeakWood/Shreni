@@ -170,8 +170,11 @@ export async function runInterviewTurn(
 
   // ── ordinary interview turn ─────────────────────────────────────────────────
   const spec = buildInterviewSpawn(next, kshetra, userPrompt);
-  const raw = await deps.capture(spec);
-  const { reply, delta } = parseTurnOutput(raw);
+  const captured = await deps.capture(spec);
+  // `captured.deniedTools` (allowlist-refused tool calls this turn) is surfaced by
+  // capture.ts for the interactive grant-on-demand prompt; wiring it into a
+  // [y / always / N] re-spawn is pmb.6. For now the ordinary turn uses the text.
+  const { reply, delta } = parseTurnOutput(captured.text);
 
   let warnings: string[] = [];
   if (delta) {
