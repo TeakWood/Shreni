@@ -126,26 +126,46 @@ all agents." Shreni's two kinds of agent sit on opposite sides of the grant line
 |---|---|---|
 | Human present        | Yes — a REPL, a keystroke per grant                 | **No** — headless 30s poll loop                 |
 | Grant path           | **Interactive grant-on-demand** `[y/always/N]`      | **Static config only** — a deliberate edit      |
-| Default state        | Nothing granted; discover per session               | **Off by default**                              |
-| Read vs. write       | Read-on-demand; write via confirm gate              | **Read-only** unless explicit write opt-in      |
-| Who bounds the reach | The human, live, per tool                           | The config author, once, ahead of time          |
+| Default state        | Nothing granted; discover per session               | **Off by default** — `--strict-mcp-config`, no host bleed |
+| Permission mode      | `--permission-mode default` — allow-list gates      | `--permission-mode bypassPermissions`           |
+| Granularity          | Per **tool** — allow-list is the callability gate   | Per **server** — connecting grants its full surface |
+| Who bounds the reach | The human, live, per tool                           | The config author, once, per server             |
 
 The convenience path is safe **only** because a human keystroke gates every grant and
 the confirm gate governs every write. Remove the human — as the poll loop does — and
 "grant the tool the model asked for" becomes "let an unattended agent reach an external
 system on its own say-so." So the interactive path **cannot** exist for executors:
 there is no `[y/always/N]` to answer. Executors get MCP only through a **deliberate
-static config edit, off by default, read-only unless an author explicitly opts a
-specific write tool in** — a human decided ahead of time exactly which tools that
-headless agent may call.
+static config edit**, and the boundary that carries the guarantee is *connection*, not a
+tool allow-list.
 
-**The mechanism enforces this, not a policy doc.** No code path offers an executor an
-interactive grant; an executor's allowlist compiles purely from static config with no
-session-grant merge. An executor *cannot* drift into grant-on-demand because the
-machinery to do so is wired only into Suthradhara's REPL turn loop. The split is
-structural — the same supervised/autonomous line that already keeps Suthradhara filing
-work interactively and executors transitioning it headlessly, extended to a new
-capability.
+**Why connection, not the allow-list, is the executor boundary.** Executors run under
+`--permission-mode bypassPermissions` (a coding agent runs arbitrary `bash`/edits that
+can't be pre-enumerated), and in bypass mode `--allowedTools` is a **no-op** — allow
+rules do nothing when everything is already approved. So an executor cannot be bounded to
+a *subset* of a connected server's tools the way Suthradhara is; connecting a server
+makes **every** tool on it callable, reads and writes alike. The lever that *does* work
+is which servers connect at all:
+
+- **`--strict-mcp-config` always.** Every executor spawn passes it, so ambient/host MCP
+  (a repo `.mcp.json`, `~/.claude` `enabledMcpjsonServers`, managed settings) is ignored
+  entirely. An executor connects **only** what Shreni passes from `kshetra.yaml`. With no
+  grant that is nothing — off by default, independent of whatever MCP the host happens to
+  have configured.
+- **Per-server grant.** `agents.<role>.mcp` lists the servers this role may use; each is
+  connected with `--mcp-config` and its full tool surface becomes available. The tool
+  array is retained for parity with Suthradhara's schema, but it does **not** narrow an
+  executor's reach — grant a server to an executor only if this autonomous agent may use
+  *all* of its tools. Point it at a read-scoped token/server when you want it kept to
+  reads; the operator owns that choice, made once, ahead of time.
+
+**The mechanism enforces the split, not a policy doc.** No code path offers an executor an
+interactive grant; an executor's connection is resolved purely from static config with no
+session-grant merge (the grant-on-demand loop is wired only into Suthradhara's REPL). An
+executor *cannot* drift into grant-on-demand, and `--strict-mcp-config` means it cannot
+pick up a server the operator didn't put in *its* config. The split is structural — the
+same supervised/autonomous line that keeps Suthradhara filing work interactively and
+executors transitioning it headlessly, extended to a new capability.
 
 ---
 

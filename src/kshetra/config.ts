@@ -105,6 +105,18 @@ const McpGrantsSchema = z.record(z.string(), z.array(z.string()));
 // four claude-driven agents — the interactive Suthradhara and the headless
 // executors (Silpi/Viharapala/Parikshaka). Sthapathi is the harness itself and
 // runs no tool-bearing session, so it takes no grants.
+//
+// The grant is read TWO ways depending on the role's permission mode (pmb.8):
+//   • Suthradhara runs --permission-mode default, so `mcp` is a per-TOOL
+//     callability whitelist — only the listed tools are callable; an ungranted
+//     tool on a connected server stays visible-but-denied.
+//   • Executors run --permission-mode bypassPermissions, where an allow-list is a
+//     no-op. There the grant is a per-SERVER decision: listing a server connects
+//     it (resolveExecutorMcp) and EVERY tool on it becomes callable, reads and
+//     writes alike. The tool array is retained for parity/intent but does NOT
+//     bound an executor's reach — grant a server to an executor only if this
+//     autonomous agent may use all of its tools. Off by default (no block → no
+//     MCP), static-config only (no interactive/session-grant path exists).
 const AgentRoleConfigSchema = z.object({
   mcp: McpGrantsSchema.optional(),
 });

@@ -40,8 +40,27 @@ export const claudeAdapter: ProviderAdapter = {
       '--append-system-prompt', opts.systemPrompt,
       '--no-session-persistence',
       '--setting-sources', 'project',
-      '--model', opts.model,
     ];
+
+    // Executor MCP surface (pmb.8). Executors run under bypassPermissions, where
+    // --allowedTools is a no-op (allow rules do nothing in bypass) — so the only
+    // way to bound their MCP reach is to bound which servers CONNECT. Two moves:
+    //   1. --strict-mcp-config ALWAYS — ignore every ambient/host MCP source
+    //      (project .mcp.json, ~/.claude enabledMcpjsonServers, managed settings)
+    //      so an autonomous agent connects ONLY what Shreni passes here. With no
+    //      grant this leaves zero MCP: off by default, independent of host state.
+    //   2. --mcp-config per statically-granted server (resolveExecutorMcp). Under
+    //      bypass, every tool on a connected server is callable — connecting a
+    //      server grants its full surface, reads and writes alike (the operator
+    //      owns that; grant only servers/tokens trusted for full autonomous use).
+    // --mcp-config is variadic (<configs...>); --strict-mcp-config (a boolean) and
+    // then --model terminate it, so no config path is swallowed and the prompt
+    // still lands as the sole trailing positional below.
+    for (const configPath of opts.mcp?.configPaths ?? []) {
+      args.push('--mcp-config', configPath);
+    }
+    args.push('--strict-mcp-config');
+    args.push('--model', opts.model);
 
     // Hard tool block (e.g. read-only Parikshaka): bypassPermissions grants every
     // tool, so a deny list is the only way to keep the agent from writing files.
@@ -61,7 +80,9 @@ export const claudeAdapter: ProviderAdapter = {
     return {
       bin: resolveBin('SHRENI_CLAUDE_BIN', 'claude'),
       args,
-      env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+      // Inject the resolved secretEnv values so the connected MCP servers can
+      // authenticate — the token never rides the yaml, only the host env (pmb.8).
+      env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', ...(opts.mcp?.secretEnv ?? {}) },
     };
   },
 

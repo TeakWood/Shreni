@@ -7,6 +7,7 @@ import {
   resolveCoverageCommand,
 } from '../kshetra/toolchain.js';
 import { ParseError } from '../sthapathi/errors.js';
+import { resolveExecutorMcp } from '../kshetra/mcp-connect.js';
 import { runAgent } from './runner.js';
 
 const SILPI_OUTPUT_SCHEMA: Record<string, unknown> = {
@@ -143,6 +144,7 @@ export async function runSilpi(
     beadId: context.task.id,
     model: context.kshetra.agents.model,
     jsonSchema: SILPI_OUTPUT_SCHEMA,
+    mcp: resolveExecutorMcp(context.kshetra, 'silpi'),
     signal,
   });
 

@@ -1,7 +1,7 @@
-import { resolve } from 'path';
 import type { KshetraConfig } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
+import { resolveMcpConnection, McpConnectionError } from '../kshetra/mcp-connect';
 import { readOnlyAllowlist, filingAllowlist } from './allowlist';
 import { mergeGrants } from './grant';
 import { buildSystemPrompt } from './prompt';
@@ -68,25 +68,25 @@ export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
     mergeGrants(kshetra.agents.suthradhara?.mcp, opts.sessionGrants),
   );
 
-  // Ambient MCP connect + secret injection. --mcp-config points claude at each
-  // server's def file (repo-relative in yaml → absolute against repo.path so it
-  // does not depend on the inherited cwd); secretEnv resolves the NAMED host env
-  // var to its value and carries it into the child env — never the yaml. A
-  // secretEnv naming an unset var fails loud here, before the session starts.
-  const mcpConfigArgs: string[] = [];
+  // Ambient MCP connect + secret injection (shared resolver). Suthradhara connects
+  // EVERY defined server — callability is separately gated by --allowedTools (it
+  // runs --permission-mode default, where an allow-list IS the boundary), so
+  // connecting all defined servers is safe; an ungranted tool stays
+  // visible-but-denied. --mcp-config points claude at each server's def file
+  // (repo-relative → absolute against repo.path); secretEnv resolves the NAMED
+  // host env var and carries it into the child env — never the yaml. A secretEnv
+  // naming an unset var fails loud here, before the session starts. resolveMcp
+  // throws McpConnectionError; rewrap it so the runner still sees the
+  // Suthradhara-specific error type.
+  let mcpConfigArgs: string[];
   const secretEnv: Record<string, string> = {};
-  for (const [name, server] of Object.entries(kshetra.mcp?.servers ?? {})) {
-    mcpConfigArgs.push('--mcp-config', resolve(kshetra.repo.path, server.config));
-    if (server.secretEnv) {
-      const value = process.env[server.secretEnv];
-      if (!value) {
-        throw new SuthradharaSpawnError(
-          `MCP server "${name}" requires env var ${server.secretEnv}, but it is unset — ` +
-            `export it before starting the session (the token is never stored in kshetra.yaml).`,
-        );
-      }
-      secretEnv[server.secretEnv] = value;
-    }
+  try {
+    const conn = resolveMcpConnection(kshetra, Object.keys(kshetra.mcp?.servers ?? {}));
+    mcpConfigArgs = conn.configPaths.flatMap(p => ['--mcp-config', p]);
+    Object.assign(secretEnv, conn.secretEnv);
+  } catch (err) {
+    if (err instanceof McpConnectionError) throw new SuthradharaSpawnError(err.message);
+    throw err;
   }
 
   const args = [

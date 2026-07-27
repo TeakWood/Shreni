@@ -14,6 +14,17 @@ export interface AgentRunnerOpts {
   // analysis agent). Hard-enforced by adapters with a deny list (claude); other
   // adapters fall back to the prompt-level boundary.
   disallowedTools?: string[];
+  // Static MCP connection for a headless executor (pmb.8), resolved from
+  // kshetra.agents.<role>.mcp by the role caller (resolveExecutorMcp). The claude
+  // adapter connects exactly these servers with --mcp-config and injects
+  // secretEnv; executors always spawn --strict-mcp-config, so ambient/host MCP
+  // never reaches an autonomous agent — their MCP surface is exactly this list.
+  // Absent when the role has no static grant (→ zero MCP; off by default). Phase-1
+  // is claude-only (ARD Q5); non-claude adapters ignore this field.
+  mcp?: {
+    configPaths: string[];
+    secretEnv: Record<string, string>;
+  };
   // Cancellation handle for in-process self-heal. When the
   // worker aborts a hung run, the dispatcher SIGKILLs the provider subprocess and
   // rejects with AgentAbortedError; the retry loop also stops honoring transient

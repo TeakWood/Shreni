@@ -1,6 +1,7 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task, ParikshakaOutput } from '../sthapathi/types.js';
 import { ParseError } from '../sthapathi/errors.js';
+import { resolveExecutorMcp } from '../kshetra/mcp-connect.js';
 import { runAgent } from './runner.js';
 
 export interface ParikshakaContext {
@@ -90,6 +91,7 @@ export async function runParikshaka(ctx: ParikshakaContext): Promise<ParikshakaO
     model: ctx.kshetra.agents.model,
     jsonSchema: PARIKSHAKA_OUTPUT_SCHEMA,
     disallowedTools: PARIKSHAKA_DISALLOWED_TOOLS,
+    mcp: resolveExecutorMcp(ctx.kshetra, 'parikshaka'),
   });
 
   if (!result.structuredOutput) {

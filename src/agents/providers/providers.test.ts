@@ -141,6 +141,48 @@ describe('claudeAdapter.buildSpawn', () => {
     expect(spec.args[promptIdx - 2]).toBe('--json-schema');
     expect(spec.args[promptIdx - 1]).toBe(JSON.stringify(BASE_OPTS.jsonSchema));
   });
+
+  // ── executor MCP (pmb.8) ──────────────────────────────────────────────────
+  it('always passes --strict-mcp-config so ambient/host MCP never reaches an executor', () => {
+    // Off by default: no grant → no --mcp-config, but the lockdown flag is still
+    // present, so a repo .mcp.json / host enabledMcpjsonServers cannot connect.
+    const spec = claudeAdapter.buildSpawn(BASE_OPTS);
+    expect(spec.args).toContain('--strict-mcp-config');
+    expect(spec.args).not.toContain('--mcp-config');
+    expect(spec.env).toEqual({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' });
+  });
+
+  it('connects exactly the granted server configs and injects the resolved secret', () => {
+    const spec = claudeAdapter.buildSpawn({
+      ...BASE_OPTS,
+      mcp: { configPaths: ['/repo/.shreni/mcp/jira.json'], secretEnv: { JIRA_TOKEN: 'tok' } },
+    });
+    const first = spec.args.indexOf('--mcp-config');
+    expect(first).toBeGreaterThan(-1);
+    expect(spec.args[first + 1]).toBe('/repo/.shreni/mcp/jira.json');
+    expect(spec.args).toContain('--strict-mcp-config');
+    expect(spec.env?.JIRA_TOKEN).toBe('tok');
+  });
+
+  it('terminates the variadic --mcp-config before --model (no config path is swallowed)', () => {
+    // --mcp-config is variadic (<configs...>); --strict-mcp-config (boolean) then
+    // --model must follow so a following flag/value is never parsed as a config.
+    const spec = claudeAdapter.buildSpawn({
+      ...BASE_OPTS,
+      mcp: { configPaths: ['/a.json', '/b.json'], secretEnv: {} },
+    });
+    const paths = spec.args.reduce<string[]>((acc, a, i) => {
+      if (spec.args[i - 1] === '--mcp-config') acc.push(a);
+      return acc;
+    }, []);
+    expect(paths).toEqual(['/a.json', '/b.json']);
+    // strict flag and the model selector both sit after the last config path.
+    const lastConfig = spec.args.lastIndexOf('/b.json');
+    expect(spec.args.indexOf('--strict-mcp-config')).toBeGreaterThan(lastConfig);
+    expect(spec.args.indexOf('--model')).toBeGreaterThan(lastConfig);
+    // and the prompt still lands as the sole trailing positional.
+    expect(spec.args[spec.args.length - 1]).toBe('USER');
+  });
 });
 
 describe('claudeAdapter parser', () => {
