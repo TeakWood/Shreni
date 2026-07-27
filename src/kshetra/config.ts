@@ -74,10 +74,53 @@ const ConventionsConfigSchema = z.object({
   reviewGuide: z.string().optional(),
 });
 
+// A single external MCP server DEFINED once at the Kshetra level (epic pmb —
+// "servers defined once, tools granted per role"). `config` is a repo-relative
+// path to an mcp-config file (the `.mcp.json` shape `claude --mcp-config`
+// consumes); `secretEnv` NAMES a host env var holding the server's token — the
+// value is NEVER inline in the checked-in yaml, so a kshetra.yaml carries no
+// secret literal. secretEnv resolves to a real value only at spawn time
+// (pmb.4); it is optional because a server needing no auth (a local stdio tool)
+// omits it.
+const McpServerSchema = z.object({
+  config: z.string(),
+  secretEnv: z.string().optional(),
+});
+
+const McpConfigSchema = z.object({
+  servers: z.record(z.string(), McpServerSchema).default({}),
+});
+
+// Per-role MCP grant: server name → the exact tool names GRANTED to that role
+// on that server. Each server name MUST be defined in `mcp.servers` (enforced
+// by the top-level superRefine — a grant referencing an undefined server is
+// rejected). This is the callability whitelist source (pmb.5 compiles it to
+// `mcp__<server>__<tool>` ids for `--allowedTools`); connection is a separate
+// concern (pmb.4). Empty tool array is allowed — it names the server without
+// granting any tool yet.
+const McpGrantsSchema = z.record(z.string(), z.array(z.string()));
+
+// Per-role agent sub-config. Today it carries only MCP grants; it introduces
+// the per-role structure into the previously-flat agents block. Roles are the
+// four claude-driven agents — the interactive Suthradhara and the headless
+// executors (Silpi/Viharapala/Parikshaka). Sthapathi is the harness itself and
+// runs no tool-bearing session, so it takes no grants.
+const AgentRoleConfigSchema = z.object({
+  mcp: McpGrantsSchema.optional(),
+});
+
+// The role keys that may carry a per-role sub-config. Iterated by the
+// superRefine so a new role is validated automatically once added here.
+const AGENT_ROLES = ['suthradhara', 'silpi', 'viharapala', 'parikshaka'] as const;
+
 const AgentsConfigSchema = z.object({
   provider: z.enum(['anthropic', 'gemini', 'openai']).default('anthropic'),
   model: z.string().default(DEFAULT_AGENT_MODEL),
   maxRoundsPerBead: z.number().int().min(1).default(3),
+  suthradhara: AgentRoleConfigSchema.optional(),
+  silpi: AgentRoleConfigSchema.optional(),
+  viharapala: AgentRoleConfigSchema.optional(),
+  parikshaka: AgentRoleConfigSchema.optional(),
 });
 
 // RESERVED — neither field is read at runtime yet. p0AutoAssign (auto-assign P0
@@ -153,11 +196,34 @@ export const KshetraConfigSchema = z.object({
   priority: PriorityConfigSchema.default({ p0AutoAssign: true, maxConcurrentBeads: 1 }),
   gates: GatesConfigSchema.default(GATES_DEFAULTS),
   watchdog: WatchdogConfigSchema.optional(),
+  // External MCP servers defined once for the Kshetra (epic pmb). Optional —
+  // a Kshetra with no external grounding omits the block entirely. Per-role
+  // grants under agents.<role>.mcp reference server names defined here; the
+  // superRefine below rejects a grant naming an undefined server.
+  mcp: McpConfigSchema.optional(),
+}).superRefine((config, ctx) => {
+  const definedServers = new Set(Object.keys(config.mcp?.servers ?? {}));
+  for (const role of AGENT_ROLES) {
+    const grants = config.agents[role]?.mcp;
+    if (!grants) continue;
+    for (const server of Object.keys(grants)) {
+      if (!definedServers.has(server)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['agents', role, 'mcp', server],
+          message: `grant references undefined MCP server "${server}" — define it under mcp.servers`,
+        });
+      }
+    }
+  }
 });
 
 export type KshetraConfig = z.infer<typeof KshetraConfigSchema>;
 export type StackConfig = z.infer<typeof StackConfigSchema>;
 export type GatesConfig = z.infer<typeof GatesConfigSchema>;
+export type McpServer = z.infer<typeof McpServerSchema>;
+export type McpConfig = z.infer<typeof McpConfigSchema>;
+export type AgentRole = (typeof AGENT_ROLES)[number];
 
 export class KshetraConfigError extends Error {
   constructor(
