@@ -330,9 +330,11 @@ requirement off to Suthradhara**, which opens a design session **seeded** with t
 bridge, and Vichara files nothing on handoff — Suthradhara's own confirm gate governs any
 resulting write.
 
-This handoff (bead `xa0.7`) is **designed but not yet built**: it depends on the Vichara Write
-Interface, which is currently deferred. It is documented here for completeness; the seeded-ingest
-path is not present in `src/suthradhara/` today.
+This handoff is **designed but not yet built**, and it is a **Vichara-side** feature — Suthradhara
+needs nothing from Vichara to function. It is therefore tracked under the **Vichara Write Interface**
+epic (`Shreni-beads-9sk`, deferred), not the Suthradhara epic, and lands when Vichara's write surface
+does. It is documented here for completeness; the seeded-ingest path is not present in
+`src/suthradhara/` today.
 
 ---
 
