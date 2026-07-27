@@ -34,7 +34,11 @@ const DESIGN_RULES = `Rules you must follow:
 - When the operator asks "are we ready?", show the current rubric state (below) and name exactly
   what is still missing.
 - An item the operator wants to defer is recorded as an open question (deferred (Qn)) in the
-  proposal, NOT treated as a blocker — deferral lets the interview converge without false precision.`;
+  proposal, NOT treated as a blocker — deferral lets the interview converge without false precision.
+- In discovery, detect whether this is a NEW feature or a CHANGE to an existing one. If it is a
+  change, emit \`locateFeature\` (below) with the feature's name so the server finds its existing
+  design doc; you then evolve that doc IN PLACE — never write a parallel doc for a feature that
+  already has one.`;
 
 function renderStages(current: SessionState['stage']): string {
   const currentIdx = stageIndex(current);
@@ -53,6 +57,47 @@ function renderRequirements(state: SessionState): string {
   }
   const bullets = state.requirements.map(r => `  - ${r}`).join('\n');
   return `Requirements captured so far:\n${bullets}`;
+}
+
+// The evolve-in-place block (ARD §8.1, G9). Rendered only when the session is
+// evolving an existing feature's doc: it loads the existing design INTO the
+// interview so clarification is framed as a change to it, and states the hard
+// rule that the SAME file is rewritten (a diff), never a parallel doc. When >1
+// doc matched, it instead surfaces the pending "which to evolve?" choice so the
+// model does not assume a target. Empty string for a plain new-feature interview.
+function renderEvolveContext(state: SessionState): string {
+  const ev = state.evolving;
+  if (!ev) return '';
+
+  if (ev.candidates && ev.candidates.length > 0 && !ev.targetRelPath) {
+    return [
+      'EVOLVING AN EXISTING FEATURE — DOC CHOICE PENDING (§8.1):',
+      'More than one existing design doc could cover this feature. The operator is being asked',
+      'which one to evolve. Do NOT propose a decomposition or a doc target until they choose:',
+      ...ev.candidates.map((c, i) => `  ${i + 1}. ${c}`),
+      'When they pick one, you will evolve THAT doc in place — never create a parallel doc.',
+    ].join('\n');
+  }
+
+  if (ev.targetRelPath) {
+    const body = (ev.targetContent ?? '').trim();
+    return [
+      `EVOLVING AN EXISTING FEATURE — UPDATE IN PLACE (§8.1, G9):`,
+      `This is a CHANGE to an existing feature. Its design doc already exists at:`,
+      `  ${ev.targetRelPath}`,
+      'Treat that doc as the source of truth. Frame every question and the proposal as a change',
+      'to it: what is added, what is modified, what is now OBSOLETE (strike or revise superseded',
+      'parts — never leave them contradicting the new design). The commit will rewrite the SAME',
+      'file as a diff and file new/changed beads that link this SAME doc path — do NOT create a',
+      'second doc. The current contents are below; reconcile against them, do not restate them.',
+      '',
+      '--- BEGIN EXISTING DESIGN DOC ---',
+      body === '' ? '(the existing doc is empty)' : body,
+      '--- END EXISTING DESIGN DOC ---',
+    ].join('\n');
+  }
+
+  return '';
 }
 
 // The decomposition proposal shape (§6.1, §7 step 1) the model renders once the
@@ -92,6 +137,7 @@ Schema (every field optional):
   "checkRubric": ["intent", "successCriteria"],
   "deferRubric": [{ "key": "nonFunctional", "question": "what perf budget applies?" }],
   "openQuestions": ["a free-standing unknown not tied to a rubric item"],
+  "locateFeature": "SSO login",
   "advanceStage": "clarify",
   "proposal": { "epic": { "ref": "...", "title": "...", "type": "epic", "priority": 2 },
                 "children": [ { "ref": "...", "title": "...", "type": "task", "priority": 2,
@@ -100,7 +146,9 @@ Schema (every field optional):
 }
 \`\`\`
 Rules: rubric keys are exactly intent | usersStories | successCriteria | scopeBoundary |
-nonFunctional | dependenciesUnknowns. \`advanceStage\` is refused if it jumps past the readiness
+nonFunctional | dependenciesUnknowns. Emit \`locateFeature\` ONCE, in discovery, when you judge
+this is a change to an EXISTING feature — the server locates its design doc and, if found, loads it
+so you evolve it in place. \`advanceStage\` is refused if it jumps past the readiness
 rubric — advance only when the stage's exit condition is met. Include \`proposal\` ONLY on the turn
 you present the DECOMPOSITION PROPOSAL (decompose/design stage, rubric satisfied); the server holds
 it for the operator's confirm and files nothing until then.`;
@@ -126,6 +174,7 @@ export function buildSystemPrompt(
     renderRubric(state),
     '',
     renderRequirements(state),
+    ...(renderEvolveContext(state) ? ['', renderEvolveContext(state)] : []),
     '',
     DESIGN_RULES,
     '',

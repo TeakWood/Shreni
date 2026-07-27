@@ -191,6 +191,114 @@ describe('runInterviewTurn — confirm gate routing', () => {
   });
 });
 
+function locatedDoc(relPath: string, content = 'body', score = 9): import('./evolve').LocatedDoc {
+  return { relPath, content, matchedVia: ['name'], linkedBeadIds: [], score };
+}
+
+describe('runInterviewTurn — evolve locate (§8.1)', () => {
+  it('a single located doc folds an evolve target into state and notes it in the reply', async () => {
+    const { capture } = scriptedCapture([
+      withDelta('This changes SSO login.', '{"locateFeature":"SSO login"}'),
+    ]);
+    const locate = vi.fn(async () => [locatedDoc('.shreni/design/sso-login.md', '# SSO\nSAML')]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locate };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'add MFA to SSO', deps);
+
+    expect(locate).toHaveBeenCalledWith('SSO login');
+    expect(res.state.evolving?.targetRelPath).toBe('.shreni/design/sso-login.md');
+    expect(res.state.evolving?.targetContent).toBe('# SSO\nSAML');
+    expect(res.reply).toMatch(/evolve it in place/i);
+  });
+
+  it('the loaded existing doc rides into the NEXT turn’s system prompt for reconcile', async () => {
+    const { capture, specs } = scriptedCapture([
+      withDelta('Detected a change.', '{"locateFeature":"SSO login"}'),
+      withDelta('Next.', '{}'),
+    ]);
+    const locate = vi.fn(async () => [locatedDoc('.shreni/design/sso-login.md', 'EXISTING_APPROACH_SAML')]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locate };
+
+    const t1 = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'change SSO', deps);
+    await runInterviewTurn(t1.state, KSHETRA, 'here is the change', deps);
+
+    const sp = systemPromptOf(specs[1]);
+    expect(sp).toContain('UPDATE IN PLACE');
+    expect(sp).toContain('.shreni/design/sso-login.md');
+    expect(sp).toContain('EXISTING_APPROACH_SAML');
+  });
+
+  it('multiple matches park candidates and ask the operator which to evolve', async () => {
+    const { capture } = scriptedCapture([
+      withDelta('Ambiguous feature.', '{"locateFeature":"auth"}'),
+    ]);
+    const locate = vi.fn(async () => [
+      locatedDoc('.shreni/design/sso-login.md', 'a', 10),
+      locatedDoc('.shreni/design/auth-tokens.md', 'b', 9),
+    ]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locate };
+
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'change auth', deps);
+
+    expect(res.state.evolving?.candidates).toEqual([
+      '.shreni/design/sso-login.md',
+      '.shreni/design/auth-tokens.md',
+    ]);
+    expect(res.state.evolving?.targetRelPath).toBeUndefined();
+    expect(res.reply).toMatch(/which one should I evolve/i);
+  });
+
+  it('the operator’s choice resolves a candidate WITHOUT spawning an interview turn', async () => {
+    const capture = vi.fn();
+    const locate = vi.fn(async () => [
+      locatedDoc('.shreni/design/sso-login.md', 'SSO_BODY', 10),
+      locatedDoc('.shreni/design/auth-tokens.md', 'TOK_BODY', 9),
+    ]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locate };
+
+    // Seed a session already awaiting a doc choice.
+    let s = newSessionState(sid, 'myapp', NOW);
+    s = { ...s, evolving: { feature: 'auth', candidates: ['.shreni/design/sso-login.md', '.shreni/design/auth-tokens.md'], locatedAt: NOW } };
+
+    const res = await runInterviewTurn(s, KSHETRA, '1', deps);
+
+    expect(capture).not.toHaveBeenCalled();
+    expect(res.state.evolving?.targetRelPath).toBe('.shreni/design/sso-login.md');
+    expect(res.state.evolving?.targetContent).toBe('SSO_BODY'); // re-located for the body
+    expect(res.reply).toMatch(/Evolving the existing design doc in place/i);
+  });
+
+  it('choosing "none of these" drops the evolve context (a new-doc interview)', async () => {
+    const deps: TurnDeps = { capture: vi.fn(), commit: okCommit, save: () => {}, now: () => NOW, locate: vi.fn() };
+    let s = newSessionState(sid, 'myapp', NOW);
+    s = { ...s, evolving: { feature: 'auth', candidates: ['.shreni/design/a.md', '.shreni/design/b.md'], locatedAt: NOW } };
+
+    const res = await runInterviewTurn(s, KSHETRA, '3', deps); // the "none" tail
+    expect(res.state.evolving).toBeNull();
+    expect(res.reply).toMatch(/create a NEW design doc/i);
+  });
+
+  it('an unrecognizable reply while awaiting a choice falls through to an interview turn', async () => {
+    const { capture } = scriptedCapture([withDelta('Let me clarify.', '{}')]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW, locate: vi.fn() };
+    let s = newSessionState(sid, 'myapp', NOW);
+    s = { ...s, evolving: { feature: 'auth', candidates: ['.shreni/design/a.md', '.shreni/design/b.md'], locatedAt: NOW } };
+
+    const res = await runInterviewTurn(s, KSHETRA, 'wait what are my options again', deps);
+    expect(res.reply).toBe('Let me clarify.');
+    // candidates remain parked for another attempt
+    expect(res.state.evolving?.candidates).toHaveLength(2);
+  });
+
+  it('no locate dep → an evolve signal is a harmless no-op', async () => {
+    const { capture } = scriptedCapture([withDelta('ok', '{"locateFeature":"SSO"}')]);
+    const deps: TurnDeps = { capture, commit: okCommit, save: () => {}, now: () => NOW };
+    const res = await runInterviewTurn(newSessionState(sid, 'myapp', NOW), KSHETRA, 'x', deps);
+    expect(res.state.evolving).toBeUndefined();
+    expect(res.reply).toBe('ok');
+  });
+});
+
 describe('renderRecentWindow', () => {
   it('is empty when disabled or the transcript is empty', () => {
     expect(renderRecentWindow(newSessionState(sid, 'myapp', NOW), 0)).toBe('');

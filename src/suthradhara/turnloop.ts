@@ -35,6 +35,17 @@ import { parseConfirmFrame, hasPendingProposal, applyConfirmFrame } from './conf
 import { parseTurnOutput, applyDelta } from './distill';
 import type { CaptureFn } from './capture';
 import type { CommitFn, CommitReport } from './commit';
+import {
+  classifyMatches,
+  evolveStateFromOutcome,
+  renderCandidateChoice,
+  resolveCandidateChoice,
+  type LocatedDoc,
+} from './evolve';
+
+// Locate an existing feature's design doc(s) for evolve-in-place (§8.1, evolve.ts).
+// Returns matches ranked strongest-first; the turn loop classifies + folds them.
+export type LocateFn = (feature: string) => Promise<LocatedDoc[]>;
 
 export interface TurnDeps {
   // Spawn the interview turn and return the model's final assistant text.
@@ -44,6 +55,9 @@ export interface TurnDeps {
   commit: CommitFn;
   // Persist the folded state (saveSession in production).
   save: (state: SessionState) => void;
+  // Locate an existing feature's doc when the model emits `locateFeature` (§8.1).
+  // Optional — absent it, an evolve signal is a no-op (a new-doc interview).
+  locate?: LocateFn;
   // Clock injection for deterministic tests.
   now?: () => string;
   // How many prior transcript entries to include as a verbatim continuity window
@@ -103,6 +117,22 @@ export async function runInterviewTurn(
   // branch handles the message.
   let next = recordUserTurn(state, message, now);
 
+  // ── evolve doc-choice gate (§8.1) ───────────────────────────────────────────
+  // When >1 doc matched, the interview parked candidates and asked which to
+  // evolve. This message is the operator's answer — resolve it before anything
+  // else (no proposal can be pending yet, since the prompt withholds proposing
+  // until the target is chosen).
+  if (awaitingDocChoice(next)) {
+    const resolved = await resolveDocChoice(next, message, deps, now);
+    if (resolved) {
+      next = recordAssistantTurn(resolved.state, resolved.reply, now);
+      deps.save(next);
+      return { state: next, reply: resolved.reply, warnings: [] };
+    }
+    // Fall through: the message wasn't a recognizable choice — treat it as an
+    // ordinary interview turn (the model can re-ask), leaving candidates intact.
+  }
+
   // ── confirm gate ──────────────────────────────────────────────────────────
   // Only while a proposal is pending does a confirm/edit/cancel frame mean
   // anything; outside that window the message is an ordinary interview turn.
@@ -115,7 +145,7 @@ export async function runInterviewTurn(
       const outcome = applyConfirmFrame(next, frame);
 
       if (outcome.outcome === 'confirmed' && decomposition) {
-        const report = await deps.commit({ kshetra, decomposition });
+        const report = await deps.commit({ kshetra, decomposition, evolving: next.evolving });
         const reply = renderCommitReply(report);
         next = recordAssistantTurn(outcome.state, reply, now);
         deps.save(next);
@@ -149,11 +179,115 @@ export async function runInterviewTurn(
     warnings = applied.warnings;
   }
 
+  // ── evolve locate (§8.1) ────────────────────────────────────────────────────
+  // The model detected a change to an existing feature and named it. Locate the
+  // feature's doc(s) and fold the outcome into `state.evolving`, appending a
+  // server note to the reply so the operator sees what was found. Skipped when a
+  // target is already chosen for this same feature (locate runs once per feature).
+  let replyOut = reply;
+  if (delta?.locateFeature && deps.locate) {
+    const located = await runLocate(next, delta.locateFeature, deps, now);
+    next = located.state;
+    if (located.note) replyOut = replyOut ? `${replyOut}\n\n${located.note}` : located.note;
+  }
+
   // Record the delta-stripped reply so the operator/transcript never see the
   // control payload, then persist the distilled + transcript state.
-  next = recordAssistantTurn(next, reply, now);
+  next = recordAssistantTurn(next, replyOut, now);
   deps.save(next);
-  return { state: next, reply, warnings };
+  return { state: next, reply: replyOut, warnings };
+}
+
+// Whether the interview is waiting for the operator to pick which doc to evolve.
+function awaitingDocChoice(state: SessionState): boolean {
+  const ev = state.evolving;
+  return !!ev && !!ev.candidates && ev.candidates.length > 0 && !ev.targetRelPath;
+}
+
+// Resolve the operator's doc-choice reply. Returns the new state + an
+// acknowledgement, or null when the reply didn't map to any option (let the turn
+// fall through to an ordinary interview turn). Re-locates to fetch the chosen
+// doc's current body so the next prompt reconciles against it.
+async function resolveDocChoice(
+  state: SessionState,
+  message: string,
+  deps: TurnDeps,
+  now: string,
+): Promise<{ state: SessionState; reply: string } | null> {
+  const ev = state.evolving!;
+  const candidates = ev.candidates!;
+  const { chosen } = resolveCandidateChoice(candidates, message);
+
+  if (chosen === undefined) {
+    // Not a recognizable choice — re-ask, keeping candidates parked.
+    return null;
+  }
+  if (chosen === null) {
+    // "None of these" — drop the evolve context; this becomes a new-doc interview.
+    return {
+      state: { ...state, evolving: null },
+      reply: 'Understood — I will create a NEW design doc for this rather than evolving an existing one.',
+    };
+  }
+
+  // Chosen an existing doc: re-locate to fetch its current content (candidates
+  // stored only paths). Fall back to a content-less target if the re-locate can't
+  // find it — the target path is what makes the commit update in place.
+  let content = '';
+  if (deps.locate && ev.feature) {
+    try {
+      const matches = await deps.locate(ev.feature);
+      content = matches.find((m) => m.relPath === chosen)?.content ?? '';
+    } catch {
+      content = '';
+    }
+  }
+  return {
+    state: {
+      ...state,
+      evolving: { feature: ev.feature, targetRelPath: chosen, targetContent: content, locatedAt: now },
+    },
+    reply: `Evolving the existing design doc in place: ${chosen}. Tell me what changes.`,
+  };
+}
+
+// Run the locator for a feature and fold the classified outcome into
+// state.evolving. Returns the new state and an operator-facing note describing
+// what was found (loaded one / asking which / none → will create).
+async function runLocate(
+  state: SessionState,
+  feature: string,
+  deps: TurnDeps,
+  now: string,
+): Promise<{ state: SessionState; note: string }> {
+  // Locate once per feature: if a target for this feature is already chosen, keep it.
+  if (state.evolving?.targetRelPath && state.evolving.feature === feature) {
+    return { state, note: '' };
+  }
+  let matches: LocatedDoc[];
+  try {
+    matches = await deps.locate!(feature);
+  } catch {
+    return { state, note: '' };
+  }
+
+  const outcome = classifyMatches(matches);
+  const evolving = evolveStateFromOutcome(feature, outcome, now);
+  const nextState: SessionState = { ...state, evolving };
+
+  if (outcome.kind === 'one') {
+    return {
+      state: nextState,
+      note: `(Found an existing design doc for "${feature}" — ${outcome.doc.relPath}. I will evolve it in place rather than create a new one.)`,
+    };
+  }
+  if (outcome.kind === 'many') {
+    return { state: nextState, note: renderCandidateChoice(outcome.docs) };
+  }
+  return {
+    state: nextState,
+    note: `(No existing design doc found for "${feature}" — I will create a new one.)`,
+  };
 }
 
 function renderCommitReply(report: CommitReport): string {

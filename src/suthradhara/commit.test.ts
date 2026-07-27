@@ -86,4 +86,29 @@ describe('commitBundle', () => {
     expect(report.childIds).toEqual({});          // stopped before any child
     expect(report.errors.join(' ')).toMatch(/bd down/);
   });
+
+  // §8.1: an evolve commit targets the EXISTING doc path (no doc body here — that
+  // is xa0.6 — but the spine's docPath is decided up front and must be the
+  // existing file, not a fresh slug from the epic title).
+  it('resolves the doc target to the existing doc path when evolving', async () => {
+    let capturedPlan: SessionPlan | null = null;
+    const sessionBead: NonNullable<CommitDeps['sessionBead']> = {
+      create(plan) { capturedPlan = plan; return Promise.resolve({ id: 's', record: newSessionBeadRecord(plan) }); },
+      journal() { return Promise.resolve(); },
+    };
+    let n = 0;
+    const bd = vi.fn((args: string[]) => Promise.resolve(args[0] === 'create' ? `myapp-${++n}` : ''));
+
+    await commitBundle(
+      {
+        kshetra: KSHETRA,
+        decomposition: decomp(),
+        evolving: { feature: 'CSV import', targetRelPath: '.shreni/design/legacy-csv.md', locatedAt: '2026-07-27T10:00:00.000Z' },
+      },
+      { bd, sessionBead },
+    );
+
+    // Not the fresh slug (.shreni/design/csv-import.md) — the existing file.
+    expect(capturedPlan!.docPath).toBe('.shreni/design/legacy-csv.md');
+  });
 });

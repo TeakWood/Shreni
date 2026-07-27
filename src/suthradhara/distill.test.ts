@@ -77,6 +77,13 @@ describe('validateDelta', () => {
     expect(delta).toEqual({});
     expect(warnings.length).toBeGreaterThan(0);
   });
+
+  it('keeps a non-empty locateFeature (trimmed) and drops a blank one', () => {
+    expect(validateDelta({ locateFeature: '  SSO login ' }).delta.locateFeature).toBe('SSO login');
+    const { delta, warnings } = validateDelta({ locateFeature: '   ' });
+    expect(delta.locateFeature).toBeUndefined();
+    expect(warnings.join(' ')).toMatch(/locateFeature/);
+  });
 });
 
 describe('applyDelta — folds through the pure mutators', () => {

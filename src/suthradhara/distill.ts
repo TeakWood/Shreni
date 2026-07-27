@@ -60,6 +60,11 @@ export interface StateDelta {
   deferRubric?: RubricDeferral[];
   // Free-standing unknowns surfaced this turn (not tied to a rubric item).
   openQuestions?: string[];
+  // The name of an EXISTING feature the model detected this interview is changing
+  // (§8.1). Not folded by applyDelta — it is a SIGNAL the turn loop acts on by
+  // running the locator (evolve.ts) and folding the outcome into `state.evolving`.
+  // applyDelta leaves it untouched; the turn loop reads it off the validated delta.
+  locateFeature?: string;
   // A stage the model wants to advance into. Gated by tryEnterStage — a jump
   // past the readiness rubric is refused and reported, never silently applied.
   advanceStage?: SuthradharaStage;
@@ -182,6 +187,12 @@ export function validateDelta(value: unknown): ValidatedDelta {
   if (v.openQuestions !== undefined) {
     if (isStringArray(v.openQuestions)) delta.openQuestions = v.openQuestions;
     else warnings.push('openQuestions is not a string[]; ignored');
+  }
+
+  if (v.locateFeature !== undefined) {
+    if (typeof v.locateFeature === 'string' && v.locateFeature.trim() !== '') {
+      delta.locateFeature = v.locateFeature.trim();
+    } else warnings.push('locateFeature is not a non-empty string; ignored');
   }
 
   if (v.advanceStage !== undefined) {

@@ -6,6 +6,7 @@ import type { SessionState } from '../suthradhara/state';
 import { runInterviewTurn, type TurnDeps } from '../suthradhara/turnloop';
 import { captureClaudeTurn } from '../suthradhara/capture';
 import { makeCommitFn } from '../suthradhara/commit';
+import { makeLocateFn } from '../suthradhara/evolve';
 import type { KshetraConfig } from '../kshetra/config';
 
 // Detached entry point for a Suthradhara session. Reads the kshetra id from
@@ -78,7 +79,12 @@ runReplSession(kshetra, session);
 export function runReplSession(
   kshetra: KshetraConfig,
   initial: SessionState,
-  deps: TurnDeps = { capture: captureClaudeTurn, commit: makeCommitFn(), save: saveSession },
+  deps: TurnDeps = {
+    capture: captureClaudeTurn,
+    commit: makeCommitFn(),
+    save: saveSession,
+    locate: makeLocateFn(kshetra),
+  },
 ): void {
   let state = initial;
   let busy = false;

@@ -162,8 +162,24 @@ export function writeDesignDoc(opts: WriteDesignDocOpts): DesignDocRef {
 
 // The on-demand-read link line stamped into a bead description. A stable prefix
 // so it can be found and replaced idempotently — re-presenting a proposal, or an
-// xa0.8 in-place update, never accumulates duplicate link lines.
-const DOC_LINK_PREFIX = 'Design doc (read before implementing): ';
+// xa0.8 in-place update, never accumulates duplicate link lines. Exported so the
+// evolve locator (xa0.8) can run the inverse — recover a doc path from a bead
+// that links it, turning "linked-from beads" into a locate signal (§8.1 step 1).
+export const DOC_LINK_PREFIX = 'Design doc (read before implementing): ';
+
+// The inverse of withDocLink: pull the linked doc path back out of a bead
+// description, or null if it carries no link line. Used by the evolve locator to
+// find the doc a related bead already points at (§8.1). Tolerant of surrounding
+// whitespace; returns the FIRST link line's path (withDocLink keeps exactly one).
+export function parseDocLink(description: string | undefined): string | null {
+  for (const line of (description ?? '').split('\n')) {
+    if (line.startsWith(DOC_LINK_PREFIX)) {
+      const path = line.slice(DOC_LINK_PREFIX.length).trim();
+      return path === '' ? null : path;
+    }
+  }
+  return null;
+}
 
 // Append (or refresh) the doc-path link on a description. Strips any prior link
 // line first — even one pointing at a different path — so the description always

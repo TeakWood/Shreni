@@ -26,6 +26,28 @@ describe('buildSystemPrompt', () => {
     expect(p).toMatch(/nothing is written|until that confirm, nothing/i);
   });
 
+  it('omits the evolve block for a plain new-feature interview', () => {
+    const p = buildSystemPrompt(fresh(), KSHETRA);
+    expect(p).not.toMatch(/EVOLVING AN EXISTING FEATURE/);
+  });
+
+  it('renders the evolve-in-place block with the loaded doc when a target is set', () => {
+    const s = { ...fresh(), evolving: { feature: 'SSO', targetRelPath: '.shreni/design/sso.md', targetContent: 'EXISTING_DESIGN_BODY', locatedAt: NOW } };
+    const p = buildSystemPrompt(s, KSHETRA);
+    expect(p).toMatch(/EVOLVING AN EXISTING FEATURE — UPDATE IN PLACE/);
+    expect(p).toContain('.shreni/design/sso.md');
+    expect(p).toContain('EXISTING_DESIGN_BODY');
+    expect(p).toMatch(/rewrite the SAME/i);
+  });
+
+  it('renders the pending doc-choice block when >1 doc matched', () => {
+    const s = { ...fresh(), evolving: { feature: 'auth', candidates: ['.shreni/design/a.md', '.shreni/design/b.md'], locatedAt: NOW } };
+    const p = buildSystemPrompt(s, KSHETRA);
+    expect(p).toMatch(/DOC CHOICE PENDING/);
+    expect(p).toContain('.shreni/design/a.md');
+    expect(p).toContain('.shreni/design/b.md');
+  });
+
   it('names the active Kshetra and its repo path', () => {
     const p = buildSystemPrompt(fresh(), KSHETRA);
     expect(p).toContain('myapp');

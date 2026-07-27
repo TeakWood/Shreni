@@ -22,8 +22,10 @@ import { promisify } from 'util';
 import { createHash } from 'crypto';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Decomposition } from './decomposition';
+import type { EvolveState } from './state';
 import { resolveStepArgv, type FilingPlan } from './filing';
-import { writeDesignDoc, designDocRelPath, linkDocIntoDecomposition } from './designdoc';
+import { writeDesignDoc, linkDocIntoDecomposition } from './designdoc';
+import { evolveDocTarget } from './evolve';
 import { compileFilingPlan } from './filing';
 import {
   SessionBeadStore,
@@ -56,6 +58,11 @@ export interface CommitInput {
   // doc is written, for stamping the doc link into descriptions.
   decomposition: Decomposition;
   doc?: CommitDoc;
+  // The evolve-in-place context (§8.1), when this commit updates an existing
+  // feature's doc. When a doc is written and no explicit `doc.relPath` is given,
+  // the target is resolved through evolveDocTarget — the EXISTING doc's path when
+  // evolving — so the SAME file is rewritten rather than a parallel doc created.
+  evolving?: EvolveState | null;
 }
 
 // What did (and didn't) land, straight from the journal. `ok` is true only when
@@ -116,8 +123,11 @@ export async function commitBundle(input: CommitInput, deps: CommitDeps = {}): P
   const store = deps.sessionBead ?? new SessionBeadStore(kshetra);
 
   // Decide the doc path up front so it is part of the immutable session-bead
-  // spine even when the body is written later (xa0.6).
-  const docRelPath = input.doc?.relPath ?? designDocRelPath(input.decomposition.epic.title);
+  // spine even when the body is written later (xa0.6). Evolving an existing
+  // feature (§8.1) resolves to that feature's EXISTING doc path — the same file
+  // is rewritten in place, never forked.
+  const docRelPath =
+    input.doc?.relPath ?? evolveDocTarget(input.decomposition.epic.title, input.evolving);
 
   // If a doc body is present, stamp its path into the descriptions so every filed
   // bead links it for on-demand read (§8); the plan is compiled from the LINKED

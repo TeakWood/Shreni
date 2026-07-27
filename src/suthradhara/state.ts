@@ -89,6 +89,34 @@ export interface PendingProposal {
   presentedAt: string;
 }
 
+// Evolve-in-place context (ARD §8.1, G9): set when the interview is a CHANGE to
+// an existing feature, not a brand-new one. When the locator (evolve.ts) finds
+// the feature's existing design doc, this carries the path to evolve IN PLACE and
+// a content snapshot the prompt reconciles against — so the commit rewrites the
+// SAME file (a diff), never a parallel doc. When >1 doc matched, `candidates`
+// holds them while the interview asks the operator which to evolve; picking one
+// sets `targetRelPath` and clears `candidates`. Optional/additive — old sessions
+// load with `evolving` absent (a plain new-feature interview).
+export interface EvolveState {
+  // The feature name the locate ran for (the model's `locateFeature` signal).
+  // Kept so a disambiguation choice can re-locate to fetch the chosen doc's body.
+  feature?: string;
+  // The chosen existing doc's repo-relative path, once resolved (a single match,
+  // or the operator disambiguating). Absent while `candidates` awaits a choice.
+  targetRelPath?: string;
+  // A snapshot of the chosen doc's content at locate time, rendered into the
+  // prompt so clarification is framed against the existing design (§8.1 step 2)
+  // and the commit can diff against it (§8.1 step 3).
+  targetContent?: string;
+  // When more than one doc plausibly matched, the candidate repo-relative paths
+  // awaiting the operator's choice — the interview asks rather than guessing
+  // (§8.1 "more than one plausible match → asks which to evolve").
+  candidates?: string[];
+  // ISO-8601 timestamp of the locate that produced this context, for the audit
+  // trail (a doc may have changed on disk since; the snapshot is as-of here).
+  locatedAt: string;
+}
+
 // Bumped when the on-disk shape changes in a way that isn't a pure additive
 // field. loadSession() rejects an unknown version rather than mis-hydrating.
 export const SESSION_STATE_VERSION = 1 as const;
@@ -110,6 +138,10 @@ export interface SessionState {
   // A decomposition proposal awaiting the operator's confirm/edit/cancel.
   // Absent whenever the interview is not at a confirm gate. See PendingProposal.
   pending?: PendingProposal | null;
+  // Set when this interview evolves an EXISTING feature's doc in place (§8.1).
+  // Absent for a brand-new feature (the §8 default: create a fresh doc). See
+  // EvolveState.
+  evolving?: EvolveState | null;
 }
 
 export function newSessionState(
