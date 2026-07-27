@@ -140,6 +140,7 @@ will see in logs, config, and the dashboard:
 
 | Component | Plain-English role |
 |---|---|
+| **Suthradhara** (master builder) | Requirements & design intake agent. Interviews you to turn a feature idea into a dependency-ordered epic of ready beads plus a per-feature design doc. Runs *outside* the poll loop as a producer — it files work for Sthapathi to pick up; it never claims or closes. |
 | **Sthapathi** (architect) | Orchestrator. Polls `bd` for tasks, dispatches agents, drives the review loop, and owns the task lifecycle and git workflow. |
 | **Silpi** (craftsman) | Coding agent. Writes implementation code and unit tests, runs lint and tests, submits for review. |
 | **Viharapala** (guardian) | Review agent. Judges Silpi's output against acceptance criteria, quality, and coverage; returns `APPROVE` or `REJECT` with structured feedback. |
@@ -151,19 +152,31 @@ task database, RAG index, and agent queue, fully isolated from every other proje
 
 ```
 Developer machine
-├── Sthapathi (Node.js process)
+├── Suthradhara (interactive, own process)   ← PRODUCER, outside the poll loop
+│   ├── interviews you: Discovery → Clarify → Decompose → Design → Confirm
+│   ├── reads the Kshetra repo (read-only) to ground the decomposition
+│   └── on confirm, files an epic + child beads and writes a design doc
+│           │                                    │
+│           ▼ (bd create / dep add)              ▼ (.shreni/design/<feature>.md)
+├── Sthapathi (Node.js process)               ← CONSUMER of what Suthradhara filed
 │   ├── polls bd ready every 30s per Kshetra
-│   ├── dispatches Silpi → Viharapala loop (up to 3 rounds)
+│   ├── dispatches Silpi → Viharapala loop (up to 3 rounds)   ← read the design doc on demand
 │   ├── squash-merges approved branches to main (or opens a PR)
 │   └── dispatches the test agent async post-merge
 ├── Phalaka server (Fastify, loopback)
 │   └── serves the local dashboard at 127.0.0.1
 └── Kshetras/
     ├── myapp/          ← project repo
-    │   ├── .beads/      ← symlink to myapp-beads/
-    │   └── .shreni/kshetra.yaml
+    │   ├── .beads/          ← symlink to myapp-beads/
+    │   ├── .shreni/kshetra.yaml
+    │   └── .shreni/design/  ← per-feature design docs Suthradhara writes
     └── myapp-beads/    ← bd Dolt database (git repo)
 ```
+
+Suthradhara and Sthapathi never call each other — they meet only at the `bd`
+database and the design-docs path, both of which the poll loop already reads. See
+[docs/architecture/suthradhara.md](docs/architecture/suthradhara.md) for the full
+intake agent design.
 
 **Key design constraint:** Sthapathi is the sole caller of `bd update --claim` and
 `bd close`. Agents (Silpi, Viharapala, Parikshaka) never call `bd` directly — they
