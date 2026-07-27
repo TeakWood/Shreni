@@ -155,31 +155,48 @@ Two additions to `kshetra.yaml`, both general:
 
 ```yaml
 # Servers DEFINED once, at the Kshetra level: a connection + how to auth it.
+# `config` is a repo-relative path to an mcp-config file (the `.mcp.json` shape
+# `claude --mcp-config` consumes); the connection details (command/args or url)
+# live there, keeping kshetra.yaml free of transport detail.
 mcp:
   servers:
     jira:
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-jira"]
-      secretEnv: JIRA_API_TOKEN      # NAME of an env var — never the value
+      config: .shreni/mcp/jira.json    # repo-relative mcp-config file
+      secretEnv: JIRA_API_TOKEN        # NAME of an env var — never the value
     linear:
-      url: "https://mcp.linear.app/sse"
+      config: .shreni/mcp/linear.json
       secretEnv: LINEAR_API_KEY
 
 # Tools GRANTED per role: the callability whitelist, per agent.
 agents:
   suthradhara:
     mcp:
-      jira:
-        tools: [get_issue, search_issues]   # → mcp__jira__get_issue, mcp__jira__search_issues
+      jira: [get_issue, search_issues]   # → mcp__jira__get_issue, mcp__jira__search_issues
 ```
 
-- **`mcp.servers`** is the *definition* — one entry per external system, naming how to
-  connect and which env var holds its token. Defined once; referenced by any role.
-- **`agents.<role>.mcp.<server>.tools`** is the *grant* — the exact tool names the role
-  may call. The allowlist compiler expands `{server: jira, tools: [get_issue]}` into the
-  exact id `mcp__jira__get_issue`. **No wildcard is representable.**
+- **`mcp.servers`** is the *definition* — one entry per external system: the path to
+  its mcp-config file and which env var holds its token. Defined once; referenced by
+  any role. At spawn (`buildClaudeSpawn`) each server is connected with
+  `--mcp-config <abs path>`, `--strict-mcp-config` is deliberately **not** passed (so an
+  ambient project `.mcp.json` also connects), and `secretEnv` is resolved from the host
+  env into the child process — an unset var is a **fail-loud error before the session
+  starts** (`SuthradharaSpawnError`), never a silent first-call failure.
+- **`agents.<role>.mcp.<server>`** is the *grant* — the exact tool names the role may
+  call. The allowlist compiler (pmb.5) expands `{jira: [get_issue]}` into the exact id
+  `mcp__jira__get_issue`. **No wildcard is representable.**
 - A role with **no** `mcp` block gets **no** MCP callability — the safe default.
   Connection may still be ambient, but nothing is callable.
+
+> **Version assumptions — validated (claude 2.1.212, pmb.4).** Two CLI behaviors the
+> lazy-grant path leans on were confirmed by spike: (1) `--setting-sources project`
+> (and `--mcp-config`) **connect** a project server — the server reports
+> `status: connected` and its tools appear in the injected schema — without
+> `--strict-mcp-config` suppressing an ambient `.mcp.json`; (2) a `tool_use` for an
+> ungranted MCP tool is **denied cleanly**: the turn's `result` stays
+> `is_error: false` and the denial rides `permission_denials[]` as
+> `{tool_name, tool_use_id, tool_input}` — exactly the shape `capture.ts` reads. Only
+> the individual `tool_result` block carries the deny; the turn itself succeeds. Re-run
+> the spike if these regress on a CLI upgrade.
 
 This is deliberately parallel to how `bd`/`git` grants already work: a positive,
 enumerated, per-agent whitelist. MCP is not a new *kind* of boundary — it is the same

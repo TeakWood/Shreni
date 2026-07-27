@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { buildClaudeSpawn, buildFilingSpawn, allowlistForTurn } from './session';
+import { describe, it, expect, afterEach } from 'vitest';
+import { buildClaudeSpawn, buildFilingSpawn, allowlistForTurn, SuthradharaSpawnError } from './session';
 import { newSessionState } from './state';
 import { presentProposal } from './confirm';
 import type { Decomposition } from './decomposition';
@@ -63,10 +63,88 @@ describe('buildClaudeSpawn', () => {
     expect(spec.args[idx + 1]).toBe('default');
   });
 
-  it('carries the caller-supplied prompts through unmodified', () => {
+  it('carries the system prompt through unmodified', () => {
     const sysIdx = spec.args.indexOf('--append-system-prompt');
     expect(spec.args[sysIdx + 1]).toBe('You are Suthradhara.');
-    expect(spec.args[spec.args.length - 1]).toBe('Hello');
+  });
+
+  it('delivers the operator prompt on stdin, never as a trailing positional', () => {
+    // --allowedTools is variadic and would swallow a trailing positional prompt
+    // (verified on claude 2.1.212), so the message rides stdin instead.
+    expect(spec.stdin).toBe('Hello');
+    expect(spec.args).not.toContain('Hello');
+    // The last arg is the allowlist value, with nothing positional after it.
+    expect(spec.args[spec.args.length - 2]).toBe('--allowedTools');
+  });
+});
+
+describe('buildClaudeSpawn — MCP grounding (pmb.4)', () => {
+  const mcpKshetra = (): KshetraConfig => ({
+    ...KSHETRA,
+    mcp: {
+      servers: {
+        jira: { config: '.shreni/mcp/jira.json', secretEnv: 'JIRA_TOKEN' },
+        localtool: { config: '.shreni/mcp/local.json' },
+      },
+    },
+  }) as unknown as KshetraConfig;
+
+  afterEach(() => {
+    delete process.env.JIRA_TOKEN;
+  });
+
+  it('connects each defined server via --mcp-config with an absolute path', () => {
+    process.env.JIRA_TOKEN = 'secret-abc';
+    const spec = buildClaudeSpawn({ kshetra: mcpKshetra(), systemPrompt: 's', userPrompt: 'u' });
+    const cfgs = spec.args.reduce<string[]>((acc, a, i) => {
+      if (spec.args[i - 1] === '--mcp-config') acc.push(a);
+      return acc;
+    }, []);
+    expect(cfgs).toContain('/projects/myapp/.shreni/mcp/jira.json');
+    expect(cfgs).toContain('/projects/myapp/.shreni/mcp/local.json');
+  });
+
+  it('never passes --strict-mcp-config (ambient project .mcp.json stays connected)', () => {
+    process.env.JIRA_TOKEN = 'secret-abc';
+    const spec = buildClaudeSpawn({ kshetra: mcpKshetra(), systemPrompt: 's', userPrompt: 'u' });
+    expect(spec.args).not.toContain('--strict-mcp-config');
+  });
+
+  it('does not grant any mcp__ tool on --allowedTools (visible-but-denied, pmb.5 grants)', () => {
+    process.env.JIRA_TOKEN = 'secret-abc';
+    const spec = buildClaudeSpawn({ kshetra: mcpKshetra(), systemPrompt: 's', userPrompt: 'u' });
+    const idx = spec.args.indexOf('--allowedTools');
+    expect(spec.args[idx + 1]).not.toContain('mcp__');
+  });
+
+  it('injects secretEnv values into the child env, keyed by the named var', () => {
+    process.env.JIRA_TOKEN = 'secret-abc';
+    const spec = buildClaudeSpawn({ kshetra: mcpKshetra(), systemPrompt: 's', userPrompt: 'u' });
+    expect(spec.env?.JIRA_TOKEN).toBe('secret-abc');
+  });
+
+  it('fails loud (before spawn) when a secretEnv names an unset host var', () => {
+    delete process.env.JIRA_TOKEN;
+    expect(() => buildClaudeSpawn({ kshetra: mcpKshetra(), systemPrompt: 's', userPrompt: 'u' }))
+      .toThrowError(SuthradharaSpawnError);
+    expect(() => buildClaudeSpawn({ kshetra: mcpKshetra(), systemPrompt: 's', userPrompt: 'u' }))
+      .toThrowError(/JIRA_TOKEN/);
+  });
+
+  it('connects an auth-less server (no secretEnv) without injecting any secret', () => {
+    const kshetra = {
+      ...KSHETRA,
+      mcp: { servers: { localtool: { config: '.shreni/mcp/local.json' } } },
+    } as unknown as KshetraConfig;
+    const spec = buildClaudeSpawn({ kshetra, systemPrompt: 's', userPrompt: 'u' });
+    expect(spec.args).toContain('/projects/myapp/.shreni/mcp/local.json');
+    expect(spec.env).toEqual({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' });
+  });
+
+  it('adds no --mcp-config when the Kshetra defines no servers', () => {
+    const spec = buildClaudeSpawn({ kshetra: KSHETRA, systemPrompt: 's', userPrompt: 'u' });
+    expect(spec.args).not.toContain('--mcp-config');
+    expect(spec.env).toEqual({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' });
   });
 });
 

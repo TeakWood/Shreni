@@ -30,7 +30,9 @@ function systemPromptOf(spec: SpawnSpec): string {
   return spec.args[i + 1] ?? '';
 }
 function userPromptOf(spec: SpawnSpec): string {
-  return spec.args[spec.args.length - 1] ?? '';
+  // The operator message rides stdin (buildClaudeSpawn), not a trailing arg —
+  // --allowedTools is variadic and would swallow a positional prompt.
+  return spec.stdin ?? '';
 }
 
 function withDelta(reply: string, json: string): string {

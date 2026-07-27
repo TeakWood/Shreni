@@ -1,3 +1,4 @@
+import { resolve } from 'path';
 import type { KshetraConfig } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
@@ -5,16 +6,40 @@ import { readOnlyAllowlist, filingAllowlist } from './allowlist';
 import { buildSystemPrompt } from './prompt';
 import type { SessionState } from './state';
 
+// Raised when the spawn wiring cannot be built — today only a configured MCP
+// server whose `secretEnv` names a host env var that is unset (pmb.4). Failing
+// here means the token is missing BEFORE the session starts, never silently at
+// the first tool call. Distinct class so the runner can report it as an operator
+// fix ("export the token"), not an internal fault.
+export class SuthradharaSpawnError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SuthradharaSpawnError';
+  }
+}
+
 // Compose the claude-CLI invocation for a Suthradhara interview turn. Pure —
 // exported so xa0.2 (stage-aware prompt) can call it per turn and later beads
 // (xa0.4/xa0.5) can swap the allowlist without touching lifecycle code.
 //
-// cwd is the target Kshetra's repo so claude reads/greps the RIGHT code base;
+// cwd is the target Kshetra's repo (the detached runner sets it, lifecycle.ts,
+// and the child claude inherits it) so claude reads/greps the RIGHT code base
+// and `--setting-sources project` / an ambient project `.mcp.json` resolve there.
 // --allowedTools is a positive whitelist (Read/Glob/Grep + read-only bd/git)
 // and permission-mode 'default' means an unlisted tool needs approval — with
 // stdio ignored in a detached process there's nowhere to approve, so an
 // unlisted tool is effectively denied. That's what makes xa0.1's "no bd write
 // or file write" hold.
+//
+// MCP grounding (pmb.4): every server DEFINED in kshetra.mcp.servers is connected
+// via `--mcp-config <abs path>`, and we deliberately do NOT pass
+// `--strict-mcp-config` — so an operator's ambient project `.mcp.json` also
+// connects. Connection injects the server's tool SCHEMAS into the model (the
+// model SEES `mcp__jira__get_issue`) while callability stays gated by
+// --allowedTools, which still carries only the read-only surface here: an
+// ungranted MCP tool is visible-but-denied until pmb.5/pmb.6 grant it. Verified
+// against claude 2.1.212: a denied MCP tool_use rides `permission_denials` in the
+// `result` message and does NOT error the turn (capture.ts reads exactly that).
 export interface SuthradharaSpawnOpts {
   kshetra: KshetraConfig;
   systemPrompt: string;
@@ -22,7 +47,30 @@ export interface SuthradharaSpawnOpts {
 }
 
 export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
+  const { kshetra } = opts;
   const allowlist = readOnlyAllowlist();
+
+  // Ambient MCP connect + secret injection. --mcp-config points claude at each
+  // server's def file (repo-relative in yaml → absolute against repo.path so it
+  // does not depend on the inherited cwd); secretEnv resolves the NAMED host env
+  // var to its value and carries it into the child env — never the yaml. A
+  // secretEnv naming an unset var fails loud here, before the session starts.
+  const mcpConfigArgs: string[] = [];
+  const secretEnv: Record<string, string> = {};
+  for (const [name, server] of Object.entries(kshetra.mcp?.servers ?? {})) {
+    mcpConfigArgs.push('--mcp-config', resolve(kshetra.repo.path, server.config));
+    if (server.secretEnv) {
+      const value = process.env[server.secretEnv];
+      if (!value) {
+        throw new SuthradharaSpawnError(
+          `MCP server "${name}" requires env var ${server.secretEnv}, but it is unset — ` +
+            `export it before starting the session (the token is never stored in kshetra.yaml).`,
+        );
+      }
+      secretEnv[server.secretEnv] = value;
+    }
+  }
+
   const args = [
     '-p',
     '--output-format', 'stream-json',
@@ -31,15 +79,22 @@ export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
     '--append-system-prompt', opts.systemPrompt,
     '--no-session-persistence',
     '--setting-sources', 'project',
-    '--model', opts.kshetra.agents.model,
+    ...mcpConfigArgs,
+    '--model', kshetra.agents.model,
     '--allowedTools', allowlist.join(','),
-    opts.userPrompt,
   ];
 
   return {
     bin: resolveBin('SHRENI_CLAUDE_BIN', 'claude'),
     args,
-    env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+    env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', ...secretEnv },
+    // The operator's message rides STDIN, not a trailing positional argument.
+    // `claude`'s --allowedTools is variadic (<tools...>) and greedily consumes a
+    // following positional — a trailing prompt arg gets swallowed as a "tool" and
+    // the CLI then errors "Input must be provided ..." (verified on 2.1.212).
+    // Delivering the prompt on stdin sidesteps arg ordering entirely; capture.ts
+    // pipes spec.stdin into the child.
+    stdin: opts.userPrompt,
   };
 }
 
