@@ -61,7 +61,7 @@ const CONTEXT = {
   scopedSkills: '',
   conventions: '',
   architecture: '',
-  ragChunks: '',
+  repoMap: '',
 } as AgentContext;
 
 const SILPI_OK: SilpiOutput = {

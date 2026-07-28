@@ -8,6 +8,7 @@ import { toSlug } from './pickup.js';
 import { pauseKshetra, clearBeadAttempts } from '../kshetra/state.js';
 import { notifyOperator } from './errors.js';
 import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
+import { regenerateRepoMapAsync } from '../kshetra/repo-map.js';
 import { getEntitlements } from '../ext/index.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 
@@ -173,6 +174,11 @@ export async function squashMergeAndClose(
   await g.merge('--squash', branch);
   await g.commit(buildCommitMessage(task, output));
   await g.push('origin', main);
+
+  // Refresh the cached repo/symbol map (Shreni-beads-vcz) now that main has new
+  // structure — fire-and-forget so it never blocks the loop; the next bead's
+  // cold start reads the fresher map.
+  regenerateRepoMapAsync(kshetra);
 
   // Fire Parikshaka after merge commit — non-blocking, does not stall the main
   // loop. The post-merge test agent is an optional capability: the core asks

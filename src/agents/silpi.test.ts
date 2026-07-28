@@ -49,7 +49,7 @@ const CONTEXT: AgentContext = {
   taskDetails: 'Task ID: proj-42\nTitle: Fix auth\nDescription: Auth is broken',
   universalSkills: '',
   reviewGuide: '',
-  ragChunks: '',
+  repoMap: '',
 };
 
 const VALID_OUTPUT: SilpiOutput = {
@@ -205,12 +205,12 @@ describe('runSilpi', () => {
     expect(opts.systemPrompt).not.toContain('reviewer-only rubric');
   });
 
-  it('includes RELEVANT CODE section when ragChunks is set', async () => {
-    const ctx = { ...CONTEXT, ragChunks: 'function foo() {}' };
+  it('includes REPO MAP section when repoMap is set', async () => {
+    const ctx = { ...CONTEXT, repoMap: '## src\n- `auth.ts` — token refresh' };
     await runSilpi(ctx, 1);
     const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
-    expect(opts.systemPrompt).toContain('== RELEVANT CODE ==');
-    expect(opts.systemPrompt).toContain('function foo() {}');
+    expect(opts.systemPrompt).toContain('== REPO MAP ==');
+    expect(opts.systemPrompt).toContain('`auth.ts` — token refresh');
   });
 
   // Command-drift fix: the prompt carries the exact toolchain-resolved commands

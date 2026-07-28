@@ -18,10 +18,12 @@ export interface AgentContext {
   // prompt (Silpi ignores it); '' when unset. This is Shreni-injected rather than
   // native because no provider offers a reviewer-only instruction file.
   reviewGuide: string;
-  // NOT YET IMPLEMENTED: relevant-code chunks from RAG retrieval. Always '' today
-  // (dispatch.ts) — retrieval is not wired up. Kept in the contract so the
-  // injection site is ready once it lands.
-  ragChunks: string;
+  // Deterministic repo/symbol map (Shreni-beads-vcz), built with no LLM/network
+  // from the source tree and cached at .shreni/repo-map.md. Injected by
+  // buildAgentContext to seed the executor's cold-start retrieval; '' when the
+  // repo has no source or generation failed, which omits the section. Replaced
+  // the never-implemented RAG-chunks stub.
+  repoMap: string;
 }
 
 export interface Task {

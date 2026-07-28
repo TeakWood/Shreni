@@ -15,6 +15,7 @@ import { isHealthBead, measureHealth } from './health.js';
 import { runLintGate } from './lint.js';
 import { evaluateGates } from './gates.js';
 import { recordProgress, setHealthBaseline } from '../kshetra/state.js';
+import { loadRepoMap } from '../kshetra/repo-map.js';
 import { AgentAbortedError } from './errors.js';
 import { captureGuard, assertOnBranch, recoverOffBranch, OffBranchError, type BranchGuard } from './guard.js';
 
@@ -52,11 +53,12 @@ export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Pro
   const reviewGuidePath = kshetra.conventions?.reviewGuide
     ? join(kshetra.repo.path, kshetra.conventions.reviewGuide)
     : null;
-  const [projectMemory, taskDetails, universalSkills, reviewGuide] = await Promise.all([
+  const [projectMemory, taskDetails, universalSkills, reviewGuide, repoMap] = await Promise.all([
     bdClient.prime(),
     bdClient.show(task.id),
     loadUniversalSkills(),
     reviewGuidePath ? readFileOptional(reviewGuidePath) : Promise.resolve(''),
+    loadRepoMap(kshetra),
   ]);
 
   return {
@@ -66,11 +68,13 @@ export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Pro
     taskDetails,
     universalSkills,
     reviewGuide,
-    // NOT YET IMPLEMENTED: RAG codebase-search retrieval is not wired up, so no
-    // relevant-code chunks are injected. Silpi guards on truthiness
-    // (silpi.ts: `if (context.ragChunks)`), so an empty string simply omits the
-    // "== RELEVANT CODE ==" section. Populate this once retrieval lands.
-    ragChunks: '',
+    // Deterministic repo/symbol map (Shreni-beads-vcz) — fixes agentic search's
+    // one real weakness, the cold start, by giving the executor a map to aim its
+    // first Read/Grep at instead of a blind guess. Built with no LLM/network from
+    // the source tree, cached at .shreni/repo-map.md, regenerated post-merge.
+    // Silpi guards on truthiness (silpi.ts), so '' (e.g. an empty repo or a
+    // generation failure) simply omits the "== REPO MAP ==" section.
+    repoMap,
   };
 }
 
