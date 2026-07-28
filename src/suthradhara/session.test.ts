@@ -138,13 +138,13 @@ describe('buildClaudeSpawn — MCP grounding (pmb.4)', () => {
     } as unknown as KshetraConfig;
     const spec = buildClaudeSpawn({ kshetra, systemPrompt: 's', userPrompt: 'u' });
     expect(spec.args).toContain('/projects/myapp/.shreni/mcp/local.json');
-    expect(spec.env).toEqual({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' });
+    expect(spec.env).toEqual({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', BEADS_DIR: '/projects/myapp-beads' });
   });
 
   it('adds no --mcp-config when the Kshetra defines no servers', () => {
     const spec = buildClaudeSpawn({ kshetra: KSHETRA, systemPrompt: 's', userPrompt: 'u' });
     expect(spec.args).not.toContain('--mcp-config');
-    expect(spec.env).toEqual({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' });
+    expect(spec.env).toEqual({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', BEADS_DIR: '/projects/myapp-beads' });
   });
 });
 

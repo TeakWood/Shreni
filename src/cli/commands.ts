@@ -335,7 +335,7 @@ export const COMMANDS: Command[] = [
     summary: 'Control a Suthradhara interview session for a kshetra',
     usage: '<start|resume <session-id>|stop|status|list> [@<id> | --kshetra <id>]',
     run(ctx) {
-      runSuthradhara(ctx.args[0], {
+      return runSuthradhara(ctx.args[0], {
         args: ctx.args.slice(1),
         flagKshetra: ctx.flag('--kshetra'),
         cwd: process.cwd(),

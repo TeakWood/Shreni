@@ -8,6 +8,7 @@ import { captureClaudeTurn } from '../suthradhara/capture';
 import { makeCommitFn } from '../suthradhara/commit';
 import { makeLocateFn, makeSourceLocateFn } from '../suthradhara/evolve';
 import { parseGrantAnswer, renderGrantPrompt } from '../suthradhara/grant';
+import { pruneWorktrees } from '../suthradhara/worktree';
 import { resolveConfigPath } from '../kshetra/registry';
 import { persistMcpGrant } from '../kshetra/grant-persist';
 import type { KshetraConfig, McpGrants } from '../kshetra/config';
@@ -66,9 +67,15 @@ if (session.kshetraId !== kshetra.id) {
 }
 
 writeSuthradharaPid(kshetra.id, process.pid);
+// Reap admin entries for worktrees a crash left behind (ARD §4.2, §6.3). This is
+// `git worktree prune` only — it never touches THIS session's live worktree (its
+// dir exists); a broad leaked-dir sweep belongs to startSession/stopSession.
+void pruneWorktrees(kshetra).catch((err) => {
+  console.error(`[suthradhara:${kshetra.id}] worktree prune failed: ${(err as Error).message}`);
+});
 console.log(
   `[suthradhara:${kshetra.id}] session ${session.id} ready — ` +
-    `cwd=${kshetra.repo.path}, model=${kshetra.agents.model}, ` +
+    `cwd=${process.cwd()}, model=${kshetra.agents.model}, ` +
     `stage=${session.stage}, transcript-turns=${session.transcript.length}`,
 );
 

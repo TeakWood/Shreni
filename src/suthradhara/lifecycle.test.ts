@@ -50,6 +50,16 @@ vi.mock('./persistence', () => ({
   SessionNotFoundError,
 }));
 
+const mockCreateWorktree = vi.fn<(k: unknown, sid: string) => Promise<string>>();
+const mockReapWorktrees = vi.fn<(k: unknown) => Promise<string[]>>();
+
+vi.mock('./worktree', () => ({
+  createSessionWorktree: (k: unknown, sid: string) => mockCreateWorktree(k, sid),
+  reapSessionWorktrees: (k: unknown) => mockReapWorktrees(k),
+}));
+
+const WORKTREE_PATH = `/tmp/worktrees/myapp/suthradhara-${'myapp-20260727T140312-a3f2'}`;
+
 const { startSession, resumeSession, stopSession, statusSession } = await import('./lifecycle');
 
 const KSHETRA = {
@@ -71,24 +81,28 @@ beforeEach(() => {
   mockExistsSync.mockReturnValue(true);
   mockSpawn.mockReturnValue({ pid: 7777, unref: vi.fn() });
   mockGenerateSessionId.mockReturnValue(SESSION_ID);
+  mockCreateWorktree.mockResolvedValue(WORKTREE_PATH);
+  mockReapWorktrees.mockResolvedValue([]);
 });
 
 describe('startSession', () => {
-  it('returns already_running when the PID is live (idempotent)', () => {
+  it('returns already_running when the PID is live (idempotent)', async () => {
     mockReadPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(true);
 
-    const result = startSession(KSHETRA, fakeLaunch);
+    const result = await startSession(KSHETRA, fakeLaunch);
     expect(result.status).toBe('already_running');
     if (result.status === 'already_running') {
       expect(result.pid).toBe(1234);
     }
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(mockSaveSession).not.toHaveBeenCalled();
+    // A live session is untouched — no worktree churn.
+    expect(mockCreateWorktree).not.toHaveBeenCalled();
   });
 
-  it('mints a session id, persists the initial state, and threads the id into the child argv', () => {
-    const result = startSession(KSHETRA, fakeLaunch);
+  it('mints a session id, persists the initial state, and threads the id into the child argv', async () => {
+    const result = await startSession(KSHETRA, fakeLaunch);
     expect(result.status).toBe('started');
     if (result.status === 'started') {
       expect(result.sessionId).toBe(SESSION_ID);
@@ -103,31 +117,39 @@ describe('startSession', () => {
     const [bin, args, opts] = mockSpawn.mock.calls[0];
     expect(bin).toBe('node');
     expect(args).toEqual(['runner.js', 'myapp', SESSION_ID]);
-    expect(opts).toMatchObject({ detached: true, cwd: '/projects/myapp' });
+    // cwd is the session worktree, not repo.path (ARD §4.2).
+    expect(opts).toMatchObject({ detached: true, cwd: WORKTREE_PATH });
   });
 
-  it('writes the PID once the child spawns', () => {
-    startSession(KSHETRA, fakeLaunch);
+  it('reaps leaked worktrees before creating a fresh one for this session', async () => {
+    await startSession(KSHETRA, fakeLaunch);
+    expect(mockReapWorktrees).toHaveBeenCalledWith(KSHETRA);
+    expect(mockCreateWorktree).toHaveBeenCalledWith(KSHETRA, SESSION_ID);
+  });
+
+  it('writes the PID once the child spawns', async () => {
+    await startSession(KSHETRA, fakeLaunch);
     expect(mockWritePid).toHaveBeenCalledWith('myapp', 7777);
   });
 
-  it('refuses to spawn when the Kshetra repo path is missing', () => {
+  it('refuses to spawn when the Kshetra repo path is missing', async () => {
     mockExistsSync.mockReturnValue(false);
-    expect(() => startSession(KSHETRA, fakeLaunch)).toThrow(/repo path does not exist/);
+    await expect(startSession(KSHETRA, fakeLaunch)).rejects.toThrow(/repo path does not exist/);
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(mockSaveSession).not.toHaveBeenCalled();
+    expect(mockCreateWorktree).not.toHaveBeenCalled();
   });
 
-  it('throws when spawn returns no pid', () => {
+  it('throws when spawn returns no pid', async () => {
     mockSpawn.mockReturnValue({ pid: undefined, unref: vi.fn() });
-    expect(() => startSession(KSHETRA, fakeLaunch)).toThrow(/Failed to spawn/);
+    await expect(startSession(KSHETRA, fakeLaunch)).rejects.toThrow(/Failed to spawn/);
   });
 
-  it('replaces a stale PID file with a fresh session', () => {
+  it('replaces a stale PID file with a fresh session', async () => {
     mockReadPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(false);
 
-    const result = startSession(KSHETRA, fakeLaunch);
+    const result = await startSession(KSHETRA, fakeLaunch);
     expect(result.status).toBe('started');
     expect(mockSpawn).toHaveBeenCalled();
   });
@@ -154,80 +176,90 @@ describe('resumeSession', () => {
     transcript: [],
   };
 
-  it('spawns the runner with the existing session id and does NOT overwrite state', () => {
+  it('spawns the runner with the existing session id and does NOT overwrite state', async () => {
     mockLoadSession.mockReturnValue(state);
 
-    const result = resumeSession(KSHETRA, SESSION_ID, fakeLaunch);
+    const result = await resumeSession(KSHETRA, SESSION_ID, fakeLaunch);
     expect(result.status).toBe('resumed');
     if (result.status === 'resumed') {
       expect(result.sessionId).toBe(SESSION_ID);
     }
     expect(mockSaveSession).not.toHaveBeenCalled();
 
-    const [, args] = mockSpawn.mock.calls[0];
+    const [, args, opts] = mockSpawn.mock.calls[0];
     expect(args).toEqual(['runner.js', 'myapp', SESSION_ID]);
+    // Resume re-establishes the worktree and runs the child there.
+    expect(mockCreateWorktree).toHaveBeenCalledWith(KSHETRA, SESSION_ID);
+    expect(opts).toMatchObject({ cwd: WORKTREE_PATH });
   });
 
-  it('returns already_running without re-spawning when a live session exists', () => {
+  it('returns already_running without re-spawning when a live session exists', async () => {
     mockReadPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(true);
 
-    const result = resumeSession(KSHETRA, SESSION_ID, fakeLaunch);
+    const result = await resumeSession(KSHETRA, SESSION_ID, fakeLaunch);
     expect(result.status).toBe('already_running');
     expect(mockLoadSession).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockCreateWorktree).not.toHaveBeenCalled();
   });
 
-  it('rejects a session that belongs to a different kshetra', () => {
+  it('rejects a session that belongs to a different kshetra', async () => {
     mockLoadSession.mockReturnValue({ ...state, kshetraId: 'other' });
 
-    expect(() => resumeSession(KSHETRA, SESSION_ID, fakeLaunch)).toThrow(
+    await expect(resumeSession(KSHETRA, SESSION_ID, fakeLaunch)).rejects.toThrow(
       /belongs to kshetra "other"/,
     );
     expect(mockSpawn).not.toHaveBeenCalled();
+    // A rejected session never creates a worktree.
+    expect(mockCreateWorktree).not.toHaveBeenCalled();
   });
 
-  it('rewrites a SessionNotFoundError as a helpful CLI-facing message', () => {
+  it('rewrites a SessionNotFoundError as a helpful CLI-facing message', async () => {
     mockLoadSession.mockImplementation(() => {
       throw new SessionNotFoundError(SESSION_ID);
     });
 
-    expect(() => resumeSession(KSHETRA, SESSION_ID, fakeLaunch)).toThrow(
+    await expect(resumeSession(KSHETRA, SESSION_ID, fakeLaunch)).rejects.toThrow(
       /Cannot resume: session .* not found/,
     );
   });
 
-  it('refuses to spawn when the Kshetra repo path is missing', () => {
+  it('refuses to spawn when the Kshetra repo path is missing', async () => {
     mockExistsSync.mockReturnValue(false);
-    expect(() => resumeSession(KSHETRA, SESSION_ID, fakeLaunch)).toThrow(
+    await expect(resumeSession(KSHETRA, SESSION_ID, fakeLaunch)).rejects.toThrow(
       /repo path does not exist/,
     );
   });
 });
 
 describe('stopSession', () => {
-  it('reports not_running when no PID file exists', () => {
+  it('reports not_running when no PID file exists, and still sweeps leaked worktrees', async () => {
     mockReadPid.mockReturnValue(null);
-    expect(stopSession('myapp').status).toBe('not_running');
+    const result = await stopSession(KSHETRA);
+    expect(result.status).toBe('not_running');
+    expect(mockReapWorktrees).toHaveBeenCalledWith(KSHETRA);
   });
 
-  it('clears a stale PID file when the process is dead', () => {
+  it('clears a stale PID file when the process is dead', async () => {
     mockReadPid.mockReturnValue(5678);
     mockIsAlive.mockReturnValue(false);
-    const result = stopSession('myapp');
+    const result = await stopSession(KSHETRA);
     expect(result.status).toBe('stale_pid_cleared');
     expect(mockClearPid).toHaveBeenCalledWith('myapp');
+    expect(mockReapWorktrees).toHaveBeenCalledWith(KSHETRA);
   });
 
-  it('SIGTERMs a live process and clears the PID file', () => {
+  it('SIGTERMs a live process, clears the PID file, and tears down the worktree', async () => {
     mockReadPid.mockReturnValue(5678);
     mockIsAlive.mockReturnValue(true);
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
 
-    const result = stopSession('myapp');
+    const result = await stopSession(KSHETRA);
     expect(result.status).toBe('stopped');
     expect(killSpy).toHaveBeenCalledWith(5678, 'SIGTERM');
     expect(mockClearPid).toHaveBeenCalledWith('myapp');
+    expect(mockReapWorktrees).toHaveBeenCalledWith(KSHETRA);
 
     killSpy.mockRestore();
   });

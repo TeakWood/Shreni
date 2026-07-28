@@ -430,3 +430,7 @@ Tests ship with each module (Vitest), with emphasis on the boundary:
   capability, not a bespoke tracker integration.
 - **Extension seams** ([extension-points.md](./extension-points.md)) — Suthradhara runs entirely
   on the core's local defaults; it needs no optional package.
+- **Worktree isolation** ([../guides/suthradhara-worktree-isolation.md](../guides/suthradhara-worktree-isolation.md))
+  — each intake session runs in its own detached git worktree so planning never shares a working
+  directory with a build. Developer how-to for the lifecycle, the `BEADS_DIR` invariant, and
+  recovering leaked worktrees.

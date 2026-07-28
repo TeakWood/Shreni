@@ -105,7 +105,13 @@ export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
   return {
     bin: resolveBin('SHRENI_CLAUDE_BIN', 'claude'),
     args,
-    env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', ...secretEnv },
+    // BEADS_DIR is absolute (kshetra.beads.path) and load-bearing once the child
+    // runs in a Suthradhara worktree (ARD §4.4): the `.beads/` symlink is
+    // gitignored, so a fresh worktree does NOT contain it — cwd auto-discovery
+    // would fail. Passing the absolute dir makes every read-only `bd` (and the
+    // post-confirm `bd create`) resolve to the one shared dolt DB regardless of
+    // cwd, exactly as commit.ts's server-side `bd` runner already does.
+    env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', BEADS_DIR: kshetra.beads.path, ...secretEnv },
     // The operator's message rides STDIN, not a trailing positional argument.
     // `claude`'s --allowedTools is variadic (<tools...>) and greedily consumes a
     // following positional — a trailing prompt arg gets swallowed as a "tool" and
