@@ -5,25 +5,71 @@
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](#prerequisites)
 [![Built with TypeScript](https://img.shields.io/badge/built%20with-TypeScript-3178c6.svg)](https://www.typescriptlang.org/)
 
-**Shreni turns a backlog into merged code.** You file tasks; a team of AI agents
-picks them up, writes and reviews the code, runs the tests, and merges what passes
-— on your own machine, using the model you choose. You steer by outcome, not by
-babysitting every keystroke.
+**Shreni is an AI builders' dojo — a team of AI agents that turns your ideas into a
+backlog, and the backlog into product.**
 
-It is built around three convictions that set it apart from most agent frameworks:
+Shreni isn't the worker; it's the place the workers train and build. Describe what
+you want to build, and a team of specialized agents takes it from there: an intake
+agent interviews you, reads your repo, and files a dependency-ordered backlog of
+ready tasks. Coding agents write the implementation and its tests. A reviewer agent
+checks the diff against your acceptance criteria. Your lint and test suite gate it,
+and what passes gets merged. On *your* machine, with *your* model, on *your* terms.
+You bring the ideas; the team ships the product.
+
+And because every task lives in **beads** — a durable, git-tracked issue database —
+you get a full, replayable trace of what the team did: which agent touched which
+task, the reviewer's verdicts, the round-by-round notes, and the commit that closed
+it. Nothing the staff does is a black box.
+
+> It's not a copilot that waits for you to type. It's a standing engineering team,
+> with a paper trail, that takes an idea and hands you back merged code.
+
+### From idea to product, without you in the loop
+
+You have an idea: *"add rate limiting to the API — per-key quotas, a friendly 429,
+and metrics."* You say it in plain English. Suthradhara, the intake agent,
+interviews you until it's precise, then files an epic of ordered tasks with
+acceptance criteria — the backlog you'd normally spend an afternoon writing.
+
+You close your laptop. The team goes to work: each task is written by a coding
+agent, sent back by a reviewer agent for the edge cases you'd have caught in
+review, corrected, gated through your test suite, and squash-merged only after it
+goes green. What gets stuck is flagged with the reviewer's notes — not silently
+half-done. You came in with a sentence; you leave with shipped features and a paper
+trail of decisions.
+
+### Why it's different
+
+Three convictions set Shreni apart from most agent frameworks:
 
 - **Bring your own model.** Shreni drives the provider CLI you already pay for
   (Claude today; Codex/Gemini experimental). No hosted middleman, no per-seat
-  markup, no lock-in to one vendor's model.
-- **Local-first.** The orchestrator, the git repos, the task database, and the
-  dashboard all run on your machine and loopback. Your code never has to leave it.
-- **An explicit merge policy.** Shreni is honest about the scariest question up
-  front: *does a bot push to `main`?* You decide — auto-merge for speed, or a
-  pull-request gate for a human/team sign-off. See [Merge policy](#merge-policy-push-vs-pr).
+  markup, no lock-in to one vendor's model. Your Anthropic bill is the whole bill.
+- **Local-first, by construction.** The orchestrator, your git repos, the task
+  database, and the dashboard all run on your machine over loopback. Your code
+  never has to leave it — this isn't a privacy *setting*, it's the architecture.
+- **An explicit merge policy.** Shreni answers the scariest question up front:
+  *does a bot push to `main`?* You decide — auto-merge for a solo high-trust loop,
+  or a pull-request gate for a human/team sign-off. Either way, nothing merges
+  until the AI reviewer approves it. See [Merge policy](#merge-policy-push-vs-pr).
+
+### Who it's for
+
+- **The solo engineer / indie hacker** with more ideas than evenings. Hand the
+  ideas you never get to to a staff that decomposes and ships them overnight, on
+  the model you already pay for — no new SaaS bill.
+- **The small team** that wants leverage without handing its codebase to a hosted
+  agent. Point Shreni at a repo, choose `pr` mode, and let it open reviewed pull
+  requests your team merges — your CI, your gate, your machine.
+- **The agent-automation explorer** who wants to *study a real multi-agent system*,
+  not another toy demo. Shreni is a working orchestrator → coder → reviewer → tester
+  loop with recovery, watchdogs, quality gates, and an explicit git workflow —
+  readable TypeScript, 800+ tests, Apache-2.0. Fork it, instrument it, learn from it.
 
 ## How it works
 
-Think of Shreni as a small, tireless engineering team you run locally:
+Step onto the dojo floor. Shreni is the space; the agents are the small, tireless
+engineering team working in it, each with a clear station and a clear hand-off:
 
 - An **intake agent** (**Suthradhara**) is the front door. Instead of hand-writing a
   perfectly decomposed backlog, you describe a feature and it interviews you —
@@ -139,19 +185,24 @@ and the provider story beyond Claude is experimental. Expect rough edges around
 onboarding and distribution — those are the current focus. Feedback and issues
 welcome.
 
-## The team, by name (architecture)
+## Meet the team (architecture)
 
-Under the hood, each role above has a Sanskrit name — they are the vocabulary you
-will see in logs, config, and the dashboard:
+Every role on the dojo floor has a Sanskrit name — the vocabulary you'll see in
+logs, config, and the dashboard. Think of them as the staff you've hired:
 
-| Component | Plain-English role |
-|---|---|
-| **Suthradhara** (draughtsman / layout-planner) | Requirements & design intake agent. Interviews you to turn a feature idea into a dependency-ordered epic of ready beads plus a per-feature design doc. Runs *outside* the poll loop as a producer — it files work for Sthapathi to pick up; it never claims or closes. |
-| **Sthapathi** (master builder / chief architect) | Orchestrator. Polls `bd` for tasks, dispatches agents, drives the review loop, and owns the task lifecycle and git workflow. |
-| **Silpi** (craftsman) | Coding agent. Writes implementation code and unit tests, runs lint and tests, submits for review. |
-| **Viharapala** (guardian) | Review agent. Judges Silpi's output against acceptance criteria, quality, and coverage; returns `APPROVE` or `REJECT` with structured feedback. |
-| **Parikshaka** (examiner) | Test agent. Runs asynchronously after each merge; backfills tests and surfaces coverage gaps. |
-| **Phalaka** (panel) | Local dashboard. Loopback web UI to watch worker status, task progress, and stuck-state alerts. |
+| Component | Role on the team | What they do |
+|---|---|---|
+| **Suthradhara** (draughtsman / layout-planner) | **Product manager** | Requirements & design intake agent. Interviews you to turn a feature idea into a dependency-ordered epic of ready beads plus a per-feature design doc. Runs *outside* the poll loop as a producer — it files work for Sthapathi to pick up; it never claims or closes. |
+| **Sthapathi** (master builder / chief architect) | **Engineering manager** | Orchestrator. Polls `bd` for tasks, assigns them, drives the review loop, and owns the task lifecycle and git workflow. |
+| **Silpi** (craftsman) | **Software engineer** | Coding agent. Writes implementation code and unit tests, runs lint and tests, submits for review. |
+| **Viharapala** (guardian) | **Code reviewer** | Review agent. Judges Silpi's output against acceptance criteria, quality, and coverage; returns `APPROVE` or `REJECT` with structured feedback. |
+| **Parikshaka** (examiner) | **QA engineer** | Test agent. Runs asynchronously after each merge; backfills tests and surfaces coverage gaps. |
+| **Phalaka** (panel) | **The team's status board** | Local dashboard. Loopback web UI to watch worker status, task progress, and stuck-state alerts. |
+
+And the record-keeping runs underneath all of them: **beads** is the team's durable
+ledger — every task, assignment, review verdict, and round note is written to a
+git-tracked database, so the whole engagement is auditable and replayable long after
+the work merges.
 
 Each project managed by Shreni is a **Kshetra** (field) — its own git repo, `bd`
 task database, RAG index, and agent queue, fully isolated from every other project.
@@ -429,140 +480,10 @@ collector endpoint is configured, opted-in events are written to a local file
 
 ## Troubleshooting
 
-### Harness won't start — `registry.json` missing
-
-```
-Error: ~/.shreni/registry.json not found
-```
-
-No Kshetras are registered. Either run `shreni init-kshetra` for a new project or `shreni register /path/to/project` for an existing one.
-
----
-
-### Task stuck in `in_progress` after restart
-
-Sthapathi automatically recovers in-flight tasks on startup by reading `bd` round notes and the git branch state. If a task remains stuck after restart:
-
-```bash
-bd show <id>              # read the last round note to see where it stopped
-shreni logs --bead <id>   # check harness logs for the error
-```
-
-If recovery failed, unblock manually and let Sthapathi retry:
-
-```bash
-bd update <id> --unblock
-```
-
----
-
-### Kshetra is paused with `requiresManualResume: true`
-
-This happens after a git failure or `bd` database error. The harness will not auto-resume these.
-
-```bash
-shreni status --all                  # identify the paused Kshetra and reason
-bd show <blocked-bead-id>            # read the error detail in round notes
-# Fix the underlying issue (resolve git conflict, free disk space, etc.)
-shreni resume --kshetra <slug>       # clear the pause and restart the loop
-```
-
----
-
-### Push rejected — non-fast-forward
-
-Sthapathi retries once automatically with a pull-rebase. If it fails twice, it blocks the bead and pauses the Kshetra. Resolve manually:
-
-```bash
-cd /projects/<slug>
-git pull --rebase origin main
-git push origin main
-shreni resume --kshetra <slug>
-bd update <blocked-bead-id> --unblock
-```
-
----
-
-### Merge conflict outside task scope
-
-Silpi touched files it wasn't supposed to. The bead is blocked and the Kshetra is paused for human review.
-
-```bash
-bd show <id>                      # see which files conflicted
-git diff bead-<id>/<slug>         # inspect Silpi's changes
-# Resolve the conflict manually, or close the bead and re-file a cleaner task
-bd update <id> --unblock          # let Sthapathi retry
-shreni resume --kshetra <slug>
-```
-
----
-
-### Agent output malformed / JSON parse error
-
-Sthapathi retries the round once automatically. If it fails again, the bead is blocked:
-
-```bash
-bd show <id>                  # round note shows the parse error detail
-bd update <id> --unblock      # let Sthapathi retry from round 1
-```
-
-If this recurs for the same task, the task description may be too ambiguous:
-
-```bash
-bd update <id> --description "More precise acceptance criteria"
-bd update <id> --unblock
-```
-
----
-
-### Anthropic API rate limit (429) or overloaded (529)
-
-Sthapathi retries with exponential backoff (up to 3×, max 60s between retries). If all retries are exhausted, the Kshetra pauses for 5 minutes and auto-resumes. No action is needed unless the outage is prolonged.
-
----
-
-### `bd` database locked
-
-`bd` uses embedded Dolt which is single-writer. If another process holds the lock:
-
-```bash
-lsof +D /projects/<slug>-beads/embeddeddolt   # find the lock holder
-# kill the blocking process, then:
-shreni resume --kshetra <slug>
-```
-
----
-
-### RAG search returning stale results
-
-The index rebuilds incrementally on every merged bead. To force a full rebuild:
-
-```bash
-shreni index rebuild --kshetra <slug>
-shreni index status
-```
-
----
-
-### Interactive Claude Code session not seeing project tasks
-
-The `SessionStart` hook (`bd prime`) should run automatically when you open a Claude Code session in the project directory. If it's not firing:
-
-```bash
-bd doctor          # check hook installation
-bd setup claude    # reinstall the hooks
-```
-
-Verify hooks are present in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": ["bd prime"],
-    "PreCompact": ["bd prime"]
-  }
-}
-```
+Hit a snag? The common failure modes — a stuck task after restart, a rejected
+push, a paused Kshetra, `bd` lock contention, rate limits, stale RAG results —
+and their recovery steps live in the
+**[Troubleshooting guide](docs/guides/troubleshooting.md)**.
 
 ## License & Trademark
 
