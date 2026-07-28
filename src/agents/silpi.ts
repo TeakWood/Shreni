@@ -97,7 +97,7 @@ function buildSilpiSystemPrompt(
     );
   }
 
-  if (context.ragChunks) sections.push(`== RELEVANT CODE ==\n${context.ragChunks}`);
+  if (context.repoMap) sections.push(`== REPO MAP ==\n${context.repoMap}`);
 
   const gateCommands = qualityGateCommands(context.kshetra);
   if (gateCommands) sections.push(gateCommands);

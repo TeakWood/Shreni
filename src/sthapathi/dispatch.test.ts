@@ -73,9 +73,15 @@ vi.mock('./guard.js', () => ({
   OffBranchError: FakeOffBranchError,
 }));
 
-// fs mock to avoid real disk reads
+// fs mock to avoid real disk reads. readFile rejects (SKILLS.md and the cached
+// repo-map are "missing"); readdir also rejects so the repo-map fallback walk
+// finds no source files and loadRepoMap resolves to '' without touching disk.
 vi.mock('fs/promises', () => ({
   readFile: vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' })),
+  readdir: vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' })),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+  rename: vi.fn().mockResolvedValue(undefined),
+  mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ── imports after mocks ──────────────────────────────────────────────────────
@@ -208,9 +214,9 @@ describe('buildAgentContext', () => {
     expect(ctx.taskDetails).toBe('task details output');
   });
 
-  it('sets ragChunks to empty string (stub until Phase 9)', async () => {
+  it('sets repoMap to empty string when no source files are found', async () => {
     const ctx = await buildAgentContext(KSHETRA, TASK);
-    expect(ctx.ragChunks).toBe('');
+    expect(ctx.repoMap).toBe('');
   });
 
   it('returns empty universalSkills when SKILLS.md is missing', async () => {

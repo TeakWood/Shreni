@@ -143,6 +143,10 @@ vite.config.ts.timestamp-*
 .vite/
 .beads
 
+# Per-Kshetra repo/symbol map (Shreni-beads-vcz): a derived cache regenerated on
+# merge and read from the working tree, so it never belongs in git.
+.shreni/repo-map.md
+
 # Supabase (telemetry backend). Never commit the service-role key or local CLI
 # state — the deployed function gets SUPABASE_SERVICE_ROLE_KEY injected at runtime.
 supabase/.env

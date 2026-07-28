@@ -49,7 +49,7 @@ const CONTEXT: AgentContext = {
   taskDetails: 'Task ID: proj-42\nTitle: Fix auth\nAcceptance: tokens refresh on 401',
   universalSkills: '',
   reviewGuide: '',
-  ragChunks: '',
+  repoMap: '',
 };
 
 const SILPI_OUTPUT: SilpiOutput = {
