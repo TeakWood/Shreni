@@ -15,7 +15,10 @@ import { copyFileSync, mkdirSync, rmSync, writeFileSync, chmodSync, createReadSt
 import { createHash } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { platform, arch } from 'node:process';
+
+const require = createRequire(import.meta.url);
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD = join(ROOT, 'build');
@@ -61,11 +64,23 @@ async function main() {
     logLevel: 'info',
   });
 
-  // 2. SEA config + blob.
+  // 2. SEA config + blob. The tree-sitter wasm (runtime + one grammar per
+  //    non-TS language) is embedded as SEA assets: native .node addons don't
+  //    survive a SEA, but wasm bytes read back via sea.getAsset() at runtime do.
+  //    src/kshetra/tree-sitter.ts looks these up by the exact keys below. Paths
+  //    are resolved (not hard-coded) so pnpm's nested layout is handled.
+  console.log('→ collecting tree-sitter wasm assets');
+  const assets = { 'tree-sitter.wasm': require.resolve('web-tree-sitter/tree-sitter.wasm') };
+  for (const lang of ['python', 'go', 'rust', 'java', 'kotlin']) {
+    assets[`tree-sitter-${lang}.wasm`] = require.resolve(`tree-sitter-wasms/out/tree-sitter-${lang}.wasm`);
+  }
+  for (const [name, path] of Object.entries(assets)) console.log(`   ${name} ← ${path}`);
+
   writeFileSync(SEA_CONFIG, JSON.stringify({
     main: BUNDLE,
     output: BLOB,
     disableExperimentalSEAWarning: true,
+    assets,
   }, null, 2));
   console.log('→ generating SEA blob');
   run(process.execPath, ['--experimental-sea-config', SEA_CONFIG]);

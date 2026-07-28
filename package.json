@@ -75,7 +75,9 @@
     "@types/js-yaml": "^4.0.9",
     "fastify": "^5.8.5",
     "js-yaml": "^4.2.0",
+    "tree-sitter-wasms": "0.1.13",
     "typescript": "^6.0.3",
+    "web-tree-sitter": "0.24.7",
     "zod": "^4.4.3"
   }
 }

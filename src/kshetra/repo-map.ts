@@ -3,6 +3,7 @@ import { join, relative, dirname, extname, basename } from 'path';
 import ts from 'typescript';
 import type { KshetraConfig } from './config.js';
 import { normalizeLanguage, resolveVendorDirs, resolveTestGlobs, matchesTestGlob, type ProfileKey } from './toolchain.js';
+import { extractSymbolsTreeSitter, type TsLang } from './tree-sitter.js';
 
 // Deterministic repo/symbol map for agentic-retrieval cold-start (Shreni-beads-vcz,
 // Tier 0 of the RAG review epic Shreni-beads-6m0). The executors are the Claude
@@ -53,13 +54,13 @@ interface FileEntry {
 // profile, so an `unknown`-profile repo with mixed sources is still handled
 // per-file). `ts` covers JS too — the TypeScript parser reads plain JS. `other`
 // gets a file listing + role but no symbols.
-type Lang = 'ts' | 'python' | 'go' | 'rust' | 'java' | 'other';
+type Lang = 'ts' | 'python' | 'go' | 'rust' | 'java' | 'kotlin' | 'other';
 
 const EXT_LANG: Record<string, Lang> = {
   '.ts': 'ts', '.tsx': 'ts', '.mts': 'ts', '.cts': 'ts',
   '.js': 'ts', '.jsx': 'ts', '.mjs': 'ts', '.cjs': 'ts',
   '.py': 'python', '.pyi': 'python',
-  '.go': 'go', '.rs': 'rust', '.java': 'java', '.kt': 'java',
+  '.go': 'go', '.rs': 'rust', '.java': 'java', '.kt': 'kotlin',
 };
 
 function languageOf(relPath: string): Lang {
@@ -184,54 +185,72 @@ function normalizeRole(raw: string): string {
 
 // ── Symbol extraction (language-aware) ────────────────────────────────────────
 
+// Cap and de-duplicate a raw symbol list, preserving first-appearance order so
+// the rendered map is deterministic across regenerations.
+function boundedUnique(raw: string[]): string[] {
+  const names: string[] = [];
+  for (const n of raw) {
+    if (n && !names.includes(n) && names.length < MAX_SYMBOLS_PER_FILE) names.push(n);
+  }
+  return names;
+}
+
 // Extract exported/public top-level symbol names from a file, dispatched by the
 // file's language. TS/JS uses the TypeScript compiler's AST (accurate across
 // multi-line declarations, `export { … as … }` lists, default exports, and
-// re-exports — cases a line regex mishandles). The other stacks lack a bundled
-// AST parser that survives the SEA-binary build, so they use a bounded
-// visibility heuristic until a tree-sitter path lands (Shreni-beads-6m0 Tier 1).
-// Order of first appearance is preserved and duplicates dropped → deterministic.
-function extractSymbols(content: string, relPath: string): string[] {
-  const names: string[] = [];
-  const add = (n?: string | null): void => {
-    if (!n) return;
-    if (!names.includes(n) && names.length < MAX_SYMBOLS_PER_FILE) names.push(n);
-  };
+// re-exports — cases a line regex mishandles). Python/Go/Rust/Java/Kotlin use a
+// real tree-sitter AST (Shreni-beads-l40); if the wasm runtime is unavailable in
+// this environment, they degrade to the bounded line-regex heuristic so the map
+// is still produced. Order of first appearance is preserved and duplicates
+// dropped → deterministic.
+async function extractSymbols(content: string, relPath: string): Promise<string[]> {
+  const lang = languageOf(relPath);
+  if (lang === 'ts') return boundedUnique(extractTsSymbols(content, relPath));
+  if (lang === 'other') return [];
 
-  switch (languageOf(relPath)) {
-    case 'ts':
-      extractTsSymbols(content, relPath, add);
-      break;
-    case 'python':
-      for (const line of content.split('\n')) {
+  const viaTreeSitter = await extractSymbolsTreeSitter(content, lang);
+  return boundedUnique(viaTreeSitter ?? extractSymbolsRegex(content, lang));
+}
+
+// Fallback symbol extraction for the tree-sitter languages when the wasm runtime
+// can't load. A bounded per-line visibility heuristic — less accurate than the
+// AST (misses multi-line signatures, grouped decls, and receiver/impl methods),
+// but it keeps the map non-empty rather than dropping every non-TS symbol.
+function extractSymbolsRegex(content: string, lang: TsLang): string[] {
+  const out: string[] = [];
+  for (const line of content.split('\n')) {
+    switch (lang) {
+      case 'python': {
         // Top-level (column 0) def/class; underscore-prefixed names are private.
         const m = line.match(/^(?:async\s+)?(?:def|class)\s+([A-Za-z_][\w]*)/);
-        if (m && !m[1].startsWith('_')) add(m[1]);
+        if (m && !m[1].startsWith('_')) out.push(m[1]);
+        break;
       }
-      break;
-    case 'go':
-      for (const line of content.split('\n')) {
+      case 'go': {
         const m = line.match(/^(?:func\s+(?:\([^)]*\)\s*)?|type\s+|var\s+|const\s+)([A-Za-z_]\w*)/);
         // Exported Go identifiers start with an uppercase letter.
-        if (m && /^[A-Z]/.test(m[1])) add(m[1]);
+        if (m && /^[A-Z]/.test(m[1])) out.push(m[1]);
+        break;
       }
-      break;
-    case 'rust':
-      for (const line of content.split('\n')) {
+      case 'rust': {
         const m = line.match(/^\s*pub(?:\([^)]*\))?\s+(?:async\s+)?(?:fn|struct|enum|trait|type|const|mod)\s+([A-Za-z_]\w*)/);
-        if (m) add(m[1]);
+        if (m) out.push(m[1]);
+        break;
       }
-      break;
-    case 'java':
-      for (const line of content.split('\n')) {
+      case 'java': {
         const m = line.match(/^\s*public\s+(?:final\s+|abstract\s+|static\s+)*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)/);
-        if (m) add(m[1]);
+        if (m) out.push(m[1]);
+        break;
       }
-      break;
-    case 'other':
-      break;
+      case 'kotlin': {
+        // Kotlin defaults to public; a private/protected/internal modifier hides it.
+        const m = line.match(/^\s*(?:(?:public|private|protected|internal|final|open|abstract|sealed|data)\s+)*(?:fun|class|interface|object)\s+([A-Za-z_]\w*)/);
+        if (m && !/\b(?:private|protected|internal)\b/.test(line)) out.push(m[1]);
+        break;
+      }
+    }
   }
-  return names;
+  return out;
 }
 
 // Choose the TypeScript ScriptKind so JSX/TSX and plain JS parse correctly.
@@ -251,16 +270,20 @@ function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
   return !!mods && mods.some(m => m.kind === kind);
 }
 
-// Walk a TS/JS source file's top-level statements and emit each EXPORTED symbol's
-// name via `add`. Parsing is tolerant (createSourceFile never throws on syntax
+// Walk a TS/JS source file's top-level statements and return each EXPORTED
+// symbol's name. Parsing is tolerant (createSourceFile never throws on syntax
 // errors — it yields a best-effort tree), so a malformed file degrades to fewer
 // symbols rather than failing the whole map.
-function extractTsSymbols(content: string, relPath: string, add: (n?: string | null) => void): void {
+function extractTsSymbols(content: string, relPath: string): string[] {
+  const names: string[] = [];
+  const add = (n?: string | null): void => {
+    if (n) names.push(n);
+  };
   let src: ts.SourceFile;
   try {
     src = ts.createSourceFile(basename(relPath), content, ts.ScriptTarget.Latest, /*setParentNodes*/ false, scriptKindFor(relPath));
   } catch {
-    return; // parser refused the file — skip its symbols, keep the file listed
+    return names; // parser refused the file — skip its symbols, keep the file listed
   }
 
   // Recursively collect names bound by a declaration (handles destructuring:
@@ -297,6 +320,7 @@ function extractTsSymbols(content: string, relPath: string, add: (n?: string | n
       add('default'); // export default <expr>  /  export = <expr>
     }
   }
+  return names;
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -382,7 +406,7 @@ export async function generateRepoMap(kshetra: KshetraConfig): Promise<string> {
         continue; // unreadable file — skip
       }
       const lang = languageOf(rel);
-      entries.push({ relPath: rel, role: extractRole(content, lang), symbols: extractSymbols(content, rel) });
+      entries.push({ relPath: rel, role: extractRole(content, lang), symbols: await extractSymbols(content, rel) });
     }
 
     if (entries.length === 0) return '';
