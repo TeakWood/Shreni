@@ -124,24 +124,24 @@ describe('resolveTargetKshetra', () => {
 });
 
 describe('runSuthradhara', () => {
-  it('rejects an unknown subcommand', () => {
-    expect(() =>
+  it('rejects an unknown subcommand', async () => {
+    await expect(
       runSuthradhara('reboot', { args: [], flagKshetra: undefined, cwd: '/', kshetras: [KSHETRA_A] }),
-    ).toThrow(/Usage:/);
+    ).rejects.toThrow(/Usage:/);
   });
 
-  it('rejects a missing subcommand', () => {
-    expect(() =>
+  it('rejects a missing subcommand', async () => {
+    await expect(
       runSuthradhara(undefined, { args: [], flagKshetra: undefined, cwd: '/', kshetras: [KSHETRA_A] }),
-    ).toThrow(/Usage:/);
+    ).rejects.toThrow(/Usage:/);
   });
 
-  it('start dispatches to startSession with the resolved kshetra and prints the session id', () => {
-    mockStartSession.mockReturnValue({
+  it('start dispatches to startSession with the resolved kshetra and prints the session id', async () => {
+    mockStartSession.mockResolvedValue({
       status: 'started', kshetraId: 'alpha', sessionId: ALPHA_SESSION, pid: 100,
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('start', {
+    await runSuthradhara('start', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     expect(mockStartSession).toHaveBeenCalledWith(KSHETRA_A);
@@ -152,33 +152,34 @@ describe('runSuthradhara', () => {
     logSpy.mockRestore();
   });
 
-  it('start reports already_running without spawning again', () => {
-    mockStartSession.mockReturnValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
+  it('start reports already_running without spawning again', async () => {
+    mockStartSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('start', {
+    await runSuthradhara('start', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('already running'));
     logSpy.mockRestore();
   });
 
-  it('stop reports stopped / stale / not_running variants', () => {
+  it('stop dispatches to stopSession with the resolved kshetra and reports each variant', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    mockStopSession.mockReturnValue({ status: 'stopped', kshetraId: 'alpha', pid: 100 });
-    runSuthradhara('stop', {
+    mockStopSession.mockResolvedValue({ status: 'stopped', kshetraId: 'alpha', pid: 100 });
+    await runSuthradhara('stop', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
+    expect(mockStopSession).toHaveBeenCalledWith(KSHETRA_A);
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('stopped (pid 100)'));
 
-    mockStopSession.mockReturnValue({ status: 'stale_pid_cleared', kshetraId: 'alpha' });
-    runSuthradhara('stop', {
+    mockStopSession.mockResolvedValue({ status: 'stale_pid_cleared', kshetraId: 'alpha' });
+    await runSuthradhara('stop', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('stale PID file cleared'));
 
-    mockStopSession.mockReturnValue({ status: 'not_running', kshetraId: 'alpha' });
-    runSuthradhara('stop', {
+    mockStopSession.mockResolvedValue({ status: 'not_running', kshetraId: 'alpha' });
+    await runSuthradhara('stop', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('not running'));
@@ -186,12 +187,12 @@ describe('runSuthradhara', () => {
     logSpy.mockRestore();
   });
 
-  it('status reports running + log path', () => {
+  it('status reports running + log path', async () => {
     mockStatusSession.mockReturnValue({
       kshetraId: 'alpha', running: true, pid: 100, logPath: '/tmp/alpha/suthradhara.log',
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('status', {
+    await runSuthradhara('status', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     const output = logSpy.mock.calls.map(c => c[0]).join('\n');
@@ -200,24 +201,24 @@ describe('runSuthradhara', () => {
     logSpy.mockRestore();
   });
 
-  it('status reports not running when no session', () => {
+  it('status reports not running when no session', async () => {
     mockStatusSession.mockReturnValue({
       kshetraId: 'alpha', running: false, pid: null, logPath: '/tmp/alpha/suthradhara.log',
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('status', {
+    await runSuthradhara('status', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('not running'));
     logSpy.mockRestore();
   });
 
-  it('resume infers the kshetra from the session id and dispatches to resumeSession', () => {
-    mockResumeSession.mockReturnValue({
+  it('resume infers the kshetra from the session id and dispatches to resumeSession', async () => {
+    mockResumeSession.mockResolvedValue({
       status: 'resumed', kshetraId: 'alpha', sessionId: ALPHA_SESSION, pid: 200,
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('resume', {
+    await runSuthradhara('resume', {
       args: [ALPHA_SESSION], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     expect(mockResumeSession).toHaveBeenCalledWith(KSHETRA_A, ALPHA_SESSION);
@@ -227,39 +228,39 @@ describe('runSuthradhara', () => {
     logSpy.mockRestore();
   });
 
-  it('resume reports already_running when a live session exists', () => {
-    mockResumeSession.mockReturnValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
+  it('resume reports already_running when a live session exists', async () => {
+    mockResumeSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('resume', {
+    await runSuthradhara('resume', {
       args: [ALPHA_SESSION], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
     });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('already running (pid 100)'));
     logSpy.mockRestore();
   });
 
-  it('resume rejects a missing session id argument', () => {
-    expect(() =>
+  it('resume rejects a missing session id argument', async () => {
+    await expect(
       runSuthradhara('resume', {
         args: [], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
       }),
-    ).toThrow(/Usage: shreni suthradhara resume/);
+    ).rejects.toThrow(/Usage: shreni suthradhara resume/);
   });
 
-  it('resume rejects a session id whose kshetra is not registered', () => {
-    expect(() =>
+  it('resume rejects a session id whose kshetra is not registered', async () => {
+    await expect(
       runSuthradhara('resume', {
         args: [BETA_SESSION], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
       }),
-    ).toThrow(/kshetra "beta", which is not registered/);
+    ).rejects.toThrow(/kshetra "beta", which is not registered/);
   });
 
-  it('list prints every session across kshetras when no filter is given', () => {
+  it('list prints every session across kshetras when no filter is given', async () => {
     mockListSessions.mockReturnValue([
       { id: BETA_SESSION, kshetraId: 'beta', stage: 'clarify', updatedAt: '2026-07-27T14:10:00.000Z' },
       { id: ALPHA_SESSION, kshetraId: 'alpha', stage: 'discovery', updatedAt: '2026-07-27T14:03:12.000Z' },
     ]);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('list', {
+    await runSuthradhara('list', {
       args: [], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A, KSHETRA_B],
     });
     expect(mockListSessions).toHaveBeenCalledWith(undefined);
@@ -269,10 +270,10 @@ describe('runSuthradhara', () => {
     logSpy.mockRestore();
   });
 
-  it('list filters by kshetra when @<id> is present', () => {
+  it('list filters by kshetra when @<id> is present', async () => {
     mockListSessions.mockReturnValue([]);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runSuthradhara('list', {
+    await runSuthradhara('list', {
       args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A, KSHETRA_B],
     });
     expect(mockListSessions).toHaveBeenCalledWith('alpha');

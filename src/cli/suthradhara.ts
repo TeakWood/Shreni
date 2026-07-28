@@ -85,7 +85,7 @@ export interface RunOpts {
   kshetras?: KshetraConfig[];
 }
 
-export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
+export async function runSuthradhara(sub: string | undefined, opts: RunOpts): Promise<void> {
   if (!isSubcommand(sub)) {
     throw new Error(
       'Usage: shreni suthradhara <start|resume <session-id>|stop|status|list> [@<id> | --kshetra <id>]',
@@ -94,7 +94,7 @@ export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
   const kshetras = opts.kshetras ?? loadRegistry();
 
   if (sub === 'resume') {
-    runResume(opts, kshetras);
+    await runResume(opts, kshetras);
     return;
   }
 
@@ -106,7 +106,7 @@ export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
 
   if (sub === 'start') {
-    const result = startSession(kshetra);
+    const result = await startSession(kshetra);
     if (result.status === 'already_running') {
       console.log(`suthradhara[${result.kshetraId}]: already running (pid ${result.pid})`);
     } else {
@@ -115,7 +115,7 @@ export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
       console.log(`Resume with: shreni suthradhara resume ${result.sessionId}`);
     }
   } else if (sub === 'stop') {
-    const result = stopSession(kshetra.id);
+    const result = await stopSession(kshetra);
     if (result.status === 'stopped') {
       console.log(`suthradhara[${result.kshetraId}]: stopped (pid ${result.pid})`);
     } else if (result.status === 'stale_pid_cleared') {
@@ -134,7 +134,7 @@ export function runSuthradhara(sub: string | undefined, opts: RunOpts): void {
   }
 }
 
-function runResume(opts: RunOpts, kshetras: KshetraConfig[]): void {
+async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void> {
   const sessionId = parseSessionId(opts.args);
   if (!sessionId) {
     throw new Error(
@@ -150,7 +150,7 @@ function runResume(opts: RunOpts, kshetras: KshetraConfig[]): void {
     );
   }
 
-  const result = resumeSession(kshetra, sessionId);
+  const result = await resumeSession(kshetra, sessionId);
   if (result.status === 'already_running') {
     console.log(
       `suthradhara[${result.kshetraId}]: already running (pid ${result.pid}); resume is a no-op`,

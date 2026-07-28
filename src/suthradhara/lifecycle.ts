@@ -17,6 +17,10 @@ import {
   SessionNotFoundError,
 } from './persistence';
 import { newSessionState } from './state';
+import {
+  createSessionWorktree,
+  reapSessionWorktrees,
+} from './worktree';
 
 // Detached-process lifecycle for one Suthradhara session, per Kshetra. Mirrors
 // the Phalaka precedent: `start` is idempotent on a live PID; `stop` clears a
@@ -63,10 +67,10 @@ function kshetraIdFromSessionArg(sessionId: string): string {
   return sessionId.replace(/-\d{8}T\d{6}-[0-9a-f]{4}$/, '');
 }
 
-export function startSession(
+export async function startSession(
   kshetra: KshetraConfig,
   launchFactory: LaunchFactory = defaultLaunch,
-): SessionStartResult {
+): Promise<SessionStartResult> {
   const existing = readSuthradharaPid(kshetra.id);
   if (existing !== null && isAlive(existing)) {
     return { status: 'already_running', kshetraId: kshetra.id, pid: existing };
@@ -84,18 +88,25 @@ export function startSession(
   const sessionId = generateSessionId(kshetra.id);
   saveSession(newSessionState(sessionId, kshetra.id));
 
-  const pid = spawnRunner(kshetra, launchFactory(sessionId));
+  // Reap any leaked worktree from a prior crashed session (only one runs per
+  // Kshetra), then give this session its own detached checkout (ARD §4). The
+  // runner — and the interview child that inherits its cwd — reads/greps there,
+  // isolated from the build tree at repo.path.
+  await reapSessionWorktrees(kshetra);
+  const worktreePath = await createSessionWorktree(kshetra, sessionId);
+
+  const pid = spawnRunner(kshetra, launchFactory(sessionId), worktreePath);
   return { status: 'started', kshetraId: kshetra.id, sessionId, pid };
 }
 
 // Resume an existing session's transcript. The state file must already exist
 // and must belong to this Kshetra; otherwise fail loudly rather than silently
 // creating a fresh state under the same id.
-export function resumeSession(
+export async function resumeSession(
   kshetra: KshetraConfig,
   sessionId: string,
   launchFactory: LaunchFactory = defaultLaunch,
-): SessionResumeResult {
+): Promise<SessionResumeResult> {
   const existing = readSuthradharaPid(kshetra.id);
   if (existing !== null && isAlive(existing)) {
     return { status: 'already_running', kshetraId: kshetra.id, pid: existing };
@@ -124,18 +135,22 @@ export function resumeSession(
     );
   }
 
-  const pid = spawnRunner(kshetra, launchFactory(sessionId));
+  // Re-establish the session's worktree (createSessionWorktree removes any stale
+  // one at the same path first, so a resume after an unclean stop is safe).
+  const worktreePath = await createSessionWorktree(kshetra, sessionId);
+
+  const pid = spawnRunner(kshetra, launchFactory(sessionId), worktreePath);
   return { status: 'resumed', kshetraId: kshetra.id, sessionId, pid };
 }
 
-function spawnRunner(kshetra: KshetraConfig, launch: Launch): number {
+function spawnRunner(kshetra: KshetraConfig, launch: Launch, cwd: string): number {
   mkdirSync(kshetraDir(kshetra.id), { recursive: true });
   const logFd = openSync(suthradharaLogPath(kshetra.id), 'a');
 
   const child = spawn(launch.command, launch.args, {
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    cwd: kshetra.repo.path,
+    cwd,
   });
 
   if (child.pid === undefined) {
@@ -147,17 +162,28 @@ function spawnRunner(kshetra: KshetraConfig, launch: Launch): number {
   return child.pid;
 }
 
-export function stopSession(kshetraId: string): SessionStopResult {
+export async function stopSession(
+  kshetra: KshetraConfig,
+): Promise<SessionStopResult> {
+  const kshetraId = kshetra.id;
   const pid = readSuthradharaPid(kshetraId);
-  if (pid === null) return { status: 'not_running', kshetraId };
+  if (pid === null) {
+    // No live session, but a crash could still have leaked a worktree — sweep.
+    await reapSessionWorktrees(kshetra);
+    return { status: 'not_running', kshetraId };
+  }
 
   if (!isAlive(pid)) {
     clearSuthradharaPid(kshetraId);
+    await reapSessionWorktrees(kshetra);
     return { status: 'stale_pid_cleared', kshetraId };
   }
 
   process.kill(pid, 'SIGTERM');
   clearSuthradharaPid(kshetraId);
+  // Session over → tear down its worktree (a sweep, since only one runs per
+  // Kshetra and stop doesn't carry the session id). Prune reaps admin entries.
+  await reapSessionWorktrees(kshetra);
   return { status: 'stopped', kshetraId, pid };
 }
 
