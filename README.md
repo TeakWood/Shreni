@@ -205,7 +205,7 @@ git-tracked database, so the whole engagement is auditable and replayable long a
 the work merges.
 
 Each project managed by Shreni is a **Kshetra** (field) — its own git repo, `bd`
-task database, RAG index, and agent queue, fully isolated from every other project.
+task database, and agent queue, fully isolated from every other project.
 
 ```
 Developer machine
@@ -281,7 +281,7 @@ This command runs 10 steps automatically:
 6. Installs Claude Code hooks (`bd setup claude`) — auto-injects project context at session start
 7. Generates `.shreni/kshetra.yaml` from the project template
 8. Appends a `SHRENI INTEGRATION` section to `CLAUDE.md` defining the interactive session role boundary
-9. Builds the initial RAG index for codebase search
+9. Scaffolds an empty RAG index placeholder (codebase-search indexing is not yet implemented)
 10. Registers the Kshetra with Sthapathi
 
 After init, edit `.shreni/kshetra.yaml` to set your stack and conventions:
@@ -481,7 +481,7 @@ collector endpoint is configured, opted-in events are written to a local file
 ## Troubleshooting
 
 Hit a snag? The common failure modes — a stuck task after restart, a rejected
-push, a paused Kshetra, `bd` lock contention, rate limits, stale RAG results —
+push, a paused Kshetra, `bd` lock contention, and rate limits —
 and their recovery steps live in the
 **[Troubleshooting guide](docs/guides/troubleshooting.md)**.
 

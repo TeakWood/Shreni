@@ -108,17 +108,6 @@ shreni resume --kshetra <slug>
 
 ---
 
-## RAG search returning stale results
-
-The index rebuilds incrementally on every merged bead. To force a full rebuild:
-
-```bash
-shreni index rebuild --kshetra <slug>
-shreni index status
-```
-
----
-
 ## Interactive Claude Code session not seeing project tasks
 
 The `SessionStart` hook (`bd prime`) should run automatically when you open a Claude Code session in the project directory. If it's not firing:

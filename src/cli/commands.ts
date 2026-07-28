@@ -168,7 +168,7 @@ export const COMMANDS: Command[] = [
   },
   {
     name: 'sync',
-    summary: 'Sync the RAG index for the current (or all) kshetras',
+    summary: 'Sync the beads database (git pull + push) for the current (or all) kshetras',
     usage: '[--kshetra <id>] [--all]',
     run(ctx) {
       return runSync({ kshetraId: ctx.flag('--kshetra'), all: ctx.has('--all') });
