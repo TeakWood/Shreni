@@ -25,6 +25,12 @@ It is built around three convictions that set it apart from most agent framework
 
 Think of Shreni as a small, tireless engineering team you run locally:
 
+- An **intake agent** (**Suthradhara**) is the front door. Instead of hand-writing a
+  perfectly decomposed backlog, you describe a feature and it interviews you —
+  discovery, clarify, decompose, design, confirm — reading your repo read-only to
+  ground itself in the real code. On your confirmation it files a dependency-ordered
+  epic of ready tasks plus a per-feature design doc. It only *produces* work; it never
+  claims or closes it.
 - An **orchestrator** watches your task list. When a task is ready and its
   dependencies are met, it assigns it, sets up an isolated branch, and manages the
   whole lifecycle — including recovering cleanly if the machine restarts mid-task.
