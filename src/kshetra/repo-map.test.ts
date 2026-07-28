@@ -88,6 +88,69 @@ describe('generateRepoMap (TypeScript)', () => {
   });
 });
 
+describe('AST-based TS extraction (cases a line regex mishandles)', () => {
+  it('captures a multi-line named export list with aliases', async () => {
+    write(
+      'src/api.ts',
+      `const a = 1, b = 2, c = 3;\n` +
+        `export {\n  a,\n  b as bee,\n  c,\n};\n`,
+    );
+    const map = await generateRepoMap(ksh(root));
+    expect(map).toContain('a, bee, c');
+  });
+
+  it('captures a function whose signature spans multiple lines', async () => {
+    write(
+      'src/multi.ts',
+      `export function wideSignature(\n  first: string,\n  second: number,\n): void {}\n`,
+    );
+    const map = await generateRepoMap(ksh(root));
+    expect(map).toContain('wideSignature');
+  });
+
+  it('lists a named default export by its name and an anonymous one as "default"', async () => {
+    write('src/named.ts', `export default function Widget() {}\n`);
+    write('src/anon.ts', `export default function () {}\n`);
+    const map = await generateRepoMap(ksh(root));
+    expect(map).toContain('Widget');
+    expect(map).toMatch(/`anon\.ts`[\s\S]*?exports: default/);
+  });
+
+  it('expands destructuring binding exports', async () => {
+    write('src/destructure.ts', `const o = { x: 1, y: 2 };\nexport const { x, y } = o;\n`);
+    const map = await generateRepoMap(ksh(root));
+    expect(map).toContain('x, y');
+  });
+
+  it('captures namespace and star re-exports', async () => {
+    write('src/reexport.ts', `export * as helpers from './helpers.js';\nexport * from './other.js';\n`);
+    const map = await generateRepoMap(ksh(root));
+    expect(map).toContain('helpers');
+    expect(map).toContain('* (re-export)');
+  });
+
+  it('does not treat a commented-out export as a symbol', async () => {
+    // Decoy sits mid-file (not in the leading comment), so it can only surface
+    // if symbol extraction wrongly matched the comment text.
+    write(
+      'src/commented.ts',
+      `// Real module.\nexport function realFn() {}\n// export function ghostSymbol() {}\nexport function another() {}\n`,
+    );
+    const map = await generateRepoMap(ksh(root));
+    expect(map).toContain('realFn');
+    expect(map).toContain('another');
+    expect(map).not.toContain('ghostSymbol');
+  });
+
+  it('parses TSX and JS files', async () => {
+    write('src/comp.tsx', `export const Comp = () => <div />;\n`);
+    write('src/plain.js', `export function plainFn() {}\n`);
+    const map = await generateRepoMap(ksh(root));
+    expect(map).toContain('Comp');
+    expect(map).toContain('plainFn');
+  });
+});
+
 describe('generateRepoMap (other languages)', () => {
   it('extracts exported (capitalized) Go symbols and skips unexported ones', async () => {
     write('main.go', `// Package entrypoint.\npackage main\nfunc Run() {}\ntype Config struct{}\nfunc helper() {}\n`);
