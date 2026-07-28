@@ -100,13 +100,14 @@ const McpConfigSchema = z.object({
 // granting any tool yet.
 const McpGrantsSchema = z.record(z.string(), z.array(z.string()));
 
-// Per-role agent sub-config. Today it carries only MCP grants; it introduces
-// the per-role structure into the previously-flat agents block. Roles are the
-// four claude-driven agents — the interactive Suthradhara and the headless
-// executors (Silpi/Viharapala/Parikshaka). Sthapathi is the harness itself and
-// runs no tool-bearing session, so it takes no grants.
+// Per-role agent sub-config. Carries MCP grants and, alternatively, a direct
+// pointer to one or more mcp-config files; it introduces the per-role structure
+// into the previously-flat agents block. Roles are the four claude-driven agents
+// — the interactive Suthradhara and the headless executors
+// (Silpi/Viharapala/Parikshaka). Sthapathi is the harness itself and runs no
+// tool-bearing session, so it takes no grants.
 //
-// The grant is read TWO ways depending on the role's permission mode (pmb.8):
+// `mcp` (grant) is read TWO ways depending on the role's permission mode (pmb.8):
 //   • Suthradhara runs --permission-mode default, so `mcp` is a per-TOOL
 //     callability whitelist — only the listed tools are callable; an ungranted
 //     tool on a connected server stays visible-but-denied.
@@ -117,8 +118,22 @@ const McpGrantsSchema = z.record(z.string(), z.array(z.string()));
 //     bound an executor's reach — grant a server to an executor only if this
 //     autonomous agent may use all of its tools. Off by default (no block → no
 //     MCP), static-config only (no interactive/session-grant path exists).
+//
+// `mcpConfigFiles` (vgq) is a convenience for the solo operator who already has
+// an mcp-config file (e.g. the repo's own .mcp.json): repo-relative paths to
+// mcp-config (.mcp.json-shaped) files, resolved absolute against repo.path and
+// passed one-per-file via --mcp-config (--strict-mcp-config stays ON, so passing
+// the file explicitly bypasses the headless workspace-trust gate and connects
+// deterministically on every machine). It is MUTUALLY EXCLUSIVE with this role's
+// `mcp` grant: when both are set, mcpConfigFiles WINS and the grant is IGNORED
+// for that role (no merge — merging is deferred pending developer feedback).
+// Unlike the `mcp.servers` path there is NO secretEnv indirection here: any
+// secret the config file references must already be present in the environment
+// Shreni runs under. Claude-only — a no-op for non-claude adapters. Executor
+// scope only; Suthradhara does not read this field.
 const AgentRoleConfigSchema = z.object({
   mcp: McpGrantsSchema.optional(),
+  mcpConfigFiles: z.array(z.string()).optional(),
 });
 
 // The role keys that may carry a per-role sub-config. Iterated by the

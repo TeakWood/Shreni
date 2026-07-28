@@ -226,6 +226,22 @@ agents:
     expect(config.agents.parikshaka?.mcp?.confluence).toEqual(['get_page']);
   });
 
+  it('accepts agents.<role>.mcpConfigFiles (vgq) with no mcp.servers block', () => {
+    const path = join(dir, 'kshetra.yaml');
+    // mcpConfigFiles points directly at config files — it needs neither an
+    // mcp.servers block nor a grant, so the superRefine has nothing to reject.
+    writeFileSync(path, VALID_YAML + `
+agents:
+  silpi:
+    mcpConfigFiles:
+      - .mcp.json
+      - .shreni/mcp/extra.json
+`);
+    const config = loadKshetraConfig(path);
+    expect(config.agents.silpi?.mcpConfigFiles).toEqual(['.mcp.json', '.shreni/mcp/extra.json']);
+    expect(config.mcp).toBeUndefined();
+  });
+
   it('throws KshetraConfigError when file does not exist', () => {
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(KshetraConfigError);
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(/Cannot read file/);

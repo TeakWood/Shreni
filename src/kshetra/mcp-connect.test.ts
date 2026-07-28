@@ -107,3 +107,52 @@ describe('resolveExecutorMcp', () => {
     expect(resolveExecutorMcp(k, 'parikshaka')).toBeUndefined();
   });
 });
+
+describe('resolveExecutorMcp — mcpConfigFiles (vgq)', () => {
+  // Point at real files so the fail-loud existence check passes; the repo's own
+  // package.json / tsconfig.json are always present and stand in for .mcp.json.
+  const repoRoot = resolve(__dirname, '../..');
+
+  function withConfigFiles(role: 'silpi' | 'viharapala' | 'parikshaka', files: string[], extra: Record<string, unknown> = {}) {
+    return makeKshetra({
+      repo: { path: repoRoot, remote: 'git@x', mainBranch: 'main', branchPattern: 'b' },
+      agents: {
+        provider: 'anthropic',
+        model: 'claude',
+        maxRoundsPerBead: 3,
+        [role]: { mcpConfigFiles: files, ...extra },
+      } as KshetraConfig['agents'],
+    });
+  }
+
+  it('builds the connection from mcpConfigFiles (abs paths, no secretEnv) when set', () => {
+    const k = withConfigFiles('silpi', ['package.json', 'tsconfig.json']);
+    const conn = resolveExecutorMcp(k, 'silpi');
+    expect(conn?.configPaths).toEqual([
+      resolve(repoRoot, 'package.json'),
+      resolve(repoRoot, 'tsconfig.json'),
+    ]);
+    // No secretEnv indirection on this path.
+    expect(conn?.secretEnv).toEqual({});
+  });
+
+  it('honors ONLY mcpConfigFiles when both it and an mcp grant are set (no merge)', () => {
+    const k = withConfigFiles('silpi', ['package.json'], { mcp: { jira: ['get_issue'] } });
+    const conn = resolveExecutorMcp(k, 'silpi');
+    // The grant would have resolved jira.json under /repo; instead only the
+    // config file is used and jira's secretEnv is never touched.
+    expect(conn?.configPaths).toEqual([resolve(repoRoot, 'package.json')]);
+    expect(conn?.secretEnv).toEqual({});
+  });
+
+  it('is off by default — neither field set → undefined', () => {
+    const k = withConfigFiles('silpi', []);
+    expect(resolveExecutorMcp(k, 'silpi')).toBeUndefined();
+  });
+
+  it('fails loud before spawn when a config file is missing', () => {
+    const k = withConfigFiles('silpi', ['.shreni/does-not-exist.json']);
+    expect(() => resolveExecutorMcp(k, 'silpi')).toThrowError(McpConnectionError);
+    expect(() => resolveExecutorMcp(k, 'silpi')).toThrowError(/not found/);
+  });
+});

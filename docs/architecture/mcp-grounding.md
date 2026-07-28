@@ -232,6 +232,42 @@ wiring resolves that env var from the host and injects the value into the child
 the env var is unset at spawn, that is a **validation error surfaced before the session
 starts** — a missing token fails loud, not silently at first tool call.
 
+### Executor convenience — `mcpConfigFiles` (point directly at a `.mcp.json`)
+
+For the solo operator who **already has** an mcp-config file — most often the repo's own
+`.mcp.json` — the `mcp.servers` + per-role-grant ceremony is redundant. An executor role
+may instead point **directly** at one or more config files:
+
+```yaml
+agents:
+  silpi:
+    # repo-relative mcp-config (.mcp.json-shaped) files. Resolved absolute against
+    # repo.path and passed one-per-file via --mcp-config. --strict-mcp-config stays ON.
+    mcpConfigFiles:
+      - .mcp.json
+```
+
+- **Why not just drop `--strict-mcp-config`?** Because in headless `-p` mode a repo-root
+  `.mcp.json` needs a workspace-trust approval that has **no TTY to answer** — an untrusted
+  ambient server is **silently skipped** (not an error, not a hang), so the agent runs
+  without tools it was expected to have, and *whether* it connects depends on invisible
+  host state (`~/.claude` trust records). Passing the file **explicitly** via
+  `--mcp-config` bypasses the trust gate and connects deterministically on every machine.
+  So `--strict-mcp-config` stays **on**; this is just an explicit per-role pointer.
+- **Mutually exclusive with the role's `mcp` grant.** Only **one** method is honored per
+  role. When both are set, **`mcpConfigFiles` wins** and the grant is **ignored** for that
+  role (a `console.warn` marks it). The two are **not merged** — merging is deliberately
+  **deferred** pending developer feedback.
+- **No `secretEnv` indirection on this path.** Any secret the config file references must
+  **already be present** in the environment Shreni runs under; there is no env-var-name
+  resolution as on the `mcp.servers` path. (The `mcp.servers` path keeps `secretEnv`.)
+- **Fail-loud on a missing file.** A listed file that does not exist on disk is a
+  `McpConnectionError` **before the spawn**, matching the `secretEnv` fail-loud philosophy.
+- **Claude-only.** The field is a no-op for non-claude adapters (Codex/Gemini), which have
+  no `--mcp-config` equivalent wired here.
+- **Off by default is unchanged.** Neither field set → no `--mcp-config` → strict → zero
+  MCP. Executor scope only (Silpi/Viharapala/Parikshaka); Suthradhara does not read it.
+
 ---
 
 ## The write surface & boundary

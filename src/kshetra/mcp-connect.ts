@@ -1,4 +1,5 @@
 import { resolve } from 'path';
+import { existsSync } from 'fs';
 import type { KshetraConfig } from './config.js';
 
 // Raised when an MCP connection cannot be resolved for a spawn — an unknown
@@ -72,14 +73,53 @@ export type ExecutorRole = 'silpi' | 'viharapala' | 'parikshaka';
 // connected server is callable. The grant is therefore a whole-server decision:
 // list a server here only if this autonomous agent may use ALL of its tools.
 //
-// Returns undefined when the role has no grant — the caller then passes no MCP
-// connection and the executor spawns with --strict-mcp-config alone, i.e. zero
-// MCP (off by default). The connection derives PURELY from static config; there
-// is no session-grant or interactive path for an executor (the grant-on-demand
-// loop is wired only into Suthradhara's REPL), so the supervised/autonomous split
-// holds by construction.
+// Returns undefined when the role has neither field set — the caller then passes
+// no MCP connection and the executor spawns with --strict-mcp-config alone, i.e.
+// zero MCP (off by default). The connection derives PURELY from static config;
+// there is no session-grant or interactive path for an executor (the
+// grant-on-demand loop is wired only into Suthradhara's REPL), so the
+// supervised/autonomous split holds by construction.
+//
+// Two mutually-exclusive sources (vgq), checked in precedence order:
+//   1. agents.<role>.mcpConfigFiles — repo-relative mcp-config files pointed at
+//      DIRECTLY (e.g. the repo's own .mcp.json). When non-empty this WINS: the
+//      connection is built from those files and the role's `mcp` grant is
+//      IGNORED (no merge). No secretEnv indirection — secrets the file references
+//      must already be in Shreni's environment. Missing files fail loud here,
+//      before the spawn, matching the secretEnv fail-loud philosophy.
+//   2. agents.<role>.mcp — the grant path: connect exactly the servers the role
+//      lists under mcp.servers (resolveMcpConnection). Used only when
+//      mcpConfigFiles is absent.
 export function resolveExecutorMcp(kshetra: KshetraConfig, role: ExecutorRole): McpConnection | undefined {
-  const serverNames = Object.keys(kshetra.agents[role]?.mcp ?? {});
+  const roleConfig = kshetra.agents[role];
+  const configFiles = roleConfig?.mcpConfigFiles ?? [];
+
+  if (configFiles.length > 0) {
+    // mcpConfigFiles wins — the grant, if any, is ignored for this role.
+    if (roleConfig?.mcp && Object.keys(roleConfig.mcp).length > 0) {
+      console.warn(
+        `[mcp] role "${role}" sets BOTH mcpConfigFiles and an mcp grant — ` +
+          `mcpConfigFiles wins; the grant is ignored (no merge).`,
+      );
+    }
+    const configPaths: string[] = [];
+    for (const file of configFiles) {
+      const abs = resolve(kshetra.repo.path, file);
+      if (!existsSync(abs)) {
+        throw new McpConnectionError(
+          `MCP config file for role "${role}" not found: ${abs} ` +
+            `(agents.${role}.mcpConfigFiles entry "${file}", resolved against repo.path) — ` +
+            `create it before starting the run.`,
+        );
+      }
+      configPaths.push(abs);
+    }
+    // No secretEnv on this path — the config file's secrets must already be in
+    // the ambient environment.
+    return { configPaths, secretEnv: {} };
+  }
+
+  const serverNames = Object.keys(roleConfig?.mcp ?? {});
   if (serverNames.length === 0) return undefined;
   return resolveMcpConnection(kshetra, serverNames);
 }
