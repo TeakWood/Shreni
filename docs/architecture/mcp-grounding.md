@@ -16,6 +16,11 @@ from where the requirement actually lives.
 > document describes the **as-built** capability in the OSS core (`src/suthradhara/`
 > + the config schema). Section markers (§3.1, §4.2, …) refer to that ARD.
 
+> **Just want to configure it?** For a task-oriented, copy-pasteable walkthrough of
+> wiring MCP into the **executor** agents (Silpi/Viharapala/Parikshaka), see the
+> how-to guide [../guides/connect-mcp-to-executors.md](../guides/connect-mcp-to-executors.md).
+> This document is the design/spine; that one is the do-this-then-that companion.
+
 ---
 
 ## Why it exists

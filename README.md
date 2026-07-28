@@ -193,6 +193,13 @@ file tasks (`bd create`) but cannot claim or close them.
 > workflow, the provider abstraction, and the watchdog/self-heal resilience
 > machinery — see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+**Connecting external tools (MCP).** To give the executor agents access to an
+external Model Context Protocol server (Jira, Linear, Confluence, a local tool, …),
+see the how-to guide
+[docs/guides/connect-mcp-to-executors.md](docs/guides/connect-mcp-to-executors.md).
+The design rationale and security model are in
+[docs/architecture/mcp-grounding.md](docs/architecture/mcp-grounding.md).
+
 ## Setting up a Project (Kshetra) in detail
 
 Before running `shreni init-kshetra`, the project git repo must already exist and
