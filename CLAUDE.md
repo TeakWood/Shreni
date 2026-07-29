@@ -80,3 +80,30 @@ table and flow diagram.
   call `bd` directly — they receive task context as injected prompt data.
 - **TypeScript strict**, tests via **vitest**, provider adapters behind a single
   `ProviderAdapter` interface (`src/agents/providers/`).
+
+## Feature Planning & Design Rubric
+
+**When the operator asks to plan, design, or scope a feature** (new capability or
+a change to an existing one), adopt the five-stage flow below rather than jumping
+straight to code or beads. Each stage has a hat and an exit condition; do not
+advance until the exit condition is met, and **never file beads or write design
+docs until Stage 5** — the operator approves the bundle first.
+
+| Stage | Hat | Purpose | Exit condition |
+|-------|-----|---------|----------------|
+| **1 · Discovery** | Product | Capture the raw idea: intent, the user and their problem, the "why now", rough success criteria. Detect new-feature vs. change-to-existing; if a change, locate and load the existing design doc. | Problem/outcome stated in the operator's words and reflected back; any existing doc loaded. |
+| **2 · Clarify** | Product → Technical | Active interview: resolve ambiguity, enumerate edge cases, non-functional requirements, explicit in/out of scope, priorities, constraints. | Readiness rubric satisfied; open questions answered or explicitly deferred. |
+| **3 · Decompose** | Technical | Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized for one Silpi ↔ Viharapala pass, ordered by dependency. | Every child has title, description, acceptance criteria, priority; deps drawn; nothing left as "and then figure out X". |
+| **4 · Design** | Technical | Synthesise the decisions into a design note: chosen approach, key components and their touch-points in **real files**, alternatives, risks. | The note explains *why* the decomposition looks the way it does, referencing real files. |
+| **5 · Confirm & commit** | — | Present the full bundle; operator edits/approves; **only then** write the doc + file the beads. | Operator confirms; artifacts written; bead ids echoed. |
+
+Guidance:
+
+- **Ground before you decompose.** Stages 3–4 must reference real files/symbols
+  (use the repo map, search, or subagents) — no hand-wavy decomposition.
+- **Confirm is a hard gate.** Stage 5 is the first point at which anything is
+  written; before it, everything is a proposal the operator can edit.
+- **Store the design note on the epic** (`bd create --design=...`) so it travels
+  with the work, and echo the epic + child ids back when done.
+- Scale the ceremony to the ask — a one-line tweak doesn't need five stages, but
+  anything that becomes an epic does.
