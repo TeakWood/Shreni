@@ -83,4 +83,94 @@ describe('gh() wrapper', () => {
     const pr = await gh('/projects/myapp').prView('bead-x/fix');
     expect(pr).toBeNull();
   });
+
+  it('prStatus parses reviews, checks, and commits from a --json fixture', async () => {
+    mockSuccess(
+      JSON.stringify({
+        state: 'OPEN',
+        url: 'https://github.com/TeakWood/myapp/pull/12',
+        reviews: [
+          {
+            author: { login: 'reviewer1' },
+            state: 'CHANGES_REQUESTED',
+            body: 'please fix the null check',
+            submittedAt: '2026-07-29T10:00:00Z',
+            comments: [
+              { author: { login: 'reviewer1' }, body: 'this can throw', path: 'src/a.ts', line: 42 },
+            ],
+          },
+          { author: { login: 'reviewer2' }, state: 'APPROVED', body: '', submittedAt: '2026-07-29T11:00:00Z' },
+        ],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'build', conclusion: 'FAILURE' },
+          { __typename: 'StatusContext', context: 'ci/lint', state: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'pending-check' }, // still running → conclusion null
+        ],
+        commits: [
+          { oid: 'abc123', authors: [{ login: 'shreni-bot' }] },
+          { oid: 'def456', authors: [{ login: 'someone-else' }] },
+        ],
+      }),
+    );
+    const pr = await gh('/projects/myapp').prStatus('bead-x/fix');
+    expect(lastCall().args).toEqual([
+      'pr', 'view', 'bead-x/fix', '--json', 'reviews,statusCheckRollup,commits,url,state',
+    ]);
+    expect(pr).toEqual({
+      state: 'OPEN',
+      url: 'https://github.com/TeakWood/myapp/pull/12',
+      reviews: [
+        {
+          author: 'reviewer1',
+          state: 'CHANGES_REQUESTED',
+          body: 'please fix the null check',
+          submittedAt: '2026-07-29T10:00:00Z',
+          comments: [{ author: 'reviewer1', body: 'this can throw', path: 'src/a.ts', line: 42 }],
+        },
+        { author: 'reviewer2', state: 'APPROVED', body: '', submittedAt: '2026-07-29T11:00:00Z', comments: [] },
+      ],
+      checks: [
+        { name: 'build', conclusion: 'FAILURE' },
+        { name: 'ci/lint', conclusion: 'SUCCESS' },
+        { name: 'pending-check', conclusion: null },
+      ],
+      commits: [
+        { sha: 'abc123', author: 'shreni-bot' },
+        { sha: 'def456', author: 'someone-else' },
+      ],
+    });
+  });
+
+  it('prStatus tolerates an empty PR (no reviews/checks/commits)', async () => {
+    mockSuccess(JSON.stringify({ state: 'OPEN', url: 'https://github.com/TeakWood/myapp/pull/1' }));
+    const pr = await gh('/projects/myapp').prStatus('bead-x/fix');
+    expect(pr).toEqual({
+      state: 'OPEN',
+      url: 'https://github.com/TeakWood/myapp/pull/1',
+      reviews: [],
+      checks: [],
+      commits: [],
+    });
+  });
+
+  it('prStatus returns null when gh is unauthenticated / no PR', async () => {
+    mockFailure('gh: not authenticated');
+    const pr = await gh('/projects/myapp').prStatus('bead-x/fix');
+    expect(pr).toBeNull();
+  });
+
+  it('prReply posts a top-level PR comment and returns the comment url', async () => {
+    mockSuccess('https://github.com/TeakWood/myapp/pull/12#issuecomment-99');
+    const url = await gh('/projects/myapp').prReply('bead-x/fix', 'addressed in the latest push');
+    expect(url).toBe('https://github.com/TeakWood/myapp/pull/12#issuecomment-99');
+    const { args, cwd } = lastCall();
+    expect(args).toEqual(['pr', 'comment', 'bead-x/fix', '--body', 'addressed in the latest push']);
+    expect(cwd).toBe('/projects/myapp');
+  });
+
+  it('prReply returns null when gh fails (never wedges the loop)', async () => {
+    mockFailure('gh: not authenticated');
+    const url = await gh('/projects/myapp').prReply('bead-x/fix', 'body');
+    expect(url).toBeNull();
+  });
 });
