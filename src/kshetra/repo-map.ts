@@ -1,6 +1,5 @@
 import { readFile, writeFile, rename, mkdir, readdir } from 'fs/promises';
 import { join, relative, dirname, extname, basename } from 'path';
-import ts from 'typescript';
 import type { KshetraConfig } from './config.js';
 import { normalizeLanguage, resolveVendorDirs, resolveTestGlobs, matchesTestGlob, type ProfileKey } from './toolchain.js';
 import { extractSymbolsTreeSitter, type TsLang } from './tree-sitter/index.js';
@@ -196,30 +195,34 @@ function boundedUnique(raw: string[]): string[] {
 }
 
 // Extract exported/public top-level symbol names from a file, dispatched by the
-// file's language. TS/JS uses the TypeScript compiler's AST (accurate across
-// multi-line declarations, `export { … as … }` lists, default exports, and
-// re-exports — cases a line regex mishandles). Python/Go/Rust/Java use a
-// real tree-sitter AST (Shreni-beads-l40); if the wasm runtime is unavailable in
-// this environment, they degrade to the bounded line-regex heuristic so the map
-// is still produced. Order of first appearance is preserved and duplicates
+// file's language. Every parsed language — TS/JS included — goes through one
+// tree-sitter construct (Shreni-beads-l40): this is a top-level symbol map, not a
+// full compilation, so a uniform AST walk beats a bespoke path per stack. If the
+// wasm runtime is unavailable in this environment, extraction degrades to a
+// bounded line-regex heuristic so the map is still produced. `other` files are
+// listed without symbols. Order of first appearance is preserved and duplicates
 // dropped → deterministic.
 async function extractSymbols(content: string, relPath: string): Promise<string[]> {
   const lang = languageOf(relPath);
-  if (lang === 'ts') return boundedUnique(extractTsSymbols(content, relPath));
   if (lang === 'other') return [];
 
   const viaTreeSitter = await extractSymbolsTreeSitter(content, lang);
   return boundedUnique(viaTreeSitter ?? extractSymbolsRegex(content, lang));
 }
 
-// Fallback symbol extraction for the tree-sitter languages when the wasm runtime
-// can't load. A bounded per-line visibility heuristic — less accurate than the
-// AST (misses multi-line signatures, grouped decls, and receiver/impl methods),
-// but it keeps the map non-empty rather than dropping every non-TS symbol.
+// Fallback symbol extraction for when the wasm runtime can't load. A bounded
+// per-line visibility heuristic — less accurate than the AST (misses multi-line
+// signatures, grouped decls, receiver/impl methods, and aliased export lists),
+// but it keeps the map non-empty rather than dropping every symbol.
 function extractSymbolsRegex(content: string, lang: TsLang): string[] {
   const out: string[] = [];
   for (const line of content.split('\n')) {
     switch (lang) {
+      case 'ts': {
+        const m = line.match(/^export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|class|interface|enum|type|const|let|var|namespace)\s+([A-Za-z_$][\w$]*)/);
+        if (m) out.push(m[1]);
+        break;
+      }
       case 'python': {
         // Top-level (column 0) def/class; underscore-prefixed names are private.
         const m = line.match(/^(?:async\s+)?(?:def|class)\s+([A-Za-z_][\w]*)/);
@@ -245,76 +248,6 @@ function extractSymbolsRegex(content: string, lang: TsLang): string[] {
     }
   }
   return out;
-}
-
-// Choose the TypeScript ScriptKind so JSX/TSX and plain JS parse correctly.
-function scriptKindFor(relPath: string): ts.ScriptKind {
-  switch (extname(relPath)) {
-    case '.tsx': return ts.ScriptKind.TSX;
-    case '.jsx': return ts.ScriptKind.JSX;
-    case '.js': case '.mjs': case '.cjs': return ts.ScriptKind.JS;
-    default: return ts.ScriptKind.TS;
-  }
-}
-
-// True when `node` carries the given modifier keyword (export/default). Uses the
-// public factory helpers so it is robust to the AST's internal modifier shape.
-function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
-  const mods = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
-  return !!mods && mods.some(m => m.kind === kind);
-}
-
-// Walk a TS/JS source file's top-level statements and return each EXPORTED
-// symbol's name. Parsing is tolerant (createSourceFile never throws on syntax
-// errors — it yields a best-effort tree), so a malformed file degrades to fewer
-// symbols rather than failing the whole map.
-function extractTsSymbols(content: string, relPath: string): string[] {
-  const names: string[] = [];
-  const add = (n?: string | null): void => {
-    if (n) names.push(n);
-  };
-  let src: ts.SourceFile;
-  try {
-    src = ts.createSourceFile(basename(relPath), content, ts.ScriptTarget.Latest, /*setParentNodes*/ false, scriptKindFor(relPath));
-  } catch {
-    return names; // parser refused the file — skip its symbols, keep the file listed
-  }
-
-  // Recursively collect names bound by a declaration (handles destructuring:
-  // `export const { a, b } = …`, `export const [x] = …`).
-  const collectBinding = (name: ts.BindingName): void => {
-    if (ts.isIdentifier(name)) { add(name.text); return; }
-    for (const el of name.elements) {
-      if (ts.isBindingElement(el)) collectBinding(el.name);
-    }
-  };
-
-  for (const stmt of src.statements) {
-    const isExported = hasModifier(stmt, ts.SyntaxKind.ExportKeyword);
-    const isDefault = hasModifier(stmt, ts.SyntaxKind.DefaultKeyword);
-
-    if (
-      ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt) ||
-      ts.isInterfaceDeclaration(stmt) || ts.isEnumDeclaration(stmt) ||
-      ts.isTypeAliasDeclaration(stmt) || ts.isModuleDeclaration(stmt)
-    ) {
-      if (!isExported) continue;
-      // A named declaration reports its name; an anonymous default export
-      // (`export default function () {}`) is listed as "default".
-      add(stmt.name && ts.isIdentifier(stmt.name) ? stmt.name.text : isDefault ? 'default' : undefined);
-    } else if (ts.isVariableStatement(stmt)) {
-      if (!hasModifier(stmt, ts.SyntaxKind.ExportKeyword)) continue;
-      for (const decl of stmt.declarationList.declarations) collectBinding(decl.name);
-    } else if (ts.isExportDeclaration(stmt)) {
-      const clause = stmt.exportClause;
-      if (!clause) add('* (re-export)'); // export * from '…'
-      else if (ts.isNamespaceExport(clause)) add(clause.name.text); // export * as ns from '…'
-      else for (const el of clause.elements) add(el.name.text); // export { a, b as c }
-    } else if (ts.isExportAssignment(stmt)) {
-      add('default'); // export default <expr>  /  export = <expr>
-    }
-  }
-  return names;
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────

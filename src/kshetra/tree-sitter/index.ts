@@ -29,19 +29,24 @@ import { readFileSync } from 'fs';
 import Parser from 'web-tree-sitter';
 import { isStandaloneBinary } from '../../cli/self-exec.js';
 import type { Node } from './common.js';
+import { walk as walkTs } from './typescript.js';
 import { walk as walkPython } from './python.js';
 import { walk as walkGo } from './go.js';
 import { walk as walkRust } from './rust.js';
 import { walk as walkJava } from './java.js';
 
 // The languages this module parses with tree-sitter. Kept separate from repo-map's
-// `Lang` (which also has 'ts' and 'other') so the two concerns don't leak.
-export type TsLang = 'python' | 'go' | 'rust' | 'java';
+// `Lang` (which also has 'other') so the two concerns don't leak. Every parsed
+// language — TS/JS included — goes through one construct here (a top-level symbol
+// map, not a full compilation), rather than a bespoke path per stack.
+export type TsLang = 'ts' | 'python' | 'go' | 'rust' | 'java';
 
 // Asset/grammar basenames, one per language. The asset name embedded in the SEA
 // blob and the node_modules filename share this stem so a single string drives
-// both lookup paths.
+// both lookup paths. `ts` uses the `tsx` grammar — a superset that reads TS, JS,
+// and JSX, so one grammar serves every .ts/.tsx/.js/.jsx variant.
 const GRAMMAR_STEM: Record<TsLang, string> = {
+  ts: 'tree-sitter-tsx',
   python: 'tree-sitter-python',
   go: 'tree-sitter-go',
   rust: 'tree-sitter-rust',
@@ -50,6 +55,7 @@ const GRAMMAR_STEM: Record<TsLang, string> = {
 
 // Per-language tree walkers, keyed for dispatch.
 const WALKERS: Record<TsLang, (root: Node) => string[]> = {
+  ts: walkTs,
   python: walkPython,
   go: walkGo,
   rust: walkRust,
