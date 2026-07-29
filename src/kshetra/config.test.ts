@@ -100,6 +100,10 @@ stack:
     expect(config.priority.p0AutoAssign).toBe(true);
     expect(config.priority.maxConcurrentBeads).toBe(1);
     expect(config.repo.mainBranch).toBe('main');
+    // PR follow-up (epic hjw): on by default, 3 rounds, re-review on.
+    expect(config.repo.prFollowup).toBe(true);
+    expect(config.repo.prFollowupMaxRounds).toBe(3);
+    expect(config.repo.prFollowupReReview).toBe(true);
     // gates: defaults — test/lint block, coverage warn, diffSize warn 40/1500.
     expect(config.gates).toEqual({
       test: { level: 'block' },
@@ -107,6 +111,30 @@ stack:
       coverage: { level: 'warn' },
       diffSize: { level: 'warn', maxFiles: 40, maxLines: 1500 },
     });
+  });
+
+  it('parses explicit PR follow-up overrides', () => {
+    const yaml = `
+id: myapp
+name: Myapp
+repo:
+  path: /projects/myapp
+  remote: git@github.com:TeakWood/myapp.git
+  prFollowup: false
+  prFollowupMaxRounds: 5
+  prFollowupReReview: false
+beads:
+  path: /projects/myapp-beads
+  remote: git@github.com:TeakWood/myapp-beads.git
+stack:
+  language: typescript
+`;
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, yaml);
+    const config = loadKshetraConfig(path);
+    expect(config.repo.prFollowup).toBe(false);
+    expect(config.repo.prFollowupMaxRounds).toBe(5);
+    expect(config.repo.prFollowupReReview).toBe(false);
   });
 
   it('accepts a partial gates block and fills the rest with defaults', () => {

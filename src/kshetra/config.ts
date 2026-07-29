@@ -23,6 +23,19 @@ const RepoConfigSchema = z.object({
   // Optional for back-compat; resolveMergePolicy() treats an absent value as
   // 'push' and lets SHRENI_MERGE_POLICY override at runtime.
   mergePolicy: z.enum(['push', 'pr']).optional(),
+  // Active PR follow-up loop (epic hjw), relevant only under mergePolicy 'pr'.
+  // On-by-default: while a bead is awaiting-merge, Sthapathi detects unaddressed
+  // open-PR feedback (CHANGES_REQUESTED reviews, failing required checks, foreign
+  // commits) and routes the bead back through a bounded Silpi↔Viharapala pass.
+  // resolvePrFollowup() lets SHRENI_PR_FOLLOWUP=off kill it at runtime (D7).
+  prFollowup: z.boolean().default(true),
+  // Max follow-up rounds per feedback event before escalating to a human (D8).
+  // The counter resets on each new human review, so a reviewer can always ask
+  // for one more pass.
+  prFollowupMaxRounds: z.number().int().min(1).default(3),
+  // Whether Viharapala re-reviews the follow-up diff before it is pushed (D4).
+  // On by default; set false to push follow-up fixes without a re-review gate.
+  prFollowupReReview: z.boolean().default(true),
 });
 
 const BeadsConfigSchema = z.object({
