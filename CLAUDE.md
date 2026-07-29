@@ -68,13 +68,19 @@ fire between the parent and the children.
 sync the beads repo explicitly — do not rely on auto-sync:**
 
 ```bash
-bd export                                    # run from the Shreni ROOT (see caveat below), regenerates issues.jsonl
+bd export -o .beads/issues.jsonl             # run from the Shreni ROOT (see caveat below), regenerates issues.jsonl
 cd .beads                                    # the symlink resolves into the beads repo — ONLY for the git ops
 git add issues.jsonl
 git commit -m "chore(beads): sync <what changed>"
 git pull --rebase && git push                # ship to the beads remote
 git status                                   # MUST show "up to date with origin"
 ```
+
+**Always pass `-o .beads/issues.jsonl` — a bare `bd export` writes to STDOUT,
+not to a file** (confirmed on bd 1.0.3). A bare `bd export` (or worse,
+`bd export >/dev/null`) leaves `issues.jsonl` untouched, so your mutations are
+silently NOT staged and never ship — the file may still look fresh because
+auto-sync wrote an older snapshot. The `-o` form is what regenerates the file.
 
 **Run `bd export` from the Shreni repo root, NOT from inside `.beads/`.** `bd`
 discovers its database by walking *up* from the **physical** cwd looking for a
