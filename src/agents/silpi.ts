@@ -1,4 +1,5 @@
-import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
+import type { AgentContext, SilpiOutput, ViharapalaOutput, PrReviewFeedback } from '../sthapathi/types.js';
+import type { PrReview } from '../sthapathi/gh.js';
 import type { KshetraConfig } from '../kshetra/config.js';
 import {
   resolveBuildCommand,
@@ -31,6 +32,20 @@ const SILPI_OUTPUT_SCHEMA: Record<string, unknown> = {
     lintPassed: { type: 'boolean' },
     testsPassed: { type: 'boolean' },
     insights: { type: 'array', items: { type: 'string' } },
+    // PR follow-up only (epic hjw). Optional — an ordinary round omits it and
+    // still validates; a follow-up round returns one entry per inline comment.
+    commentResponses: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          commentId: { type: 'string' },
+          disposition: { type: 'string', enum: ['change', 'reply', 'escalate'] },
+          reply: { type: 'string' },
+        },
+        required: ['commentId', 'disposition', 'reply'],
+      },
+    },
   },
   required: [
     'filesChanged',
@@ -43,6 +58,61 @@ const SILPI_OUTPUT_SCHEMA: Record<string, unknown> = {
     'insights',
   ],
 };
+
+// Adapt a gh PR review (+ the loop's failing-check names/summaries) into the
+// PrReviewFeedback shape Silpi consumes on a follow-up round (ARD §4.4). Inline
+// comments get a stable `c<n>` id Silpi echoes back in commentResponses so
+// Sthapathi can correlate each disposition/reply with its comment.
+export function adaptPrReview(
+  review: PrReview,
+  failingChecks: { name: string; summary: string }[] = [],
+): PrReviewFeedback {
+  return {
+    reviewBody: review.body,
+    comments: review.comments.map((c, i) => ({
+      id: `c${i}`,
+      author: c.author,
+      path: c.path,
+      line: c.line,
+      body: c.body,
+    })),
+    failingChecks,
+  };
+}
+
+// The PR follow-up prompt section (ARD §4.4): the human reviewer plays
+// Viharapala's part, so Silpi addresses the review in two ways — code edits (which
+// surface in filesChanged as usual) AND a per-comment triage returned in
+// commentResponses. Rendered only when a follow-up round supplies prFeedback.
+function prFollowupSection(prFeedback: PrReviewFeedback): string {
+  const lines: string[] = [
+    `== PR REVIEW FEEDBACK (follow-up round) ==`,
+    `A human reviewer requested changes on the OPEN pull request for this bead.`,
+    `The reviewer is playing the code-reviewer's part — address the review in TWO ways:`,
+    `1. CODE — for each point that needs a code change, make the edit; it appears in filesChanged as usual.`,
+    `2. TRIAGE — return \`commentResponses\`, ONE entry per inline comment listed below, each with:`,
+    `   - commentId: the id in [brackets]`,
+    `   - disposition: "change" (you edited code to address it), "reply" (you answered without a code change), or "escalate" (a human must decide)`,
+    `   - reply: the draft reply Sthapathi will POST on the PR (for "change", a brief note of what you changed; for "escalate", why a human is needed). Do NOT resolve the thread — only reply.`,
+  ];
+  if (prFeedback.reviewBody.trim()) {
+    lines.push('', `Reviewer summary:`, prFeedback.reviewBody.trim());
+  }
+  if (prFeedback.comments.length) {
+    lines.push('', `Inline comments to triage:`);
+    for (const c of prFeedback.comments) {
+      const loc = c.path ? `${c.path}${c.line != null ? `:${c.line}` : ''}` : 'general';
+      lines.push(`- [${c.id}] ${loc}${c.author ? ` (@${c.author})` : ''} — ${c.body}`);
+    }
+  }
+  if (prFeedback.failingChecks.length) {
+    lines.push('', `Failing required checks (fix the underlying cause; detail from the local health gate):`);
+    for (const chk of prFeedback.failingChecks) {
+      lines.push(`- ${chk.name}: ${chk.summary}`);
+    }
+  }
+  return lines.join('\n');
+}
 
 // The exact commands the harness will enforce at the gate (toolchain
 // single-source), injected so Silpi never iterates against a different command
@@ -70,6 +140,7 @@ function buildSilpiSystemPrompt(
   round: number,
   branch: string,
   feedback?: ViharapalaOutput | null,
+  prFeedback?: PrReviewFeedback | null,
 ): string {
   const sections: string[] = [];
 
@@ -96,6 +167,8 @@ function buildSilpiSystemPrompt(
         `The previous round was rejected. You MUST fix ALL of the following:\n${list}`,
     );
   }
+
+  if (prFeedback) sections.push(prFollowupSection(prFeedback));
 
   if (context.repoMap) sections.push(`== REPO MAP ==\n${context.repoMap}`);
 
@@ -133,10 +206,14 @@ export async function runSilpi(
   feedback?: ViharapalaOutput | null,
   branch = `bead-${context.task.id}/${context.task.slug}`,
   signal?: AbortSignal,
+  // PR follow-up round (epic hjw): the adapted human review. When set, Silpi's
+  // prompt carries the triage instructions and its output includes
+  // commentResponses. Trailing/optional so ordinary callers are unaffected.
+  prFeedback?: PrReviewFeedback | null,
 ): Promise<SilpiOutput> {
   const result = await runAgent({
     provider: context.kshetra.agents.provider,
-    systemPrompt: buildSilpiSystemPrompt(context, round, branch, feedback),
+    systemPrompt: buildSilpiSystemPrompt(context, round, branch, feedback, prFeedback),
     userPrompt: `Implement task ${context.task.id}: ${context.task.title}. You are on branch ${branch}. Use your tools to implement, test, lint, and commit.`,
     cwd: context.kshetra.repo.path,
     agentName: 'silpi',

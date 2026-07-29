@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
-import type { AgentContext, Task, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
+import type { AgentContext, Task, SilpiOutput, ViharapalaOutput, PrReviewFeedback } from '../sthapathi/types.js';
+import type { PrReview } from '../sthapathi/gh.js';
 
 // ── module mocks (hoisted) ───────────────────────────────────────────────────
 
@@ -9,7 +10,7 @@ vi.mock('./runner.js', () => ({ runAgent: mockRunClaudeAgent, runClaudeAgent: mo
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
-const { runSilpi } = await import('./silpi.js');
+const { runSilpi, adaptPrReview } = await import('./silpi.js');
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -305,8 +306,91 @@ describe('runSilpi', () => {
     });
   });
 
+  describe('PR follow-up (epic hjw)', () => {
+    const PR_FEEDBACK: PrReviewFeedback = {
+      reviewBody: 'Please handle the null case and justify the retry count',
+      comments: [
+        { id: 'c0', author: 'human', path: 'src/a.ts', line: 42, body: 'this can throw on null' },
+        { id: 'c1', author: 'human', path: 'src/b.ts', line: 7, body: 'why retry 3 times?' },
+      ],
+      failingChecks: [{ name: 'build', summary: 'tsc: 2 type errors in src/a.ts' }],
+    };
+
+    it('injects the PR REVIEW FEEDBACK section with comment ids, summary, and failing checks', async () => {
+      await runSilpi(CONTEXT, 5, null, undefined, undefined, PR_FEEDBACK);
+      const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+      expect(opts.systemPrompt).toContain('== PR REVIEW FEEDBACK (follow-up round) ==');
+      expect(opts.systemPrompt).toContain('Please handle the null case');
+      expect(opts.systemPrompt).toContain('[c0] src/a.ts:42');
+      expect(opts.systemPrompt).toContain('[c1] src/b.ts:7');
+      expect(opts.systemPrompt).toContain('- build: tsc: 2 type errors in src/a.ts');
+      // instructs the {change|reply|escalate} triage contract
+      expect(opts.systemPrompt).toContain('commentResponses');
+      expect(opts.systemPrompt).toContain('escalate');
+    });
+
+    it('omits the PR REVIEW FEEDBACK section on an ordinary round', async () => {
+      await runSilpi(CONTEXT, 1);
+      const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
+      expect(opts.systemPrompt).not.toContain('== PR REVIEW FEEDBACK');
+    });
+
+    it('passes a jsonSchema that carries the commentResponses contract', async () => {
+      await runSilpi(CONTEXT, 5, null, undefined, undefined, PR_FEEDBACK);
+      const opts = mockRunClaudeAgent.mock.calls[0][0] as { jsonSchema: { properties: Record<string, { items?: { properties?: Record<string, unknown> } }> } };
+      const cr = opts.jsonSchema.properties.commentResponses;
+      expect(cr).toBeDefined();
+      expect(Object.keys(cr.items?.properties ?? {})).toEqual(['commentId', 'disposition', 'reply']);
+    });
+
+    it('returns commentResponses from structured output with the {change|reply|escalate} split intact', async () => {
+      const followup: SilpiOutput = {
+        ...VALID_OUTPUT,
+        filesChanged: [{ path: 'src/a.ts', diff: '- old\n+ null-guarded' }],
+        commentResponses: [
+          { commentId: 'c0', disposition: 'change', reply: 'Added a null guard in src/a.ts.' },
+          { commentId: 'c1', disposition: 'reply', reply: 'Retry count matches the upstream SLA.' },
+        ],
+      };
+      mockRunClaudeAgent.mockResolvedValue(makeRunnerResult(followup));
+      const result = await runSilpi(CONTEXT, 5, null, undefined, undefined, PR_FEEDBACK);
+      expect(result.commentResponses).toEqual(followup.commentResponses);
+      // the 'change' item corresponds to a code edit in filesChanged
+      const changed = result.commentResponses!.find((r) => r.disposition === 'change')!;
+      expect(result.filesChanged.some((f) => f.diff.includes('null-guarded'))).toBe(true);
+      expect(changed.commentId).toBe('c0');
+    });
+  });
+
   it('throws ParseError when runner returns no structured output', async () => {
     mockRunClaudeAgent.mockResolvedValue({ structuredOutput: null, resultText: 'some text', toolCallCount: 0 });
     await expect(runSilpi(CONTEXT, 1)).rejects.toThrow('no structured output');
+  });
+});
+
+describe('adaptPrReview', () => {
+  const REVIEW: PrReview = {
+    author: 'human',
+    state: 'CHANGES_REQUESTED',
+    body: 'needs work',
+    submittedAt: '2026-07-29T12:00:00Z',
+    comments: [
+      { author: 'human', body: 'null check here', path: 'src/a.ts', line: 42 },
+      { author: 'human', body: 'rename this', path: 'src/b.ts', line: 3 },
+    ],
+  };
+
+  it('adapts a gh review into PrReviewFeedback with stable c<n> comment ids', () => {
+    const fb = adaptPrReview(REVIEW, [{ name: 'build', summary: 'red' }]);
+    expect(fb.reviewBody).toBe('needs work');
+    expect(fb.comments).toEqual([
+      { id: 'c0', author: 'human', path: 'src/a.ts', line: 42, body: 'null check here' },
+      { id: 'c1', author: 'human', path: 'src/b.ts', line: 3, body: 'rename this' },
+    ]);
+    expect(fb.failingChecks).toEqual([{ name: 'build', summary: 'red' }]);
+  });
+
+  it('defaults failingChecks to empty when none are supplied', () => {
+    expect(adaptPrReview({ ...REVIEW, comments: [] }).failingChecks).toEqual([]);
   });
 });

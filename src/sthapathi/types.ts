@@ -45,6 +45,42 @@ export interface Task {
   };
 }
 
+// One inline PR review comment presented to Silpi for triage during a follow-up
+// round (epic hjw). `id` is a stable handle Silpi echoes back in its
+// commentResponses so Sthapathi can correlate each disposition/reply with the
+// comment it addresses.
+export interface PrCommentContext {
+  id: string;
+  author: string | null;
+  path: string | null;
+  line: number | null;
+  body: string;
+}
+
+// A human PR review adapted into the feedback shape Silpi consumes (ARD §4.4 —
+// "the human reviewer plays Viharapala's part", so Type-2 code changes need no
+// new machinery). `reviewBody` is the top-level CHANGES_REQUESTED summary,
+// `comments` the inline threads to triage, and `failingChecks` the required-check
+// names + summaries sourced from the loop's LOCAL health gate (D9 Option A — not
+// CI logs).
+export interface PrReviewFeedback {
+  reviewBody: string;
+  comments: PrCommentContext[];
+  failingChecks: { name: string; summary: string }[];
+}
+
+// Per-comment disposition Silpi returns on a PR follow-up round (Type-1, the new
+// capability — folded into Silpi rather than a separate responder agent).
+// 'change' — addressed with a code edit that appears in filesChanged; 'reply' —
+// answered in text with no code change; 'escalate' — needs a human, `reply`
+// carries the reason. `reply` is the draft text Sthapathi posts; it never
+// resolves the thread (D6).
+export interface PrCommentResponse {
+  commentId: string;
+  disposition: 'change' | 'reply' | 'escalate';
+  reply: string;
+}
+
 export interface SilpiOutput {
   filesChanged: { path: string; diff: string }[];
   testFiles: string[];
@@ -54,6 +90,9 @@ export interface SilpiOutput {
   lintPassed: boolean;
   testsPassed: boolean;
   insights: string[];
+  // Present only on a PR follow-up round: one entry per inline review comment
+  // Silpi triaged. Absent on an ordinary implementation/re-work round.
+  commentResponses?: PrCommentResponse[];
 }
 
 export interface ViharapalaOutput {
