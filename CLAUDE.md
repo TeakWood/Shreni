@@ -36,7 +36,7 @@ bd close <id>         # Complete work
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   git push          # the beads DB is an embedded dolt repo tracked via git — it ships with this push, no separate dolt remote
+   git push          # NOTE: pushes ONLY this repo. The beads DB is a SEPARATE repo with its own remote — see "Beads Repository & Sync" below; it does NOT ship with this push.
    git status  # MUST show "up to date with origin"
    ```
 5. **Clean up** - Clear stashes, prune remote branches
@@ -49,6 +49,40 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+## Beads Repository & Sync
+
+**The beads DB is a SEPARATE git repository, not part of this repo.** `.beads/`
+is a symlink to a sibling checkout (`Shreni-beads`) that has its own remote
+(`github.com:TeakWood/Shreni-beads.git`). This repo tracks **nothing** under
+`.beads/`, so **`git push` of the Shreni repo does NOT ship any bead changes** —
+the beads repo is committed and pushed on its own.
+
+The remote's source of truth is `issues.jsonl` (the Dolt data under
+`embeddeddolt/` is local-only). bd auto-syncs periodically, but it is **not
+guaranteed to have exported your latest `bd create` / `update` / `close`** — the
+child beads of a just-created epic are a common miss, because the auto-sync can
+fire between the parent and the children.
+
+**MANDATORY: after ANY bead mutation (`bd create` / `bd update` / `bd close`),
+sync the beads repo explicitly — do not rely on auto-sync:**
+
+```bash
+bd export                                    # regenerate issues.jsonl from the live DB
+cd .beads                                    # the symlink resolves into the beads repo
+git add issues.jsonl
+git commit -m "chore(beads): sync <what changed>"
+git pull --rebase && git push                # ship to the beads remote
+git status                                   # MUST show "up to date with origin"
+```
+
+Verify a specific bead actually shipped:
+`grep '"id":"<bead-id>"' .beads/issues.jsonl` — if a bead you created isn't
+there, it was never exported and never pushed.
+
+**Caveat:** do NOT run manual git ops on the beads repo while a Shreni worker is
+running — concurrent access triggers `doSyncBeads` "no candidate for rebasing"
+pull errors. Stop the worker first (or let its own auto-sync handle it).
 
 
 ## Build & Test
