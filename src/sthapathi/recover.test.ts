@@ -136,6 +136,18 @@ describe('recoverKshetra', () => {
     expect(mockFlag).not.toHaveBeenCalled();
   });
 
+  // Follow-up beads (epic hjw) carry pr-needs-followup ON TOP OF awaiting-merge,
+  // so the existing awaiting-merge exclusion already keeps an interrupted
+  // follow-up from being orphan-reopened: it stays in_progress with its PR/label
+  // intact and is re-selected by selectFollowup (its local branch, if dropped
+  // here, is re-fetched from origin at PREPARE). This asserts the exclusion the
+  // guarantee rests on.
+  it('excludes awaiting-merge beads (incl. pr-needs-followup) from orphan-reopen', async () => {
+    mockList.mockResolvedValue('[]');
+    await recoverKshetra(KSHETRA);
+    expect(mockList).toHaveBeenCalledWith({ status: 'in_progress', excludeLabel: 'awaiting-merge' });
+  });
+
   it('escalates (flags, does not reopen) once the attempt budget is exceeded', async () => {
     mockList.mockResolvedValue(JSON.stringify([inProgressJson()]));
     mockRecordBeadAttempt.mockReturnValue(MAX_RECOVER_ATTEMPTS + 1);

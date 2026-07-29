@@ -120,6 +120,7 @@ export async function selectNext(kshetra: KshetraConfig): Promise<Task | null> {
 // claims. Returns the task when it is ready to work, or null when preflight
 // rejects or the base suite is red — both logged, so a wedge is never silent.
 export async function prepareTask(task: Task, kshetra: KshetraConfig): Promise<Task | null> {
+  if (task.followup) return prepareFollowup(task, kshetra);
   await syncBeads(kshetra);
   try {
     await preFlightCheck(task, kshetra);
@@ -158,6 +159,35 @@ export async function prepareTask(task: Task, kshetra: KshetraConfig): Promise<T
 
   await bd(kshetra).claim(task.id);
   // Forward progress: a bead was successfully claimed — clear any stall counter.
+  recordProgress(kshetra);
+  return task;
+}
+
+// PREPARE for a PR follow-up bead (epic hjw). Unlike a fresh task this bead is
+// already in_progress + awaiting-merge with an existing branch and open PR, so
+// there is NO claim, NO fresh-work preFlightCheck (which branches from main and
+// rejects an existing branch), and NO health gate (a pickup-only precondition for
+// admitting NEW work). Instead: sync beads, then adopt the PR head — fetch
+// origin/<branch> and hard-reset the local branch to it. The reset makes any
+// commits a collaborator pushed the new base (the "foreign commit" trigger
+// becomes a re-sync, ARD §4.2) and guarantees the fix builds on the real PR head,
+// even if RECOVER dropped the stale local branch (checkout DWIMs it from origin).
+async function prepareFollowup(task: Task, kshetra: KshetraConfig): Promise<Task | null> {
+  await syncBeads(kshetra);
+  const g = git(kshetra);
+  const branch = `bead-${task.id}/${task.slug}`;
+  try {
+    await g.fetch('origin', branch);
+    await g.checkout(branch);
+    await g.resetHard(`origin/${branch}`);
+  } catch (err) {
+    // The branch/PR is gone or unreachable — cannot follow up this cycle. Record
+    // the stall (so a persistent failure trips the watchdog) and idle; the next
+    // reconcile re-evaluates the PR's terminal state.
+    recordStall(kshetra, `pr-followup prepare: ${(err as Error).message}`);
+    console.warn(`[shreni prepare:${kshetra.id}] pr-followup prepare failed for ${task.id}: ${(err as Error).message}`);
+    return null;
+  }
   recordProgress(kshetra);
   return task;
 }

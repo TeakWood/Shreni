@@ -1,26 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { PrStatus, PrReview, PrCheck, PrCommit } from './gh.js';
-import type { Task, SilpiOutput, ViharapalaOutput } from './types.js';
 
-// bd is mocked so readWatermark can be driven from a fixture `bd show --json`.
+// bd is mocked so readWatermark / selectFollowup can be driven from fixtures.
 const mockShow = vi.fn<() => Promise<string>>();
 const mockAddNote = vi.fn<() => Promise<string>>();
+const mockList = vi.fn<() => Promise<string>>();
 vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ show: mockShow, addNote: mockAddNote })),
+  bd: vi.fn(() => ({ show: mockShow, addNote: mockAddNote, list: mockList })),
 }));
-
-// runPrFollowupLoop drives Silpi/Viharapala and builds context — mock those, but
-// keep the real adaptPrReview (pure) from silpi.js.
-const mockRunSilpi = vi.fn<(...args: unknown[]) => Promise<SilpiOutput>>();
-const mockRunViharapala = vi.fn<(...args: unknown[]) => Promise<ViharapalaOutput>>();
-const mockBuildContext = vi.fn<(...args: unknown[]) => Promise<object>>();
-vi.mock('../agents/silpi.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../agents/silpi.js')>();
-  return { ...actual, runSilpi: mockRunSilpi };
-});
-vi.mock('../agents/viharapala.js', () => ({ runViharapala: mockRunViharapala }));
-vi.mock('./dispatch.js', () => ({ buildAgentContext: mockBuildContext }));
 
 const {
   resolvePrFollowup,
@@ -29,7 +17,7 @@ const {
   readWatermark,
   writeWatermark,
   detectPrFeedback,
-  runPrFollowupLoop,
+  selectFollowup,
   PR_NEEDS_FOLLOWUP_LABEL,
 } = await import('./pr-followup.js');
 
@@ -60,9 +48,7 @@ const SELF = ['shreni-bot'];
 beforeEach(() => {
   mockShow.mockReset();
   mockAddNote.mockReset();
-  mockRunSilpi.mockReset();
-  mockRunViharapala.mockReset();
-  mockBuildContext.mockReset();
+  mockList.mockReset();
   delete process.env.SHRENI_PR_FOLLOWUP;
 });
 afterEach(() => {
@@ -229,6 +215,37 @@ describe('detectPrFeedback', () => {
     expect(fb).toBeNull();
   });
 
+  // A CHANGES_REQUESTED review with no submittedAt (partial gh data) must not
+  // re-trigger forever: it counts as unaddressed only when the PR head has moved
+  // since we last addressed.
+  it('does NOT re-trigger a timeless review when the head has not moved since the watermark', () => {
+    const fb = detectPrFeedback({
+      status: status({ reviews: [review({ submittedAt: null })], commits: [commit({ sha: 'aaa', author: 'shreni-bot' })] }),
+      watermark: { head: 'aaa', round: 1, at: '2026-07-29T13:00:00Z' },
+      selfLogins: SELF,
+      requiredChecks: REQUIRED,
+    });
+    expect(fb).toBeNull();
+  });
+
+  it('triggers a timeless review when the head has moved (or was never addressed)', () => {
+    const moved = detectPrFeedback({
+      status: status({ reviews: [review({ submittedAt: null })], commits: [commit({ sha: 'aaa', author: 'shreni-bot' })] }),
+      watermark: { head: 'bbb', round: 1, at: '2026-07-29T13:00:00Z' },
+      selfLogins: SELF,
+      requiredChecks: REQUIRED,
+    });
+    expect(moved?.triggers).toEqual(['changes_requested']);
+
+    const firstEver = detectPrFeedback({
+      status: status({ reviews: [review({ submittedAt: null })] }),
+      watermark: { head: null, round: 0, at: null },
+      selfLogins: SELF,
+      requiredChecks: REQUIRED,
+    });
+    expect(firstEver?.triggers).toEqual(['changes_requested']);
+  });
+
   it('collects multiple concurrent triggers', () => {
     const fb = detectPrFeedback({
       status: status({
@@ -245,111 +262,34 @@ describe('detectPrFeedback', () => {
   });
 });
 
-describe('runPrFollowupLoop', () => {
-  const TASK: Task = { id: 'proj-9', slug: 'fix-thing', title: 'Fix thing', status: 'in_progress', priority: 2 };
-  const REVIEW: PrReview = {
-    author: 'human',
-    state: 'CHANGES_REQUESTED',
-    body: 'needs a null guard',
-    submittedAt: '2026-07-29T12:00:00Z',
-    comments: [{ author: 'human', body: 'guard this', path: 'src/a.ts', line: 5 }],
-  };
+describe('selectFollowup', () => {
+  const K = { repo: { prFollowup: true } } as unknown as KshetraConfig;
 
-  function kshetra(over: { max?: number; reReview?: boolean } = {}): KshetraConfig {
-    return {
-      repo: { prFollowup: true, prFollowupMaxRounds: over.max ?? 3, prFollowupReReview: over.reReview ?? true },
-    } as unknown as KshetraConfig;
-  }
-  function silpi(over: Partial<SilpiOutput> = {}): SilpiOutput {
-    return {
-      filesChanged: [{ path: 'src/a.ts', diff: '+ guarded' }],
-      testFiles: [],
-      summary: 'guarded',
-      confidenceScore: 90,
-      questionsForReviewer: [],
-      lintPassed: true,
-      testsPassed: true,
-      insights: [],
-      ...over,
-    };
-  }
-  const APPROVE: ViharapalaOutput = { verdict: 'APPROVE', overallScore: 90, mustFix: [], suggestions: [], issues: [], insights: [] };
-  const REJECT: ViharapalaOutput = { verdict: 'REJECT', overallScore: 30, mustFix: ['try again'], suggestions: [], issues: [], insights: [] };
-  const input = (over: Partial<{ startRound: number; failingChecks: { name: string; summary: string }[] }> = {}) => ({
-    review: REVIEW,
-    failingChecks: over.failingChecks ?? [],
-    startRound: over.startRound ?? 0,
+  it('returns null when follow-up is disabled', async () => {
+    expect(await selectFollowup({ repo: { prFollowup: false } } as unknown as KshetraConfig)).toBeNull();
+    expect(mockList).not.toHaveBeenCalled();
   });
 
-  beforeEach(() => {
-    mockBuildContext.mockResolvedValue({ taskDetails: 'td', kshetra: kshetra(), task: TASK });
-  });
-
-  it('approves on the first round when the re-review passes', async () => {
-    mockRunSilpi.mockResolvedValue(silpi());
-    mockRunViharapala.mockResolvedValue(APPROVE);
-    const res = await runPrFollowupLoop(TASK, kshetra(), input());
-    expect(res.outcome).toBe('approved');
-    expect(res.rounds).toBe(1);
-    expect(res.output).not.toBeNull();
-    expect(mockRunSilpi).toHaveBeenCalledTimes(1);
-    expect(mockRunViharapala).toHaveBeenCalledTimes(1);
-  });
-
-  it('re-review gate blocks a bad fix, then approves on a later round', async () => {
-    mockRunSilpi.mockResolvedValue(silpi());
-    mockRunViharapala.mockResolvedValueOnce(REJECT).mockResolvedValueOnce(APPROVE);
-    const res = await runPrFollowupLoop(TASK, kshetra({ max: 3 }), input());
-    expect(res.outcome).toBe('approved');
-    expect(res.rounds).toBe(2);
-    expect(mockRunSilpi).toHaveBeenCalledTimes(2);
-  });
-
-  it('exhausts the round budget when the re-review keeps rejecting', async () => {
-    mockRunSilpi.mockResolvedValue(silpi());
-    mockRunViharapala.mockResolvedValue(REJECT);
-    const res = await runPrFollowupLoop(TASK, kshetra({ max: 2 }), input());
-    expect(res.outcome).toBe('exhausted');
-    expect(res.rounds).toBe(2);
-    expect(mockRunSilpi).toHaveBeenCalledTimes(2); // respects prFollowupMaxRounds
-  });
-
-  it('short-circuits to escalated when Silpi flags a comment escalate', async () => {
-    mockRunSilpi.mockResolvedValue(
-      silpi({ commentResponses: [{ commentId: 'c0', disposition: 'escalate', reply: 'needs product call' }] }),
+  it('queries in_progress + pr-needs-followup and returns the first bead marked followup', async () => {
+    mockList.mockResolvedValue(
+      JSON.stringify([
+        { id: 'proj-1', title: 'First PR', priority: 2 },
+        { id: 'proj-2', title: 'Second PR', priority: 1 },
+      ]),
     );
-    mockRunViharapala.mockResolvedValue(APPROVE);
-    const res = await runPrFollowupLoop(TASK, kshetra(), input());
-    expect(res.outcome).toBe('escalated');
-    expect(res.rounds).toBe(1);
-    expect(res.output?.commentResponses?.[0].disposition).toBe('escalate');
-    expect(mockRunViharapala).not.toHaveBeenCalled(); // escalate skips re-review
+    const t = await selectFollowup(K);
+    expect(mockList).toHaveBeenCalledWith({ status: 'in_progress', label: 'pr-needs-followup' });
+    expect(t).toMatchObject({ id: 'proj-1', slug: 'first-pr', followup: true, status: 'in_progress' });
   });
 
-  it('exhausts immediately without running an agent when the budget is already spent', async () => {
-    const res = await runPrFollowupLoop(TASK, kshetra({ max: 3 }), input({ startRound: 3 }));
-    expect(res.outcome).toBe('exhausted');
-    expect(res.output).toBeNull();
-    expect(mockRunSilpi).not.toHaveBeenCalled();
+  it('returns null when no bead carries the label', async () => {
+    mockList.mockResolvedValue('[]');
+    expect(await selectFollowup(K)).toBeNull();
   });
 
-  it('skips the re-review gate when prFollowupReReview is false', async () => {
-    mockRunSilpi.mockResolvedValue(silpi());
-    const res = await runPrFollowupLoop(TASK, kshetra({ reReview: false }), input());
-    expect(res.outcome).toBe('approved');
-    expect(res.rounds).toBe(1);
-    expect(mockRunViharapala).not.toHaveBeenCalled();
-  });
-
-  it('passes the adapted human review to Silpi as prFeedback and honours the startRound offset', async () => {
-    mockRunSilpi.mockResolvedValue(silpi());
-    mockRunViharapala.mockResolvedValue(APPROVE);
-    const res = await runPrFollowupLoop(TASK, kshetra({ max: 3 }), input({ startRound: 1, failingChecks: [{ name: 'build', summary: 'red' }] }));
-    expect(res.rounds).toBe(2); // startRound 1 → first productive round is 2
-    // 6th positional arg to runSilpi is the adapted PrReviewFeedback
-    const prFeedbackArg = mockRunSilpi.mock.calls[0][5] as { failingChecks: unknown[]; comments: { id: string }[] };
-    expect(prFeedbackArg.failingChecks).toEqual([{ name: 'build', summary: 'red' }]);
-    expect(prFeedbackArg.comments[0].id).toBe('c0');
+  it('degrades to null when bd list throws', async () => {
+    mockList.mockRejectedValue(new Error('bd down'));
+    expect(await selectFollowup(K)).toBeNull();
   });
 });
 

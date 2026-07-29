@@ -5,6 +5,8 @@ import { selectNext, prepareTask } from '../sthapathi/pickup';
 import { runSilpiViharapalaLoop } from '../sthapathi/dispatch';
 import { handleCycleError } from '../sthapathi/errors';
 import { branchName } from '../sthapathi/branch';
+import { selectFollowup } from '../sthapathi/pr-followup';
+import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -17,12 +19,15 @@ export async function runManualCycle(kshetraId: string): Promise<void> {
   const hooks: SchedulerHooks = {
     async selectNext(k: KshetraConfig): Promise<Task | null> {
       if (isKshetraManuallyPaused(k)) return null;
+      const followup = await selectFollowup(k);
+      if (followup) return followup;
       return selectNext(k);
     },
     prepareTask,
     async runTask(task: Task, k: KshetraConfig): Promise<void> {
       try {
-        await runSilpiViharapalaLoop(k, task, branchName(task));
+        if (task.followup) await runPrFollowupTask(k, task);
+        else await runSilpiViharapalaLoop(k, task, branchName(task));
       } catch (err) {
         await handleCycleError(k, task, err as Error);
       }

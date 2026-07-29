@@ -40,6 +40,12 @@ export interface Task {
   type?: string;
   round?: number;
   notes?: string;
+  // Set when this bead was selected for a PR follow-up round (epic hjw) rather
+  // than fresh work: it is already in_progress + awaiting-merge with an open PR
+  // and branch, so PREPARE re-syncs the existing branch from origin (instead of
+  // branching from main) and WORK runs the follow-up pass instead of the normal
+  // Silpi↔Viharapala loop. Absent/false for ordinary work.
+  followup?: boolean;
   context?: {
     relatedFiles?: string[];
   };

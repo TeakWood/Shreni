@@ -15,7 +15,8 @@ vi.mock('./git.js', () => ({
 
 const mockPrCreate = vi.fn<() => Promise<string>>();
 const mockPrView = vi.fn<() => Promise<{ state: string; url: string } | null>>();
-vi.mock('./gh.js', () => ({ gh: vi.fn(() => ({ prCreate: mockPrCreate, prView: mockPrView })) }));
+const mockPrStatus = vi.fn<() => Promise<unknown>>();
+vi.mock('./gh.js', () => ({ gh: vi.fn(() => ({ prCreate: mockPrCreate, prView: mockPrView, prStatus: mockPrStatus })) }));
 
 const mockAddNote = vi.fn<() => Promise<string>>();
 const mockAddLabel = vi.fn<() => Promise<string>>();
@@ -23,6 +24,7 @@ const mockRemoveLabel = vi.fn<() => Promise<string>>();
 const mockClose = vi.fn<() => Promise<string>>();
 const mockFlag = vi.fn<() => Promise<string>>();
 const mockList = vi.fn<() => Promise<string>>();
+const mockShow = vi.fn<() => Promise<string>>();
 const mockSyncBeads = vi.fn<() => Promise<void>>();
 vi.mock('./beads.js', () => ({
   bd: vi.fn(() => ({
@@ -32,6 +34,7 @@ vi.mock('./beads.js', () => ({
     close: mockClose,
     flag: mockFlag,
     list: mockList,
+    show: mockShow,
   })),
   syncBeads: mockSyncBeads,
 }));
@@ -200,5 +203,68 @@ describe('reconcilePullRequests', () => {
     mockPush.mockRejectedValueOnce(new Error('remote ref does not exist'));
     await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
     expect(mockClose).toHaveBeenCalled();
+  });
+
+  // Active follow-up detection (epic hjw): OPEN is no longer an unconditional
+  // no-op when the policy is on.
+  describe('OPEN-PR follow-up detection', () => {
+    const KSHETRA_FU = {
+      ...KSHETRA,
+      repo: { ...KSHETRA.repo, prFollowup: true, prFollowupSelfLogins: [], prFollowupRequiredChecks: [] },
+    } as unknown as KshetraConfig;
+
+    const openWithReview = {
+      state: 'OPEN',
+      url: 'https://x/pull/1',
+      reviews: [{ author: 'human', state: 'CHANGES_REQUESTED', body: 'fix', submittedAt: '2026-07-29T12:00:00Z', comments: [] }],
+      checks: [],
+      commits: [],
+    };
+
+    it('stamps pr-needs-followup on an OPEN PR with unaddressed feedback', async () => {
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
+      mockPrStatus.mockResolvedValue(openWithReview);
+      mockShow.mockResolvedValue(JSON.stringify({ id: 'proj-42' })); // no notes → zeroed watermark
+      await reconcilePullRequests(KSHETRA_FU);
+      expect(mockAddLabel).toHaveBeenCalledWith('proj-42', 'pr-needs-followup');
+    });
+
+    it('does NOT stamp when the policy is off (default)', async () => {
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
+      await reconcilePullRequests(KSHETRA); // KSHETRA has no prFollowup → off
+      expect(mockPrStatus).not.toHaveBeenCalled();
+      expect(mockAddLabel).not.toHaveBeenCalled();
+    });
+
+    it('does NOT stamp on a foreign commit when prFollowupSelfLogins is empty (default)', async () => {
+      // With no self-identity configured we cannot tell our own pushes apart from
+      // a collaborator's, so detection strips commits and a foreign tip alone
+      // never stamps (a CHANGES_REQUESTED review still would).
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
+      mockPrStatus.mockResolvedValue({
+        state: 'OPEN',
+        url: 'https://x/pull/1',
+        reviews: [],
+        checks: [],
+        commits: [{ sha: 'ccc', author: 'collaborator' }],
+      });
+      mockShow.mockResolvedValue(JSON.stringify({ id: 'proj-42' }));
+      await reconcilePullRequests(KSHETRA_FU); // selfLogins: []
+      expect(mockAddLabel).not.toHaveBeenCalled();
+    });
+
+    it('does NOT stamp when the feedback is already addressed (watermark newer)', async () => {
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
+      mockPrStatus.mockResolvedValue(openWithReview);
+      mockShow.mockResolvedValue(
+        JSON.stringify({ id: 'proj-42', notes: 'pr-followup-head:h pr-followup-round:1 pr-followup-at:2026-07-29T23:00:00Z' }),
+      );
+      await reconcilePullRequests(KSHETRA_FU);
+      expect(mockAddLabel).not.toHaveBeenCalled();
+    });
   });
 });

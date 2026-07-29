@@ -1,12 +1,14 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { PrStatus, PrReview, PrCheck, PrCommit } from './gh.js';
-import type { Task, SilpiOutput, ViharapalaOutput } from './types.js';
+import type { Task } from './types.js';
 import { bd } from './beads.js';
-import { runSilpi, adaptPrReview } from '../agents/silpi.js';
-import { runViharapala } from '../agents/viharapala.js';
-import { buildAgentContext } from './dispatch.js';
-import { branchName } from './branch.js';
-import { AgentAbortedError } from './errors.js';
+import { toSlug } from './pickup.js';
+
+// NOTE: this module is deliberately a LEAF — it imports only bd + pure helpers,
+// never the agent/dispatch graph — so merge.ts (detection) and the worker
+// (selection) can import it without a cycle. The bounded Silpi↔Viharapala loop
+// lives in pr-followup-loop.ts, and the side-effectful WORK+FINALIZE path in
+// pr-followup-run.ts, both of which import THIS module (not the reverse).
 
 // Label stamped on an awaiting-merge bead whose OPEN PR has unaddressed feedback.
 // Detection (hjw.5) stamps it on the 5-min reconcile pass; selection picks it
@@ -149,19 +151,29 @@ export function detectPrFeedback(input: DetectInput): PrFeedback | null {
   const required = new Set(requiredChecks);
   const self = new Set(selfLogins);
 
-  const changesRequested = status.reviews.filter(
-    (r) => r.state === 'CHANGES_REQUESTED' && isNewer(r.submittedAt, watermark.at),
-  );
+  // Tip = the PR head commit (gh returns commits oldest-first). Used both for the
+  // foreign-push trigger and to bound a timeless review below.
+  const tip = status.commits.length ? status.commits[status.commits.length - 1] : null;
+  const tipSha = tip?.sha ?? null;
+
+  const changesRequested = status.reviews.filter((r) => {
+    if (r.state !== 'CHANGES_REQUESTED') return false;
+    if (r.submittedAt !== null) return isNewer(r.submittedAt, watermark.at);
+    // No timestamp (partial gh data): a time comparison is impossible, so fall
+    // back to the head. Treat the review as unaddressed only if the PR head has
+    // MOVED since we last addressed — otherwise an already-pushed follow-up would
+    // re-trigger on every reconcile, resetting the round to 0 forever and
+    // re-spamming the reviewer with duplicate replies.
+    return watermark.head === null || tipSha !== watermark.head;
+  });
 
   const failingChecks = status.checks.filter(
     (c) => required.has(c.name) && c.conclusion !== null && FAILING_CONCLUSIONS.has(c.conclusion),
   );
 
-  // Foreign push: the tip moved to a commit we did not author. The tip is the
-  // last entry (gh returns commits oldest-first). We only trigger when the tip
-  // sha differs from the watermark head, so our own just-pushed follow-up (whose
-  // sha we record) never re-triggers.
-  const tip = status.commits.length ? status.commits[status.commits.length - 1] : null;
+  // Foreign push: the tip moved to a commit we did not author. We only trigger
+  // when the tip sha differs from the watermark head, so our own just-pushed
+  // follow-up (whose sha we record) never re-triggers.
   const tipIsForeign =
     tip !== null &&
     tip.sha !== watermark.head &&
@@ -186,111 +198,48 @@ export function detectPrFeedback(input: DetectInput): PrFeedback | null {
   return { triggers, changesRequested, failingChecks, foreignCommits, round };
 }
 
-// The bundle a follow-up round works from: the CHANGES_REQUESTED review to
-// address, the failing required-check names + summaries (D9 Option A — the loop's
-// LOCAL health gate supplies the detail, not CI logs), and startRound (the
-// per-event round already spent, from the watermark via detectPrFeedback; 0 for a
-// fresh human review).
-export interface PrFollowupInput {
-  review: PrReview;
-  failingChecks: { name: string; summary: string }[];
-  startRound: number;
+// Parse `bd list --json` (in_progress + pr-needs-followup) into Tasks. bd carries
+// no slug, so it is rebuilt from the title via the same toSlug used to name the
+// branch — mirroring parseAwaitingMerge in merge.ts.
+function parseFollowupBeads(raw: string): Task[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: Task[] = [];
+  for (const item of parsed as Record<string, unknown>[]) {
+    if (typeof item.id !== 'string' || typeof item.title !== 'string') continue;
+    out.push({
+      id: item.id,
+      slug: toSlug(item.title),
+      title: item.title,
+      status: 'in_progress',
+      priority: typeof item.priority === 'number' ? item.priority : 2,
+      notes: typeof item.notes === 'string' ? item.notes : undefined,
+      followup: true,
+    });
+  }
+  return out;
 }
 
-export type PrFollowupOutcome = 'approved' | 'escalated' | 'exhausted';
-
-// Outcome of a follow-up pass. `output` is the produced code + drafted replies
-// FINALIZING acts on (push + prReply + watermark). Terminal states:
-//  • approved  — re-review passed (or the gate is off): FINALIZING ships it.
-//  • escalated — Silpi flagged a comment 'escalate': FINALIZING posts the other
-//    replies, removes awaiting-merge, and flags a human.
-//  • exhausted — the round budget ran out without approval: same human handoff.
-export interface PrFollowupResult {
-  outcome: PrFollowupOutcome;
-  output: SilpiOutput | null;
-  rounds: number;
-  note: string;
-}
-
-// Bounded Silpi↔Viharapala pass over open-PR feedback (ARD §4.4), mirroring
-// runSilpiViharapalaLoop but for a PR that is already open. PURE PRODUCER: it
-// runs the agents (which make their own implementation commits) and returns what
-// to do — it performs NO git/gh/bd-state side effects itself. Sthapathi's
-// FINALIZING phase (hjw.5) owns push, prReply, watermark, and label changes.
-//
-// Each round: adapt the human review → Feedback → runSilpi (code + per-comment
-// triage) → optional Viharapala re-review of the diff. An 'escalate' disposition
-// short-circuits to a human; APPROVE ships; REJECT spends another round. The
-// per-event budget is prFollowupMaxRounds (it resets on each new human review via
-// detectPrFeedback, which sets startRound back to 0).
-export async function runPrFollowupLoop(
-  task: Task,
-  kshetra: KshetraConfig,
-  feedback: PrFollowupInput,
-  signal?: AbortSignal,
-): Promise<PrFollowupResult> {
-  const branch = branchName(task);
-  const prFeedback = adaptPrReview(feedback.review, feedback.failingChecks);
-  const maxRounds = kshetra.repo.prFollowupMaxRounds;
-  const reReview = kshetra.repo.prFollowupReReview;
-
-  let round = feedback.startRound;
-  let viharapalaFeedback: ViharapalaOutput | null = null;
-  let lastOutput: SilpiOutput | null = null;
-
-  // The budget for this feedback event was already spent (e.g. the reviewer
-  // re-requested changes without a new review). Hand to a human rather than loop.
-  if (round >= maxRounds) {
-    return {
-      outcome: 'exhausted',
-      output: null,
-      rounds: round,
-      note: `Round budget (${maxRounds}) already spent for this feedback event`,
-    };
+// SELECT (read-only, cheap — a single bd label query, NO gh call): pick a bead
+// whose OPEN PR has been stamped pr-needs-followup by the reconcile pass, ahead
+// of `bd ready` (ARD §4.1 — finish in-flight PRs before opening new WIP). The
+// worker's selectNext hook calls this first and falls through to the normal ready
+// queue when it returns null. Returns the bead marked `followup` so PREPARE/WORK
+// take the follow-up branch of the lifecycle. Off (null) when follow-up is
+// disabled. Never throws — a bd hiccup degrades to "no follow-up this tick".
+export async function selectFollowup(kshetra: KshetraConfig): Promise<Task | null> {
+  if (!resolvePrFollowup(kshetra)) return null;
+  let raw: string;
+  try {
+    raw = await bd(kshetra).list({ status: 'in_progress', label: PR_NEEDS_FOLLOWUP_LABEL });
+  } catch {
+    return null;
   }
-
-  while (round < maxRounds) {
-    round++;
-    if (signal?.aborted) throw new AgentAbortedError();
-
-    const context = await buildAgentContext(kshetra, task);
-    // prFeedback (the human review) rides every round so Silpi always re-emits
-    // the per-comment triage; viharapalaFeedback carries a prior re-review reject.
-    const silpiOut = await runSilpi(context, round, viharapalaFeedback, branch, signal, prFeedback);
-    lastOutput = silpiOut;
-
-    // Any 'escalate' disposition ends the pass — no amount of looping resolves a
-    // comment that needs a human decision. FINALIZING still posts the other
-    // replies; the escalate reasons ride in the returned output.
-    const escalated = (silpiOut.commentResponses ?? []).filter((r) => r.disposition === 'escalate');
-    if (escalated.length) {
-      return {
-        outcome: 'escalated',
-        output: silpiOut,
-        rounds: round,
-        note: `Escalated ${escalated.length} comment(s) to a human`,
-      };
-    }
-
-    // Re-review gate off (prFollowupReReview=false): ship the fix without a
-    // Viharapala pass.
-    if (!reReview) {
-      return { outcome: 'approved', output: silpiOut, rounds: round, note: `Produced (no re-review gate), round ${round}` };
-    }
-
-    if (signal?.aborted) throw new AgentAbortedError();
-    viharapalaFeedback = await runViharapala(context, silpiOut, round, context.taskDetails, branch, signal);
-    if (viharapalaFeedback.verdict === 'APPROVE') {
-      return { outcome: 'approved', output: silpiOut, rounds: round, note: `Approved by re-review, round ${round}` };
-    }
-    // REJECT — spend another round within the budget (the re-review gate blocked
-    // a bad fix), feeding Viharapala's mustFix back to Silpi.
-  }
-
-  return {
-    outcome: 'exhausted',
-    output: lastOutput,
-    rounds: round,
-    note: `Exhausted ${maxRounds} round(s) without a passing re-review`,
-  };
+  const beads = parseFollowupBeads(raw);
+  return beads[0] ?? null;
 }

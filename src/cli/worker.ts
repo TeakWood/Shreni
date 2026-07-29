@@ -11,6 +11,8 @@ import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '..
 import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
 import { reconcilePullRequests } from '../sthapathi/merge';
+import { selectFollowup } from '../sthapathi/pr-followup';
+import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
 import { loadExtension } from '../ext/loader';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
@@ -54,6 +56,9 @@ async function runTaskSafely(
   signal?: AbortSignal,
 ): Promise<{ approved: boolean; note: string }> {
   try {
+    // Follow-up beads (epic hjw) take the PR fix+finalize path instead of the
+    // fresh Silpi↔Viharapala loop; both share this error funnel and error policy.
+    if (task.followup) return await runPrFollowupTask(k, task, signal);
     return await runSilpiViharapalaLoop(k, task, branch, signal);
   } catch (err) {
     // A self-heal abort is a SANCTIONED cancellation, not a cycle failure — the
@@ -80,6 +85,10 @@ const hooks = {
     // cycle before any mutation.
     if (healing) return null;
     if (isKshetraManuallyPaused(k)) return null;
+    // Follow-up beads are prioritised over fresh work (ARD §4.1): finish in-flight
+    // PRs before opening new WIP. Cheap — a bd label query, no gh call on the poll.
+    const followup = await selectFollowup(k);
+    if (followup) return followup;
     return selectNext(k);
   },
   prepareTask,

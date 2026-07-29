@@ -17,9 +17,18 @@ const mockStatus = vi.fn<() => Promise<{ modified: string[]; staged: string[]; u
 const mockBranchExists = vi.fn<() => Promise<boolean>>();
 const mockCheckout = vi.fn<() => Promise<void>>();
 const mockPull = vi.fn<() => Promise<void>>();
+const mockFetch = vi.fn<() => Promise<void>>();
+const mockResetHard = vi.fn<() => Promise<void>>();
 
 vi.mock('./git.js', () => ({
-  git: vi.fn(() => ({ status: mockStatus, branchExists: mockBranchExists, checkout: mockCheckout, pull: mockPull })),
+  git: vi.fn(() => ({
+    status: mockStatus,
+    branchExists: mockBranchExists,
+    checkout: mockCheckout,
+    pull: mockPull,
+    fetch: mockFetch,
+    resetHard: mockResetHard,
+  })),
   GitError: class GitError extends Error { constructor(public readonly code: string, message: string) { super(message); } },
 }));
 
@@ -361,5 +370,38 @@ describe('prepareTask (the only mutator)', () => {
     expect(result?.id).toBe('proj-123');
     expect(mockClaim).toHaveBeenCalledWith('proj-123');
     expect(mockCheckHealth).not.toHaveBeenCalled();
+  });
+
+  // ── PR follow-up PREPARE (epic hjw) ────────────────────────────────────────
+  describe('follow-up bead', () => {
+    const FU: Task = { id: 'proj-9', slug: 'fix-thing', title: 'Fix thing', status: 'in_progress', priority: 2, followup: true };
+
+    it('re-syncs the existing branch from origin and does NOT claim or preflight', async () => {
+      const result = await prepareTask(FU, KSHETRA);
+      expect(result?.id).toBe('proj-9');
+      expect(mockFetch).toHaveBeenCalledWith('origin', 'bead-proj-9/fix-thing');
+      expect(mockCheckout).toHaveBeenCalledWith('bead-proj-9/fix-thing');
+      expect(mockResetHard).toHaveBeenCalledWith('origin/bead-proj-9/fix-thing');
+      // no fresh-work machinery: no claim, no health gate, no branch-exists guard
+      expect(mockClaim).not.toHaveBeenCalled();
+      expect(mockCheckHealth).not.toHaveBeenCalled();
+      expect(mockBranchExists).not.toHaveBeenCalled();
+    });
+
+    it('fetches origin BEFORE resetting the branch to it', async () => {
+      const order: string[] = [];
+      mockFetch.mockImplementation(async () => { order.push('fetch'); });
+      mockResetHard.mockImplementation(async () => { order.push('reset'); });
+      await prepareTask(FU, KSHETRA);
+      expect(order).toEqual(['fetch', 'reset']);
+    });
+
+    it('returns null (idles) when the branch can no longer be adopted', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockFetch.mockRejectedValue(new Error('couldn’t find remote ref'));
+      const result = await prepareTask(FU, KSHETRA);
+      expect(result).toBeNull();
+      warn.mockRestore();
+    });
   });
 });

@@ -11,6 +11,12 @@ import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
 import { regenerateRepoMapAsync } from '../kshetra/repo-map.js';
 import { getEntitlements } from '../ext/index.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
+import {
+  resolvePrFollowup,
+  detectPrFeedback,
+  readWatermark,
+  PR_NEEDS_FOLLOWUP_LABEL,
+} from './pr-followup.js';
 
 // Label marking a bead whose approved work is on a PR awaiting a human merge
 // (mergePolicy 'pr'). The bead stays open + in_progress so bd dependents stay
@@ -295,7 +301,17 @@ export async function reconcilePullRequests(kshetra: KshetraConfig): Promise<voi
   for (const bead of beads) {
     const branch = branchName(bead);
     const pr = await client.prView(branch);
-    if (!pr || pr.state === 'OPEN') continue;
+    if (!pr) continue;
+    if (pr.state === 'OPEN') {
+      // Active follow-up (epic hjw): an OPEN PR is no longer a no-op. When the
+      // policy is on, detect unaddressed feedback and stamp pr-needs-followup so
+      // the next scheduler tick routes the bead through the follow-up lifecycle.
+      // MERGED/CLOSED handling below is unchanged.
+      if (resolvePrFollowup(kshetra)) {
+        await detectAndStampFollowup(kshetra, bead, branch, client);
+      }
+      continue;
+    }
 
     if (pr.state === 'MERGED') {
       await bdClient.close(bead.id, `Merged via PR: ${pr.url}`);
@@ -323,4 +339,42 @@ export async function reconcilePullRequests(kshetra: KshetraConfig): Promise<voi
       console.log(`[shreni reconcile:${kshetra.id}] ${bead.id} PR closed unmerged — blocked`);
     }
   }
+}
+
+// Detection for the active follow-up loop (epic hjw), run on the 5-min reconcile
+// pass for an OPEN awaiting-merge PR. Reads the rich PR status + the bead's
+// watermark and, if there is unaddressed feedback (a new CHANGES_REQUESTED
+// review, a failing REQUIRED check, or a foreign commit), stamps
+// pr-needs-followup so selectFollowup routes the bead into the work slot. Stamps
+// only — the watermark is advanced by the FINALIZE step once the feedback is
+// addressed. gh-tolerant: a null status (unauthenticated / race to terminal
+// state) is a no-op this pass. Foreign-commit detection is disabled unless the
+// operator has declared repo.prFollowupSelfLogins (else we cannot tell our own
+// pushes apart and would loop on them).
+async function detectAndStampFollowup(
+  kshetra: KshetraConfig,
+  bead: AwaitingMergeBead,
+  branch: string,
+  client: ReturnType<typeof gh>,
+): Promise<void> {
+  const status = await client.prStatus(branch);
+  if (!status || status.state !== 'OPEN') return;
+
+  const selfLogins = kshetra.repo.prFollowupSelfLogins;
+  const watermark = await readWatermark(kshetra, bead.id);
+  const feedback = detectPrFeedback({
+    // Suppress foreign-commit detection when we can't identify ourselves.
+    status: selfLogins.length ? status : { ...status, commits: [] },
+    watermark,
+    selfLogins,
+    requiredChecks: kshetra.repo.prFollowupRequiredChecks,
+  });
+  if (!feedback) return;
+
+  await bd(kshetra).addLabel(bead.id, PR_NEEDS_FOLLOWUP_LABEL);
+  await syncBeads(kshetra);
+  console.log(
+    `[shreni reconcile:${kshetra.id}] ${bead.id} PR has unaddressed feedback ` +
+      `(${feedback.triggers.join(', ')}) — stamped ${PR_NEEDS_FOLLOWUP_LABEL}`,
+  );
 }

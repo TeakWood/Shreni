@@ -36,6 +36,17 @@ const RepoConfigSchema = z.object({
   // Whether Viharapala re-reviews the follow-up diff before it is pushed (D4).
   // On by default; set false to push follow-up fixes without a re-review gate.
   prFollowupReReview: z.boolean().default(true),
+  // Names of the required status checks whose failure triggers a follow-up round
+  // (D9). A failing check NOT listed here is advisory and ignored. Empty
+  // (default) → a red check never triggers follow-up on its own (a
+  // CHANGES_REQUESTED review still does). Conservative by design: opt in to
+  // check-driven follow-up by naming the checks that gate the merge.
+  prFollowupRequiredChecks: z.array(z.string()).default([]),
+  // gh logins that count as "us" when detecting foreign commits on a PR branch
+  // (a commit by any other login is a human/collaborator push → a re-sync round).
+  // Empty (default) → foreign-commit detection is off: we cannot tell our own
+  // pushes apart from a collaborator's, so we do not guess and never re-sync.
+  prFollowupSelfLogins: z.array(z.string()).default([]),
 });
 
 const BeadsConfigSchema = z.object({
