@@ -49,6 +49,14 @@ pnpm test           # run the test suite (vitest)
 pnpm dev            # run via tsx
 ```
 
+## Adding language support
+
+Teaching Shreni about a new programming language (repo-map symbols, build/test/lint
+gates, optional scaffolding) spans a few coordinated edits. The end-to-end
+walkthrough — with a worked Ruby example, a line-anchored touch-point table, and
+the sync footguns — is in
+[docs/guides/add-language-support.md](docs/guides/add-language-support.md).
+
 ## Before you open a pull request
 
 1. `pnpm typecheck` passes.

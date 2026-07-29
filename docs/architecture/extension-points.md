@@ -143,3 +143,11 @@ sequenceDiagram
 
 Local autonomous coding is the baseline promise of the tool and does not depend on
 any extension being installed or reachable.
+
+## Related: adding language support
+
+The seams above let an optional *package* add capability around the core. Adding a
+new **programming language** is a different kind of extension — it edits the core
+directly at three seams (repo-map symbol extraction, toolchain profile, and
+optional init-packs). The step-by-step how-to, with a worked example, lives in
+[docs/guides/add-language-support.md](../guides/add-language-support.md).

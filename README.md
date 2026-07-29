@@ -251,6 +251,13 @@ see the how-to guide
 The design rationale and security model are in
 [docs/architecture/mcp-grounding.md](docs/architecture/mcp-grounding.md).
 
+**Adding a new language.** To teach Shreni about a new programming language — so
+its repo map extracts real symbols, its build/test/lint gates run, and `shreni
+init` can scaffold it — follow the how-to guide
+[docs/guides/add-language-support.md](docs/guides/add-language-support.md). The
+architectural seam reference is
+[docs/architecture/extension-points.md](docs/architecture/extension-points.md).
+
 ## Setting up a Project (Kshetra) in detail
 
 Before running `shreni init-kshetra`, the project git repo must already exist and
