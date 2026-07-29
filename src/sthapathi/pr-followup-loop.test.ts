@@ -16,6 +16,9 @@ vi.mock('../agents/silpi.js', async (importOriginal) => {
 vi.mock('../agents/viharapala.js', () => ({ runViharapala: mockRunViharapala }));
 vi.mock('./dispatch.js', () => ({ buildAgentContext: mockBuildContext }));
 
+const mockEmit = vi.fn();
+vi.mock('../telemetry/telemetry.js', () => ({ emit: mockEmit }));
+
 const { runPrFollowupLoop } = await import('./pr-followup-loop.js');
 
 const TASK: Task = { id: 'proj-9', slug: 'fix-thing', title: 'Fix thing', status: 'in_progress', priority: 2 };
@@ -57,6 +60,7 @@ beforeEach(() => {
   mockRunSilpi.mockReset();
   mockRunViharapala.mockReset();
   mockBuildContext.mockReset();
+  mockEmit.mockReset();
   mockBuildContext.mockResolvedValue({ taskDetails: 'td', kshetra: kshetra(), task: TASK });
 });
 
@@ -88,6 +92,21 @@ describe('runPrFollowupLoop', () => {
     expect(res.outcome).toBe('exhausted');
     expect(res.rounds).toBe(2);
     expect(mockRunSilpi).toHaveBeenCalledTimes(2); // respects prFollowupMaxRounds
+  });
+
+  it('emits pr_followup_round telemetry once per round that runs', async () => {
+    mockRunSilpi.mockResolvedValue(silpi());
+    mockRunViharapala.mockResolvedValueOnce(REJECT).mockResolvedValueOnce(APPROVE);
+    await runPrFollowupLoop(TASK, kshetra({ max: 3 }), input());
+    const rounds = mockEmit.mock.calls.filter(c => c[0] === 'pr_followup_round');
+    expect(rounds).toHaveLength(2);
+    expect(rounds[0]![1]).toEqual({ round: 1, reReview: true });
+    expect(rounds[1]![1]).toEqual({ round: 2, reReview: true });
+  });
+
+  it('emits no round telemetry when the budget is already spent (no round runs)', async () => {
+    await runPrFollowupLoop(TASK, kshetra({ max: 3 }), input({ startRound: 3 }));
+    expect(mockEmit).not.toHaveBeenCalledWith('pr_followup_round', expect.anything());
   });
 
   it('short-circuits to escalated when Silpi flags a comment escalate', async () => {

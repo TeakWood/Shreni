@@ -5,6 +5,7 @@ import { loadState } from '../kshetra/state.js';
 import { readToken } from './token.js';
 import { beadsRead, readKshetraTasks, isValidBeadId } from './beads-read.js';
 import { readNotifications } from '../sthapathi/notifications.js';
+import { PR_NEEDS_FOLLOWUP_LABEL } from '../sthapathi/pr-followup.js';
 import type { KshetraConfig } from '../kshetra/config.js';
 
 export const PHALAKA_VERSION = '1.0.0';
@@ -33,6 +34,10 @@ export const KshetraSummarySchema = z.object({
   phase: z.string().optional(),
   paused: z.boolean().optional(),
   stuck: StuckSchema.optional(),
+  // Count of beads awaiting an open-PR follow-up pass (`pr-needs-followup`) — the
+  // banner surfaces it so the operator sees active review-fix work, not just
+  // stuck/paused states.
+  followup: z.number().int().nonnegative().optional(),
   // One Kshetra's broken beads DB surfaces here instead of blanking the board.
   error: z.string().optional(),
 });
@@ -70,6 +75,7 @@ export const BeadDetailSchema = BeadSummarySchema.extend({
   dependencies: z.array(BeadDependencySchema),
   blockedBy: z.array(z.string()),
   parent: z.string().optional(),
+  labels: z.array(z.string()),
 });
 
 export const NotificationSchema = z.object({
@@ -123,8 +129,15 @@ async function summarizeKshetra(kshetra: KshetraConfig): Promise<z.infer<typeof 
   try {
     const reader = beadsRead(kshetra);
     // Active list (open/in_progress/blocked/deferred) + closed list, so the
-    // counts cover every status without a wide-open `bd list --all`.
-    const [active, closed] = await Promise.all([reader.list(), reader.list({ status: 'closed' })]);
+    // counts cover every status without a wide-open `bd list --all`. The
+    // follow-up slice is a nice-to-have banner detail, so it is best-effort: a
+    // failure there must degrade only the chip, never blank the whole card (the
+    // core counts/phase/stuck must still render — the file's isolation intent).
+    const [active, closed, followup] = await Promise.all([
+      reader.list(),
+      reader.list({ status: 'closed' }),
+      reader.list({ label: PR_NEEDS_FOLLOWUP_LABEL }).catch(() => []),
+    ]);
     const counts = { open: 0, in_progress: 0, blocked: 0, closed: closed.length };
     for (const t of active) {
       if (t.status === 'open') counts.open++;
@@ -139,6 +152,7 @@ async function summarizeKshetra(kshetra: KshetraConfig): Promise<z.infer<typeof 
       phase: ks?.phase,
       paused: ks?.paused,
       stuck: ks?.stuck ? { since: ks.stuck.since, reason: ks.stuck.reason, remediation: ks.stuck.remediation } : undefined,
+      followup: followup.length || undefined,
     };
   } catch (err) {
     return { id: kshetra.id, name: kshetra.name, error: err instanceof Error ? err.message : String(err) };

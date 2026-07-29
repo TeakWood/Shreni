@@ -17,7 +17,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 // The only event names we accept. Anything else is dropped — a public endpoint
 // receives garbage and abuse, so validate strictly.
-const ALLOWED_EVENTS = new Set(['session_start', 'kshetra_init', 'task_merged']);
+const ALLOWED_EVENTS = new Set([
+  'session_start',
+  'kshetra_init',
+  'task_merged',
+  'pr_followup_round',
+  'pr_followup_escalated',
+  'pr_followup_exhausted',
+]);
 // Only these two are stored; anything else (or missing) is coerced to 'production'
 // so a public caller can never mislabel real traffic as test — or invent values.
 const ALLOWED_ENVIRONMENTS = new Set(['test', 'production']);

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { loadRegistry } from '../kshetra/registry';
 import { loadState } from '../kshetra/state';
 import { bd } from '../sthapathi/beads';
+import { PR_NEEDS_FOLLOWUP_LABEL, parseWatermark } from '../sthapathi/pr-followup';
 import { readPid, isAlive } from './pid';
 import type { KshetraConfig } from '../kshetra/config';
 
@@ -10,6 +11,10 @@ export interface ActiveBead {
   title: string;
   agent?: string;
   round?: number;
+  // Present only when the active bead is in an open-PR follow-up pass (carries the
+  // `pr-needs-followup` label). `round` is the follow-up round already spent for
+  // the current feedback event (watermark), `maxRounds` the per-event budget.
+  followup?: { round: number; maxRounds: number };
 }
 
 export interface KshetraStatusInfo {
@@ -71,11 +76,21 @@ export async function getKshetraStatus(kshetra: KshetraConfig): Promise<KshetraS
 
   const bdClient = bd(kshetra);
 
-  const [inProgressRaw, readyRaw, closedRaw] = await Promise.all([
+  // The follow-up list is a label-filtered slice of in_progress (bd's `list --json`
+  // omits labels, so the label is the only way to tell a follow-up bead apart).
+  const [inProgressRaw, readyRaw, closedRaw, followupRaw] = await Promise.all([
     bdClient.list({ status: 'in_progress' }).catch(() => '[]'),
     bdClient.ready().catch(() => '[]'),
     bdClient.list({ status: 'closed' }).catch(() => '[]'),
+    bdClient.list({ status: 'in_progress', label: PR_NEEDS_FOLLOWUP_LABEL }).catch(() => '[]'),
   ]);
+
+  const followupIds = new Set(
+    parseJsonArray(followupRaw)
+      .map(item => BeadsItemSchema.safeParse(item))
+      .filter(p => p.success)
+      .map(p => (p as { data: { id: string } }).data.id),
+  );
 
   let activeBead: ActiveBead | undefined;
   const inProgress = parseJsonArray(inProgressRaw);
@@ -83,7 +98,12 @@ export async function getKshetraStatus(kshetra: KshetraConfig): Promise<KshetraS
     const parsed = BeadsItemSchema.safeParse(inProgress[0]);
     if (parsed.success) {
       const { agent, round } = parseAgentRound(parsed.data.notes);
-      activeBead = { id: parsed.data.id, title: parsed.data.title, agent, round };
+      // A follow-up bead in the work slot: surface its watermark round + budget so
+      // the operator sees the loop is chewing on open-PR feedback, not a fresh bead.
+      const followup = followupIds.has(parsed.data.id)
+        ? { round: parseWatermark(parsed.data.notes).round, maxRounds: kshetra.repo.prFollowupMaxRounds }
+        : undefined;
+      activeBead = { id: parsed.data.id, title: parsed.data.title, agent, round, followup };
     }
   }
 
@@ -181,12 +201,17 @@ export function formatKshetraStatus(info: KshetraStatusInfo): string {
   lines.push('');
 
   if (info.activeBead) {
-    const { id, title, agent, round } = info.activeBead;
+    const { id, title, agent, round, followup } = info.activeBead;
     lines.push(`Active bead: ${id} · ${title}`);
     const details: string[] = [];
     if (agent) details.push(`Agent: ${agent}`);
     if (round !== undefined) details.push(`Round: ${round}`);
     if (details.length > 0) lines.push(`  ${details.join('  ')}`);
+    // The open-PR follow-up loop is occupying the work slot — call it out, since a
+    // plain "active bead" line would otherwise read like ordinary first-pass work.
+    if (followup) {
+      lines.push(`  ↳ PR follow-up: addressing open-PR feedback (round ${followup.round}/${followup.maxRounds})`);
+    }
   } else {
     lines.push('Active bead: none');
   }

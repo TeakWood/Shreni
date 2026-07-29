@@ -6,6 +6,7 @@ import { runViharapala } from '../agents/viharapala.js';
 import { buildAgentContext } from './dispatch.js';
 import { branchName } from './branch.js';
 import { AgentAbortedError } from './errors.js';
+import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 
 // The bundle a follow-up round works from: the CHANGES_REQUESTED review to
 // address, the failing required-check names + summaries (D9 Option A — the loop's
@@ -71,6 +72,11 @@ export async function runPrFollowupLoop(
 
   while (round < maxRounds) {
     round++;
+    // A round is the transition worth counting; only the loop sees each one. This
+    // is an anonymous, count-only metric (no-op unless opted in) — NOT a
+    // git/gh/bd state effect, so the pure-producer contract FINALIZE relies on
+    // still holds. reReview distinguishes a gated pass from a ship-on-produce one.
+    emitTelemetry('pr_followup_round', { round, reReview });
     if (signal?.aborted) throw new AgentAbortedError();
 
     const context = await buildAgentContext(kshetra, task);

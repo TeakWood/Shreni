@@ -52,7 +52,10 @@ export const CONSENT_NOTICE = [
 export type TelemetryEventName =
   | 'session_start' // harness started — retention signal
   | 'kshetra_init' // a project was registered — top of the activation funnel
-  | 'task_merged'; // a task landed on main — the activation/first-value signal
+  | 'task_merged' // a task landed on main — the activation/first-value signal
+  | 'pr_followup_round' // a bounded PR follow-up round ran (open-PR feedback loop, epic hjw)
+  | 'pr_followup_escalated' // a follow-up round hit a comment needing a human decision
+  | 'pr_followup_exhausted'; // the follow-up round budget ran out without approval
 
 // Which install an event came from. Defaults to 'production'; set
 // SHRENI_TELEMETRY_ENV=test (or dev/development/ci) during your own runs so

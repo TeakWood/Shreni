@@ -60,6 +60,9 @@ export interface BeadDetail extends BeadSummary {
   dependencies: BeadDependency[];
   blockedBy: string[];
   parent?: string;
+  // bd's `list --json` omits labels but `show --json` includes them, so labels
+  // ride on the detail surface only (e.g. `pr-needs-followup`, `awaiting-merge`).
+  labels: string[];
 }
 
 // ── Raw `bd --json` parsing (snake_case, lenient) ───────────────────────────
@@ -93,6 +96,7 @@ const RawBeadSchema = z
     updated_at: z.string().optional(),
     dependencies: z.array(RawDependencySchema).optional(),
     parent: z.string().optional(),
+    labels: z.array(z.string()).optional(),
   })
   .passthrough();
 
@@ -128,6 +132,7 @@ function toDetail(raw: RawBead): BeadDetail {
     dependencies: deps,
     blockedBy,
     parent: raw.parent,
+    labels: raw.labels ?? [],
   };
 }
 
@@ -183,6 +188,9 @@ async function exec(args: string[], env: NodeJS.ProcessEnv): Promise<string> {
 
 export interface ListFilters {
   status?: string;
+  // Server-side `--label` filter. bd applies it, so a label-filtered list returns
+  // only matching beads even though each row's own JSON omits its labels.
+  label?: string;
 }
 
 export function beadsRead(kshetra: KshetraConfig) {
@@ -193,7 +201,10 @@ export function beadsRead(kshetra: KshetraConfig) {
     async list(filters: ListFilters = {}): Promise<BeadSummary[]> {
       const args = ['list', '--json'];
       if (filters.status) args.push('--status', filters.status);
-      const key = `${beadsPath}::list::${filters.status ?? 'default'}`;
+      if (filters.label) args.push('--label', filters.label);
+      // The cache key MUST carry every filter — a label-filtered list must not
+      // collide with (and return) the unfiltered 'default' slice.
+      const key = `${beadsPath}::list::${filters.status ?? 'default'}::${filters.label ?? ''}`;
       return cached(key, LIST_CACHE_TTL_MS, async () => parseRawArray(await exec(args, env)).map(toSummary));
     },
 

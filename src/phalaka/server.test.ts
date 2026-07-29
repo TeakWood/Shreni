@@ -14,7 +14,7 @@ vi.mock('./token.js', () => ({ readToken: mockReadToken }));
 const mockLoadState = vi.fn<() => { kshetras: Record<string, unknown> }>();
 vi.mock('../kshetra/state.js', () => ({ loadState: mockLoadState }));
 
-const mockList = vi.fn<(filters?: { status?: string }) => Promise<BeadSummary[]>>();
+const mockList = vi.fn<(filters?: { status?: string; label?: string }) => Promise<BeadSummary[]>>();
 const mockShow = vi.fn<(id: string) => Promise<BeadDetail | null>>();
 const mockReadKshetraTasks = vi.fn<() => Promise<KshetraTasksResult>>();
 vi.mock('./beads-read.js', async () => {
@@ -65,6 +65,7 @@ const DETAIL: BeadDetail = {
   dependencies: [{ id: 'proj-0', title: 'Parent', type: 'parent-child' }],
   blockedBy: [],
   parent: 'proj-0',
+  labels: ['pr-needs-followup'],
 };
 
 let app: FastifyInstance;
@@ -143,6 +144,21 @@ describe('GET /api/kshetras', () => {
     expect(body[0]!.counts).toEqual({ open: 2, in_progress: 1, blocked: 1, closed: 3 });
   });
 
+  it('a failing follow-up query degrades only the chip, not the whole card', async () => {
+    // active + closed succeed; the label-filtered follow-up slice rejects.
+    mockList.mockImplementation(async (filters?: { status?: string; label?: string }) => {
+      if (filters?.label) throw new Error('database is locked');
+      if (filters?.status === 'closed') return [];
+      return [{ ...SUMMARY, id: 'a', status: 'open' }];
+    });
+    const res = await app.inject({ method: 'GET', url: `/api/kshetras?token=${TOKEN}` });
+    const body = KshetraListSchema.parse(res.json());
+    // Core card still renders (no error, counts present); only followup is dropped.
+    expect(body[0]!.error).toBeUndefined();
+    expect(body[0]!.counts).toEqual({ open: 1, in_progress: 0, blocked: 0, closed: 0 });
+    expect(body[0]!.followup).toBeUndefined();
+  });
+
   it('surfaces worker phase and the stuck banner from state', async () => {
     mockList.mockResolvedValue([]);
     mockLoadState.mockReturnValue({
@@ -172,8 +188,8 @@ describe('GET /api/kshetras', () => {
     let call = 0;
     mockList.mockImplementation(async () => {
       call++;
-      // first kshetra: 2 calls (active+closed) ok; second kshetra: throw
-      if (call > 2) throw new Error('database is locked');
+      // first kshetra: 3 calls (active+closed+followup) ok; second kshetra: throw
+      if (call > 3) throw new Error('database is locked');
       return [];
     });
     const res = await app.inject({ method: 'GET', url: `/api/kshetras?token=${TOKEN}` });

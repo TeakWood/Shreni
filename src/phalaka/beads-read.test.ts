@@ -60,6 +60,7 @@ const SHOW_JSON = JSON.stringify([
     created_at: '2026-06-28T00:00:00Z',
     updated_at: '2026-06-29T00:00:00Z',
     parent: 'proj-0',
+    labels: ['pr-needs-followup', 'awaiting-merge'],
     dependencies: [
       { id: 'proj-0', title: 'Parent', type: 'parent-child' },
       { id: 'proj-9', title: 'Blocker', type: 'blocks' },
@@ -132,6 +133,12 @@ describe('beadsRead().list', () => {
     expect(lastCall().args).toEqual(['list', '--json', '--status', 'closed']);
   });
 
+  it('passes a label filter through to bd', async () => {
+    mockSuccess('[]');
+    await beadsRead(KSHETRA).list({ label: 'pr-needs-followup' });
+    expect(lastCall().args).toEqual(['list', '--json', '--label', 'pr-needs-followup']);
+  });
+
   it('exposes no mutation methods on the surface', () => {
     mockSuccess('[]');
     const reader = beadsRead(KSHETRA) as Record<string, unknown>;
@@ -156,8 +163,15 @@ describe('beadsRead().show', () => {
       parent: 'proj-0',
       createdAt: '2026-06-28T00:00:00Z',
       blockedBy: ['proj-9'],
+      labels: ['pr-needs-followup', 'awaiting-merge'],
     });
     expect(detail!.dependencies).toHaveLength(2);
+  });
+
+  it('defaults labels to an empty array when bd omits them', async () => {
+    mockSuccess(JSON.stringify([{ id: 'proj-2', title: 'No labels', status: 'open' }]));
+    const detail = await beadsRead(KSHETRA).show('proj-2');
+    expect(detail!.labels).toEqual([]);
   });
 
   it('rejects an invalid bead id without shelling out', async () => {
@@ -208,6 +222,13 @@ describe('TTL cache', () => {
     await beadsRead(KSHETRA).list();
     await beadsRead(KSHETRA).list({ status: 'closed' });
     expect(execFileMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keys the cache by label so a label filter never returns the unfiltered slice', async () => {
+    mockSuccess(LIST_JSON);
+    await beadsRead(KSHETRA).list(); // unfiltered → key '...::default::'
+    await beadsRead(KSHETRA).list({ label: 'pr-needs-followup' }); // → key '...::default::pr-needs-followup'
+    expect(execFileMock).toHaveBeenCalledTimes(2); // distinct keys, not a stale hit
   });
 });
 

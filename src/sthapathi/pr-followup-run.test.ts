@@ -32,6 +32,9 @@ vi.mock('../kshetra/state.js', () => ({ clearBeadAttempts: mockClearAttempts }))
 const mockRunLoop = vi.fn<() => Promise<PrFollowupResult>>();
 vi.mock('./pr-followup-loop.js', () => ({ runPrFollowupLoop: mockRunLoop }));
 
+const mockEmit = vi.fn();
+vi.mock('../telemetry/telemetry.js', () => ({ emit: mockEmit }));
+
 const { runPrFollowupTask } = await import('./pr-followup-run.js');
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -105,15 +108,26 @@ describe('runPrFollowupTask', () => {
     expect(mockRemoveLabel).toHaveBeenCalledWith(TASK.id, 'pr-needs-followup');
     expect(mockFlag).toHaveBeenCalledWith(TASK.id, expect.stringContaining('escalated'));
     expect(mockNotify).toHaveBeenCalledWith(KSHETRA, TASK, 'pr_followup_escalated');
+    expect(mockEmit).toHaveBeenCalledWith('pr_followup_escalated', { rounds: 1 });
   });
 
   it('exhausted routes to the human handoff path', async () => {
     mockPrStatus.mockResolvedValue(openStatusWithReview());
-    mockRunLoop.mockResolvedValue(loopResult({ outcome: 'exhausted', note: 'out of rounds' }));
+    mockRunLoop.mockResolvedValue(loopResult({ outcome: 'exhausted', note: 'out of rounds', rounds: 3 }));
 
     const res = await runPrFollowupTask(KSHETRA, TASK);
     expect(res.approved).toBe(false);
     expect(mockNotify).toHaveBeenCalledWith(KSHETRA, TASK, 'pr_followup_exhausted');
+    expect(mockEmit).toHaveBeenCalledWith('pr_followup_exhausted', { rounds: 3 });
+  });
+
+  it('an approved outcome fires NO escalated/exhausted telemetry', async () => {
+    mockPrStatus.mockResolvedValue(openStatusWithReview());
+    mockRunLoop.mockResolvedValue(loopResult({ output: { commentResponses: [] } as never, rounds: 1 }));
+
+    await runPrFollowupTask(KSHETRA, TASK);
+    expect(mockEmit).not.toHaveBeenCalledWith('pr_followup_escalated', expect.anything());
+    expect(mockEmit).not.toHaveBeenCalledWith('pr_followup_exhausted', expect.anything());
   });
 
   it('skips and clears the label when the PR is no longer OPEN', async () => {

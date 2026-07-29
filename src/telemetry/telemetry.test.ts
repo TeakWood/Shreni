@@ -109,6 +109,22 @@ describe('local sink event shape (no PII)', () => {
     emit('kshetra_init', { provider: 'anthropic' }, { dir, env });
     expect(sinkEvents().map(e => e.name)).toEqual(['session_start', 'kshetra_init']);
   });
+
+  it('records the PR follow-up events with their count-only props', () => {
+    enableTelemetry(dir);
+    const env = { SHRENI_TELEMETRY_ENDPOINT: '' }; // force local sink (see above)
+    emit('pr_followup_round', { round: 2, reReview: true }, { dir, env });
+    emit('pr_followup_escalated', { rounds: 1 }, { dir, env });
+    emit('pr_followup_exhausted', { rounds: 3 }, { dir, env });
+    const events = sinkEvents();
+    expect(events.map(e => e.name)).toEqual(['pr_followup_round', 'pr_followup_escalated', 'pr_followup_exhausted']);
+    expect(events[0]!.props).toEqual({ round: 2, reReview: true });
+    // Non-identifying: only primitive counters, nothing about the repo/PR/code.
+    const blob = JSON.stringify(events).toLowerCase();
+    for (const banned of ['/users/', 'repo', 'path', 'email', 'slug', 'remote', 'token', 'branch', 'pr ']) {
+      expect(blob).not.toContain(banned);
+    }
+  });
 });
 
 describe('never throws', () => {

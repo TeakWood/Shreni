@@ -346,6 +346,26 @@ wait around: it immediately picks the next ready bead branching from the current
 for review if the PR is closed unmerged. The Silpi ↔ Viharapala AI review runs in
 both modes — `pr` mode adds a human merge gate *on top of* it, it does not replace it.
 
+#### Active PR follow-up loop
+
+An open PR is not left to rot when it draws feedback. On the same background
+reconcile pass, Shreni inspects each `awaiting-merge` PR for **unaddressed
+feedback** — a failing *required* check, a `CHANGES_REQUESTED` review, or a
+foreign commit pushed onto the branch — measured against a per-bead watermark so
+the same feedback never re-triggers. When it finds some, it labels the bead
+`pr-needs-followup`, and the scheduler routes that bead **back into the single
+work slot ahead of fresh `bd ready` work**. There it runs a bounded
+Silpi ↔ Viharapala pass over the PR: Silpi pushes the fix and drafts a reply per
+comment, Viharapala re-reviews the diff, and Sthapathi owns every side effect —
+it pushes **before** it replies (never auto-resolving a human's thread), advances
+the watermark, and drops the label. If a comment needs a human decision
+(`escalate`) or the round budget runs out (`prFollowupMaxRounds`, reset on each
+new human review), the bead is flagged for a human rather than looped forever. The
+loop is **on by default** — set `repo.prFollowup: false` or `SHRENI_PR_FOLLOWUP=off`
+to disable it. Follow-up state is visible on `shreni status` (the active bead shows
+its round) and the Phalaka banner (a `PR follow-up` chip). Full design:
+[`Shreni-ARD-PR-Followup.md`](../Shreni-cloud/docs/ard/Shreni-ARD-PR-Followup.md).
+
 Set it at init or in `kshetra.yaml`, and override per run with an env var:
 
 ```bash

@@ -136,6 +136,26 @@ prepared task on its own `bead-{id}/{slug}` branch:
      the reconcile pass only when its PR actually merges. `resolveMergePolicy` lets
      `SHRENI_MERGE_POLICY` override the config at runtime.
 
+### Active PR follow-up loop (`mergePolicy: pr`)
+
+An open `awaiting-merge` PR that draws feedback is not left stranded. The same
+reconcile pass ([`detectAndStampFollowup`](src/sthapathi/merge.ts)) compares the
+PR against a per-bead watermark — failing *required* checks, `CHANGES_REQUESTED`
+reviews, or foreign commits ([`detectPrFeedback`](src/sthapathi/pr-followup.ts))
+— and, when there is unaddressed feedback, labels the bead `pr-needs-followup`.
+The scheduler's [`selectFollowup`](src/sthapathi/pr-followup.ts) then routes that
+bead **back into the single work slot ahead of `bd ready`**, preserving the
+one-task invariant. [`runPrFollowupTask`](src/sthapathi/pr-followup-run.ts) drives
+a bounded pass: the pure producer [`runPrFollowupLoop`](src/sthapathi/pr-followup-loop.ts)
+adapts the human review into the `Feedback` shape Silpi already consumes, runs
+Silpi (code + per-comment `{change|reply|escalate}` triage) and an optional
+Viharapala re-review, and returns `approved | escalated | exhausted`. `finalize`
+owns every side effect — **push before reply** (never auto-resolving a thread),
+advance the watermark, drop the label; `escalate`/`exhausted` flag a human. It is
+on by default (`repo.prFollowup`, `SHRENI_PR_FOLLOWUP=off`). Telemetry
+(`pr_followup_round` / `_escalated` / `_exhausted`), `shreni status`, and the
+Phalaka banner surface the loop's activity. Full design: `Shreni-ARD-PR-Followup.md`.
+
 After a successful merge, **Parikshaka** is dispatched asynchronously
 ([`src/sthapathi/parikshaka-dispatch.ts`](src/sthapathi/parikshaka-dispatch.ts)) —
 it backfills tests and files coverage-gap beads without blocking the loop.

@@ -19,7 +19,7 @@ vi.mock('../kshetra/state', () => ({ loadState: mockLoadState }));
 const mockLoadRegistry = vi.fn<() => KshetraConfig[]>();
 vi.mock('../kshetra/registry', () => ({ loadRegistry: mockLoadRegistry }));
 
-const mockBdList = vi.fn<(filters: { status?: string }) => Promise<string>>();
+const mockBdList = vi.fn<(filters: { status?: string; label?: string }) => Promise<string>>();
 const mockBdReady = vi.fn<() => Promise<string>>();
 vi.mock('../sthapathi/beads', () => ({
   bd: vi.fn(() => ({ list: mockBdList, ready: mockBdReady })),
@@ -112,14 +112,36 @@ describe('getKshetraStatus', () => {
   });
 
   it('populates activeBead from in_progress beads list', async () => {
-    mockBdList.mockImplementation(({ status } = {}) => {
-      if (status === 'in_progress') {
+    mockBdList.mockImplementation(({ status, label } = {}) => {
+      // The label-filtered follow-up query (label set) is empty here — a plain
+      // in_progress bead, not a follow-up one.
+      if (status === 'in_progress' && !label) {
         return Promise.resolve(JSON.stringify([{ id: 'bd-1', title: 'Fix login', status: 'in_progress', notes: 'Round 2: dispatching Silpi' }]));
       }
       return Promise.resolve('[]');
     });
     const info = await getKshetraStatus(KSHETRA);
     expect(info.activeBead).toEqual({ id: 'bd-1', title: 'Fix login', agent: 'Silpi', round: 2 });
+    expect(info.activeBead?.followup).toBeUndefined();
+  });
+
+  it('surfaces follow-up state when the active bead carries pr-needs-followup', async () => {
+    const ks = { ...KSHETRA, repo: { ...KSHETRA.repo, prFollowupMaxRounds: 3 } } as unknown as KshetraConfig;
+    const bead = { id: 'bd-9', title: 'Address PR review', status: 'in_progress', notes: 'pr-followup-head:abc pr-followup-round:2 pr-followup-at:2026-07-29T00:00:00Z' };
+    mockBdList.mockImplementation(({ status, label } = {}) => {
+      if (status === 'in_progress') {
+        // Both the plain in_progress list and the label-filtered slice return the
+        // bead — it IS the follow-up bead occupying the work slot.
+        return Promise.resolve(JSON.stringify([bead]));
+      }
+      return Promise.resolve('[]');
+    });
+    const info = await getKshetraStatus(ks);
+    expect(info.activeBead?.id).toBe('bd-9');
+    expect(info.activeBead?.followup).toEqual({ round: 2, maxRounds: 3 });
+    const rendered = formatKshetraStatus({ ...info });
+    expect(rendered).toContain('PR follow-up');
+    expect(rendered).toContain('round 2/3');
   });
 
   it('parses round without agent when note has no dispatching keyword', async () => {

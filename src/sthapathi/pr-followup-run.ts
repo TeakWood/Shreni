@@ -7,6 +7,7 @@ import { gh } from './gh.js';
 import { branchName } from './branch.js';
 import { notifyOperator } from './errors.js';
 import { clearBeadAttempts } from '../kshetra/state.js';
+import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 import {
   detectPrFeedback,
   readWatermark,
@@ -158,6 +159,9 @@ async function finalize(
   // A blocked bead is no longer forward progress; clear its recover-attempt count
   // so a later human re-open starts fresh.
   clearBeadAttempts(kshetra, task.id);
+  // result.outcome is narrowed to 'escalated' | 'exhausted' here (approved returned
+  // above), so the templated name is a known TelemetryEventName. Count-only.
+  emitTelemetry(`pr_followup_${result.outcome}`, { rounds: result.rounds });
   await notifyOperator(kshetra, task, `pr_followup_${result.outcome}`);
   await syncBeads(kshetra);
   return { approved: false, note: `PR follow-up ${result.outcome}` };

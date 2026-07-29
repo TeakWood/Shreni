@@ -110,6 +110,7 @@ const BOOTSTRAP = `
       rows.push('<div class="mb-2"><div class="text-xs uppercase text-slate-500">' + escapeHtml(label) +
         '</div><div class="whitespace-pre-wrap">' + escapeHtml(String(val)) + '</div></div>');
     }
+    if (d.labels && d.labels.length) row('Labels', d.labels.join(', '));
     row('Description', d.description);
     row('Acceptance', d.acceptance);
     row('Design', d.design);
@@ -181,10 +182,17 @@ const BOOTSTRAP = `
         var statusChip = k.paused
           ? '<span class="text-xs px-1.5 py-0.5 rounded bg-amber-900 text-amber-300">paused</span>'
           : (k.phase ? '<span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 font-mono">' + escapeHtml(k.phase) + '</span>' : '');
+        // Open-PR follow-up: a blue chip so review-fix work is visible at a glance,
+        // distinct from paused/phase. Singular/plural kept simple.
+        var followupChip = k.followup
+          ? '<span class="text-xs px-1.5 py-0.5 rounded bg-sky-900 text-sky-300" title="beads addressing open-PR feedback">' +
+            k.followup + ' PR follow-up</span>'
+          : '';
         var head = '<div class="flex items-center gap-3 px-3 py-2 bg-slate-800">' +
           '<h2 class="text-sm font-semibold text-slate-100">' + escapeHtml(k.name) + '</h2>' +
           '<span class="text-xs text-slate-600 font-mono">' + escapeHtml(k.id) + '</span>' +
           statusChip +
+          followupChip +
           (k.error ? '<span class="text-xs text-red-400">' + escapeHtml(k.error) + '</span>' : countsLine(k.counts)) +
           '</div>';
         var stuckBanner = k.stuck
