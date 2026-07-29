@@ -68,13 +68,23 @@ fire between the parent and the children.
 sync the beads repo explicitly — do not rely on auto-sync:**
 
 ```bash
-bd export                                    # regenerate issues.jsonl from the live DB
-cd .beads                                    # the symlink resolves into the beads repo
+bd export                                    # run from the Shreni ROOT (see caveat below), regenerates issues.jsonl
+cd .beads                                    # the symlink resolves into the beads repo — ONLY for the git ops
 git add issues.jsonl
 git commit -m "chore(beads): sync <what changed>"
 git pull --rebase && git push                # ship to the beads remote
 git status                                   # MUST show "up to date with origin"
 ```
+
+**Run `bd export` from the Shreni repo root, NOT from inside `.beads/`.** `bd`
+discovers its database by walking *up* from the **physical** cwd looking for a
+`.beads/` directory. `cd .beads` follows the symlink, so your physical cwd
+becomes `Shreni-beads`, whose workspace files (`config.yaml`, `embeddeddolt/`,
+`issues.jsonl`) live at its root with no `.beads/` child to find — so
+`bd export` there fails with `Error: no beads database found`. Export first from
+the root, then `cd .beads` only for the `git add/commit/push`. If you must export
+while inside `.beads/`, set the workspace explicitly:
+`BEADS_DIR=<abs path to Shreni>/.beads bd export -o issues.jsonl`.
 
 Verify a specific bead actually shipped:
 `grep '"id":"<bead-id>"' .beads/issues.jsonl` — if a bead you created isn't
