@@ -71,7 +71,7 @@ async function main() {
   //    are resolved (not hard-coded) so pnpm's nested layout is handled.
   console.log('→ collecting tree-sitter wasm assets');
   const assets = { 'tree-sitter.wasm': require.resolve('web-tree-sitter/tree-sitter.wasm') };
-  for (const lang of ['python', 'go', 'rust', 'java', 'kotlin']) {
+  for (const lang of ['python', 'go', 'rust', 'java']) {
     assets[`tree-sitter-${lang}.wasm`] = require.resolve(`tree-sitter-wasms/out/tree-sitter-${lang}.wasm`);
   }
   for (const [name, path] of Object.entries(assets)) console.log(`   ${name} ← ${path}`);

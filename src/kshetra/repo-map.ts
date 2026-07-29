@@ -3,7 +3,7 @@ import { join, relative, dirname, extname, basename } from 'path';
 import ts from 'typescript';
 import type { KshetraConfig } from './config.js';
 import { normalizeLanguage, resolveVendorDirs, resolveTestGlobs, matchesTestGlob, type ProfileKey } from './toolchain.js';
-import { extractSymbolsTreeSitter, type TsLang } from './tree-sitter.js';
+import { extractSymbolsTreeSitter, type TsLang } from './tree-sitter/index.js';
 
 // Deterministic repo/symbol map for agentic-retrieval cold-start (Shreni-beads-vcz,
 // Tier 0 of the RAG review epic Shreni-beads-6m0). The executors are the Claude
@@ -53,14 +53,14 @@ interface FileEntry {
 // The language a file is parsed AS, chosen by extension (not by the Kshetra's
 // profile, so an `unknown`-profile repo with mixed sources is still handled
 // per-file). `ts` covers JS too — the TypeScript parser reads plain JS. `other`
-// gets a file listing + role but no symbols.
-type Lang = 'ts' | 'python' | 'go' | 'rust' | 'java' | 'kotlin' | 'other';
+// gets a file listing + role but no symbols (e.g. .kt, until Kotlin support lands).
+type Lang = 'ts' | 'python' | 'go' | 'rust' | 'java' | 'other';
 
 const EXT_LANG: Record<string, Lang> = {
   '.ts': 'ts', '.tsx': 'ts', '.mts': 'ts', '.cts': 'ts',
   '.js': 'ts', '.jsx': 'ts', '.mjs': 'ts', '.cjs': 'ts',
   '.py': 'python', '.pyi': 'python',
-  '.go': 'go', '.rs': 'rust', '.java': 'java', '.kt': 'kotlin',
+  '.go': 'go', '.rs': 'rust', '.java': 'java',
 };
 
 function languageOf(relPath: string): Lang {
@@ -198,7 +198,7 @@ function boundedUnique(raw: string[]): string[] {
 // Extract exported/public top-level symbol names from a file, dispatched by the
 // file's language. TS/JS uses the TypeScript compiler's AST (accurate across
 // multi-line declarations, `export { … as … }` lists, default exports, and
-// re-exports — cases a line regex mishandles). Python/Go/Rust/Java/Kotlin use a
+// re-exports — cases a line regex mishandles). Python/Go/Rust/Java use a
 // real tree-sitter AST (Shreni-beads-l40); if the wasm runtime is unavailable in
 // this environment, they degrade to the bounded line-regex heuristic so the map
 // is still produced. Order of first appearance is preserved and duplicates
@@ -240,12 +240,6 @@ function extractSymbolsRegex(content: string, lang: TsLang): string[] {
       case 'java': {
         const m = line.match(/^\s*public\s+(?:final\s+|abstract\s+|static\s+)*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)/);
         if (m) out.push(m[1]);
-        break;
-      }
-      case 'kotlin': {
-        // Kotlin defaults to public; a private/protected/internal modifier hides it.
-        const m = line.match(/^\s*(?:(?:public|private|protected|internal|final|open|abstract|sealed|data)\s+)*(?:fun|class|interface|object)\s+([A-Za-z_]\w*)/);
-        if (m && !/\b(?:private|protected|internal)\b/.test(line)) out.push(m[1]);
         break;
       }
     }

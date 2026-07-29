@@ -176,7 +176,7 @@ describe('generateRepoMap (other languages)', () => {
 // decorators, receiver/impl methods, and visibility rules.
 describe('AST-based non-TS extraction (tree-sitter)', () => {
   it('has the tree-sitter runtime available in this environment', async () => {
-    const { treeSitterAvailable } = await import('./tree-sitter.js');
+    const { treeSitterAvailable } = await import('./tree-sitter/index.js');
     expect(await treeSitterAvailable()).toBe(true);
   });
 
@@ -245,25 +245,6 @@ describe('AST-based non-TS extraction (tree-sitter)', () => {
     expect(map).toContain('Service');
     expect(map).toContain('Point'); // record with a multi-line header
     expect(map).not.toContain('Internal');
-  });
-
-  it('Kotlin: takes public fun/class/object, skips private/internal', async () => {
-    write(
-      'App.kt',
-      `fun run() {}\n` +
-        `private fun hidden() {}\n` +
-        `class Config\n` +
-        `internal class Secret\n` +
-        `object Registry\n`,
-    );
-    // Kotlin sources live under the `java` toolchain profile (its extension set
-    // includes .kt); languageOf() still parses each .kt file as Kotlin per-file.
-    const map = await generateRepoMap(ksh(root, 'java'));
-    expect(map).toContain('run');
-    expect(map).toContain('Config');
-    expect(map).toContain('Registry');
-    expect(map).not.toContain('hidden');
-    expect(map).not.toContain('Secret');
   });
 });
 
