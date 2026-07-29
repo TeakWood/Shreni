@@ -170,6 +170,84 @@ describe('generateRepoMap (other languages)', () => {
   });
 });
 
+// Cases the old line-regex heuristic mishandled, proving the tree-sitter AST is
+// actually driving extraction (Shreni-beads-l40). Each targets a construct a
+// per-line match gets wrong: multi-line signatures, grouped declarations,
+// decorators, receiver/impl methods, and visibility rules.
+describe('AST-based non-TS extraction (tree-sitter)', () => {
+  it('has the tree-sitter runtime available in this environment', async () => {
+    const { treeSitterAvailable } = await import('./tree-sitter/index.js');
+    expect(await treeSitterAvailable()).toBe(true);
+  });
+
+  it('Go: captures grouped type/var/const specs, receiver methods, and a multi-line signature', async () => {
+    write(
+      'pkg.go',
+      `package pkg\n` +
+        `type (\n\tPublic struct{}\n\tprivate int\n)\n` +
+        `var (\n\tExported = 1\n\thidden = 2\n)\n` +
+        `const Version = "1"\n` +
+        `func (s *Server) Handle(\n\tw Writer,\n\tr Request,\n) {}\n` +
+        `func lower() {}\n`,
+    );
+    const map = await generateRepoMap(ksh(root, 'go'));
+    expect(map).toContain('Public');
+    expect(map).toContain('Exported');
+    expect(map).toContain('Version');
+    expect(map).toContain('Handle'); // receiver method, multi-line signature
+    expect(map).not.toContain('private');
+    expect(map).not.toContain('hidden');
+    expect(map).not.toContain('lower');
+  });
+
+  it('Python: unwraps decorated defs and skips underscore-private ones', async () => {
+    write(
+      'svc.py',
+      `@app.route("/x")\n@auth.required\ndef routed():\n    pass\n` +
+        `class Service:\n    def method(self):\n        pass\n` +
+        `def _hidden():\n    pass\n`,
+    );
+    const map = await generateRepoMap(ksh(root, 'python'));
+    expect(map).toContain('routed'); // decorated_definition unwrapped
+    expect(map).toContain('Service');
+    expect(map).not.toContain('_hidden');
+    expect(map).not.toContain('method'); // class body member, not top-level
+  });
+
+  it('Rust: takes pub items incl. pub methods in impl blocks, skips private', async () => {
+    write(
+      'lib.rs',
+      `pub fn run() {}\n` +
+        `fn hidden() {}\n` +
+        `pub struct Config;\n` +
+        `pub enum Mode { A, B }\n` +
+        `impl Config {\n\tpub fn build() -> Self { Config }\n\tfn internal() {}\n}\n`,
+    );
+    const map = await generateRepoMap(ksh(root, 'rust'));
+    expect(map).toContain('run');
+    expect(map).toContain('Config');
+    expect(map).toContain('Mode');
+    expect(map).toContain('build'); // pub method inside impl — regex-invisible by structure
+    expect(map).not.toContain('hidden');
+    expect(map).not.toContain('internal');
+  });
+
+  it('Java: takes public types (incl. record) across a multi-line signature, skips package-private', async () => {
+    write(
+      'Api.java',
+      `public class Api {}\n` +
+        `class Internal {}\n` +
+        `public interface Service {}\n` +
+        `public record Point(\n\tint x,\n\tint y\n) {}\n`,
+    );
+    const map = await generateRepoMap(ksh(root, 'java'));
+    expect(map).toContain('Api');
+    expect(map).toContain('Service');
+    expect(map).toContain('Point'); // record with a multi-line header
+    expect(map).not.toContain('Internal');
+  });
+});
+
 describe('bounds', () => {
   it('truncates and notes when the byte budget is exceeded', async () => {
     // Many files, each with a long role, to push past MAX_BYTES (24 KB).
