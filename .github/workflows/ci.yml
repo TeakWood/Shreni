@@ -1,0 +1,32 @@
+# Tier 0 of the E2E/integration test ladder (Shreni-beads-k3n.1): the cheapest
+# gate. Runs the existing unit suite — plus typecheck and build — on every push
+# and PR. Until now the suite only ran in release-binaries.yml (release time), so
+# per-change regressions shipped green; this recovers value the tests already had
+# but weren't delivering. No secrets, no external CLIs — those come in Tier 1
+# (Shreni-beads-k3n.3), which adds a job here for the hermetic bd+git harness.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Newer pushes to the same branch/PR supersede in-flight runs — don't burn
+# minutes finishing a run whose commit is already stale.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm test
