@@ -84,7 +84,126 @@ export function renderTaskRow(task: {
   );
 }
 
-const HELPERS = [apiUrl, isActiveStatus, priorityLabel, statusBadgeClass, escapeHtml, renderTaskRow]
+// ── Process panel (control plane) ────────────────────────────────────────────
+// Pure render helpers for the Processes section. Kept exported + unit-tested,
+// then serialized into the page like the task-row helpers above. Mirror the
+// ProcessSnapshot shape served by GET /api/processes and pushed as `process`
+// SSE events (process-read.ts / stream.ts).
+
+interface ProcSnap {
+  kind: string;
+  kshetraId?: string;
+  pid: number;
+  status: string;
+  phase?: string;
+  heartbeatAgeMs?: number;
+  activeBead?: { id: string; title: string };
+}
+
+// Stable identity of a process "slot" — one worker / Suthradhara per Kshetra,
+// one singleton Phalaka. MUST match keyOf() in stream.ts so an SSE `process`
+// event upserts the row seeded by the /api/processes fetch (not a duplicate).
+export function processKey(snap: { kind: string; kshetraId?: string }): string {
+  return snap.kind + ':' + (snap.kshetraId ?? '');
+}
+
+// Colour per derived ProcessStatus (ADR §4.3). working/healthy read green,
+// idle neutral, paused amber, the two escalations (stale-heartbeat → stuck)
+// warm→red, dead muted-red. Unknown falls back to neutral slate.
+export function processStatusPillClass(status: string): string {
+  switch (status) {
+    case 'working':
+      return 'bg-emerald-700 text-emerald-100';
+    case 'healthy':
+      return 'bg-emerald-800 text-emerald-100';
+    case 'idle':
+      return 'bg-slate-600 text-slate-200';
+    case 'paused-manual':
+      return 'bg-amber-700 text-amber-100';
+    case 'stale-heartbeat':
+      return 'bg-yellow-700 text-yellow-100';
+    case 'stuck':
+      return 'bg-red-800 text-red-100';
+    case 'dead':
+      return 'bg-slate-800 text-red-300';
+    default:
+      return 'bg-slate-700 text-slate-300';
+  }
+}
+
+// Human-readable age from a millisecond delta: 45s / 3m / 2h / 1d. Returns '—'
+// for the missing-heartbeat case (services carry no heartbeat).
+export function formatAge(ms: number | undefined | null): string {
+  if (ms === undefined || ms === null || !isFinite(ms) || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h';
+  return Math.floor(h / 24) + 'd';
+}
+
+// Display name for a process row. Workers/Suthradhara are named by their
+// Kshetra; the singleton Phalaka has no Kshetra.
+export function processLabel(snap: { kind: string; kshetraId?: string }): string {
+  return snap.kshetraId || (snap.kind === 'phalaka' ? 'dashboard' : snap.kind);
+}
+
+// Render one process row: status pill, kind, label, active bead, phase,
+// heartbeat age (workers only), PID. Carries data-proc-key for SSE upsert.
+export function renderProcessRow(snap: ProcSnap): string {
+  const pill =
+    '<span class="px-2 py-0.5 rounded text-xs font-medium ' +
+    processStatusPillClass(snap.status) +
+    '">' +
+    escapeHtml(snap.status) +
+    '</span>';
+  const kind = '<span class="text-xs text-slate-500 font-mono">' + escapeHtml(snap.kind) + '</span>';
+  const label = '<span class="flex-1 text-sm text-slate-200">' + escapeHtml(processLabel(snap)) + '</span>';
+  const bead = snap.activeBead
+    ? '<span class="text-xs text-slate-400 font-mono" title="' +
+      escapeHtml(snap.activeBead.title) +
+      '">' +
+      escapeHtml(snap.activeBead.id) +
+      '</span>'
+    : '';
+  const phase = snap.phase
+    ? '<span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 font-mono">' + escapeHtml(snap.phase) + '</span>'
+    : '';
+  const hb =
+    snap.heartbeatAgeMs !== undefined && snap.heartbeatAgeMs !== null
+      ? '<span class="text-xs text-slate-500" title="heartbeat age">♥ ' + escapeHtml(formatAge(snap.heartbeatAgeMs)) + '</span>'
+      : '';
+  const pid = '<span class="text-xs text-slate-600 font-mono">pid ' + escapeHtml(String(snap.pid)) + '</span>';
+  return (
+    '<div class="process-row flex items-center gap-3 px-3 py-2 border-b border-slate-800" data-proc-key="' +
+    escapeHtml(processKey(snap)) +
+    '">' +
+    pill +
+    kind +
+    label +
+    bead +
+    phase +
+    hb +
+    pid +
+    '</div>'
+  );
+}
+
+const HELPERS = [
+  apiUrl,
+  isActiveStatus,
+  priorityLabel,
+  statusBadgeClass,
+  escapeHtml,
+  renderTaskRow,
+  processKey,
+  processStatusPillClass,
+  formatAge,
+  processLabel,
+  renderProcessRow,
+]
   .map(f => f.toString())
   .join('\n\n');
 
@@ -211,6 +330,93 @@ const BOOTSTRAP = `
     });
   }
 
+  // ── Process panel (control plane) ──────────────────────────────────────────
+  // The panel is seeded + kept fresh by ONE EventSource('/api/stream'): 'process'
+  // events upsert rows live. A first /api/processes fetch seeds bead enrichment
+  // (activeBead/queueDepth) that the file-only SSE payloads omit, and the same
+  // fetch is the 10s poll fallback whenever the stream is down.
+
+  var processes = {}; // proc-key -> latest snapshot
+
+  function setStreamStatus(text, live) {
+    var el = document.getElementById('stream-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'text-xs ' + (live ? 'text-emerald-400' : 'text-slate-500');
+  }
+
+  function upsertProcess(snap) {
+    var key = processKey(snap);
+    var prev = processes[key];
+    // SSE payloads are file-only (stream.ts) — carry forward the bead enrichment
+    // from the last /api/processes fetch so a status flip never blanks it.
+    if (prev) {
+      if (snap.activeBead === undefined) snap.activeBead = prev.activeBead;
+      if (snap.queueDepth === undefined) snap.queueDepth = prev.queueDepth;
+    }
+    processes[key] = snap;
+  }
+
+  function renderProcesses() {
+    var container = document.getElementById('processes');
+    if (!container) return;
+    var keys = Object.keys(processes).sort();
+    container.innerHTML = keys.map(function (k) { return renderProcessRow(processes[k]); }).join('') ||
+      '<div class="px-3 py-2 text-sm text-slate-500">No processes.</div>';
+  }
+
+  function loadProcesses() {
+    return api('/api/processes').then(function (list) {
+      processes = {};
+      list.forEach(upsertProcess);
+      renderProcesses();
+    }).catch(function (e) {
+      var container = document.getElementById('processes');
+      if (container) container.innerHTML = '<div class="px-3 py-2 text-sm text-red-400">' + escapeHtml(e.message) + '</div>';
+    });
+  }
+
+  // Poll fallback for the process panel — runs only while the SSE stream is down.
+  var procPollTimer = null;
+  function startProcPoll() {
+    if (procPollTimer) return;
+    loadProcesses();
+    procPollTimer = setInterval(loadProcesses, POLL_MS);
+  }
+  function stopProcPoll() {
+    if (procPollTimer) { clearInterval(procPollTimer); procPollTimer = null; }
+  }
+
+  function connectStream() {
+    // No EventSource (old browser) → straight to poll fallback.
+    if (!window.EventSource) { setStreamStatus('polling', false); startProcPoll(); return; }
+    var es;
+    try {
+      es = new EventSource(apiUrl('/api/stream', TOKEN));
+    } catch (e) {
+      setStreamStatus('polling', false);
+      startProcPoll();
+      return;
+    }
+    es.addEventListener('open', function () {
+      // Stream is live — cancel the fallback poll; SSE now drives the panel.
+      setStreamStatus('live', true);
+      stopProcPoll();
+    });
+    es.addEventListener('process', function (e) {
+      try {
+        upsertProcess(JSON.parse(e.data));
+        renderProcesses();
+      } catch (err) { /* a corrupt frame never breaks the panel */ }
+    });
+    es.addEventListener('error', function () {
+      // Stream dropped. EventSource auto-reconnects; poll in the meantime so the
+      // panel keeps refreshing until 'open' fires again and stops the poll.
+      setStreamStatus('polling', false);
+      startProcPoll();
+    });
+  }
+
   document.getElementById('closed-toggle').addEventListener('change', function (e) {
     showClosed = e.target.checked;
     loadBoard();
@@ -218,6 +424,8 @@ const BOOTSTRAP = `
 
   loadBoard();
   setInterval(loadBoard, POLL_MS);
+  loadProcesses(); // seed the panel (with bead enrichment) before the stream opens
+  connectStream();
 `;
 
 export const INDEX_HTML = `<!DOCTYPE html>
@@ -240,7 +448,16 @@ export const INDEX_HTML = `<!DOCTYPE html>
       Show closed
     </label>
   </header>
-  <main id="board" class="px-4 py-4 max-w-4xl mx-auto"></main>
+  <main class="px-4 py-4 max-w-4xl mx-auto">
+    <section class="mb-6 rounded border border-slate-800 overflow-hidden">
+      <div class="flex items-center gap-3 px-3 py-2 bg-slate-800">
+        <h2 class="text-sm font-semibold text-slate-100">Processes</h2>
+        <span id="stream-status" class="text-xs text-slate-500">connecting…</span>
+      </div>
+      <div id="processes"></div>
+    </section>
+    <div id="board"></div>
+  </main>
   <script>
 ${HELPERS}
 

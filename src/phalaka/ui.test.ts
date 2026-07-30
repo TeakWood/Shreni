@@ -7,6 +7,11 @@ import {
   statusBadgeClass,
   escapeHtml,
   renderTaskRow,
+  processKey,
+  processStatusPillClass,
+  formatAge,
+  processLabel,
+  renderProcessRow,
 } from './ui.js';
 
 describe('apiUrl', () => {
@@ -120,5 +125,121 @@ describe('INDEX_HTML wiring (structural)', () => {
   it('polls on a 10s interval', () => {
     expect(INDEX_HTML).toContain('POLL_MS = 10000');
     expect(INDEX_HTML).toContain('setInterval(loadBoard, POLL_MS)');
+  });
+});
+
+describe('processKey', () => {
+  it('matches keyOf() in stream.ts: kind:kshetraId', () => {
+    expect(processKey({ kind: 'worker', kshetraId: 'proj' })).toBe('worker:proj');
+  });
+  it('leaves the kshetra segment empty for the singleton Phalaka', () => {
+    expect(processKey({ kind: 'phalaka' })).toBe('phalaka:');
+  });
+});
+
+describe('processStatusPillClass', () => {
+  it('greens the healthy states and reds the escalations', () => {
+    expect(processStatusPillClass('working')).toContain('emerald');
+    expect(processStatusPillClass('healthy')).toContain('emerald');
+    expect(processStatusPillClass('stuck')).toContain('red');
+    expect(processStatusPillClass('dead')).toContain('red');
+  });
+  it('distinguishes idle, paused and stale from one another', () => {
+    const idle = processStatusPillClass('idle');
+    const paused = processStatusPillClass('paused-manual');
+    const stale = processStatusPillClass('stale-heartbeat');
+    expect(new Set([idle, paused, stale]).size).toBe(3);
+  });
+  it('falls back to neutral slate for an unknown status', () => {
+    expect(processStatusPillClass('weird')).toContain('slate');
+  });
+});
+
+describe('formatAge', () => {
+  it('formats seconds, minutes, hours and days', () => {
+    expect(formatAge(45_000)).toBe('45s');
+    expect(formatAge(3 * 60_000)).toBe('3m');
+    expect(formatAge(2 * 3_600_000)).toBe('2h');
+    expect(formatAge(3 * 86_400_000)).toBe('3d');
+  });
+  it('renders a dash for a missing/invalid age', () => {
+    expect(formatAge(undefined)).toBe('—');
+    expect(formatAge(null)).toBe('—');
+    expect(formatAge(-5)).toBe('—');
+  });
+});
+
+describe('processLabel', () => {
+  it('names a worker/suthradhara by its Kshetra', () => {
+    expect(processLabel({ kind: 'worker', kshetraId: 'proj' })).toBe('proj');
+    expect(processLabel({ kind: 'suthradhara', kshetraId: 'proj' })).toBe('proj');
+  });
+  it('labels the kshetra-less Phalaka singleton', () => {
+    expect(processLabel({ kind: 'phalaka' })).toBe('dashboard');
+  });
+});
+
+describe('renderProcessRow', () => {
+  const snap = {
+    kind: 'worker',
+    kshetraId: 'proj',
+    pid: 4321,
+    status: 'working',
+    phase: 'CODING',
+    heartbeatAgeMs: 12_000,
+    activeBead: { id: 'proj-9', title: 'Build <thing>' },
+  };
+
+  it('renders the status pill, phase, heartbeat age, pid and an upsert key', () => {
+    const html = renderProcessRow(snap);
+    expect(html).toContain('data-proc-key="worker:proj"');
+    expect(html).toContain('working'); // status pill text
+    expect(html).toContain('CODING'); // phase chip
+    expect(html).toContain('12s'); // heartbeat age
+    expect(html).toContain('pid 4321');
+    expect(html).toContain('proj-9'); // active bead
+    expect(html).toContain('Build &lt;thing&gt;'); // bead title escaped in the title attr
+  });
+
+  it('omits the heartbeat chip for a service with no heartbeat', () => {
+    const html = renderProcessRow({ kind: 'phalaka', pid: 10, status: 'healthy' });
+    expect(html).toContain('data-proc-key="phalaka:"');
+    expect(html).toContain('pid 10');
+    expect(html).not.toContain('♥');
+  });
+});
+
+describe('INDEX_HTML process panel wiring (structural)', () => {
+  it('renders a Processes section with a live/poll status indicator', () => {
+    expect(INDEX_HTML).toContain('id="processes"');
+    expect(INDEX_HTML).toContain('id="stream-status"');
+  });
+
+  it('inlines the process render helpers so the page can call them', () => {
+    expect(INDEX_HTML).toContain('function renderProcessRow');
+    expect(INDEX_HTML).toContain('function processStatusPillClass');
+    expect(INDEX_HTML).toContain('function formatAge');
+  });
+
+  it('opens one EventSource on /api/stream and upserts on process events', () => {
+    expect(INDEX_HTML).toContain("new EventSource(apiUrl('/api/stream', TOKEN))");
+    expect(INDEX_HTML).toContain("es.addEventListener('process'");
+    expect(INDEX_HTML).toContain('upsertProcess(JSON.parse(e.data))');
+  });
+
+  it('degrades to a 10s /api/processes poll when the stream is down', () => {
+    expect(INDEX_HTML).toContain("es.addEventListener('error'");
+    expect(INDEX_HTML).toContain('startProcPoll');
+    expect(INDEX_HTML).toContain("api('/api/processes')");
+    expect(INDEX_HTML).toContain('setInterval(loadProcesses, POLL_MS)');
+  });
+
+  it('stops the fallback poll once the stream opens', () => {
+    expect(INDEX_HTML).toContain("es.addEventListener('open'");
+    expect(INDEX_HTML).toContain('stopProcPoll');
+  });
+
+  it('guards against a browser without EventSource', () => {
+    expect(INDEX_HTML).toContain('if (!window.EventSource)');
   });
 });
