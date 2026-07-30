@@ -29,9 +29,21 @@ vi.mock('./beads-read.js', async () => {
 const mockReadNotifications = vi.fn<() => unknown[]>();
 vi.mock('../sthapathi/notifications.js', () => ({ readNotifications: mockReadNotifications }));
 
+const mockReadProcessSnapshots = vi.fn<() => unknown[]>();
+vi.mock('./process-read.js', () => ({ readProcessSnapshots: mockReadProcessSnapshots }));
+
+const mockAssembleKshetraStatus = vi.fn<(k: KshetraConfig) => Promise<unknown>>();
+vi.mock('../kshetra/status.js', () => ({ assembleKshetraStatus: mockAssembleKshetraStatus }));
+
 const { createPhalakaServer } = await import('./server.js');
-const { PHALAKA_VERSION, KshetraListSchema, TaskListResponseSchema, BeadDetailSchema, NotificationListResponseSchema } =
-  await import('./api.js');
+const {
+  PHALAKA_VERSION,
+  KshetraListSchema,
+  TaskListResponseSchema,
+  BeadDetailSchema,
+  NotificationListResponseSchema,
+  ProcessListSchema,
+} = await import('./api.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -76,6 +88,8 @@ beforeEach(async () => {
   mockLoadRegistry.mockReturnValue([KSHETRA]);
   mockLoadState.mockReturnValue({ kshetras: {} });
   mockReadNotifications.mockReturnValue([]);
+  mockReadProcessSnapshots.mockReturnValue([]);
+  mockAssembleKshetraStatus.mockResolvedValue({ activeBead: undefined, queueDepth: 0 });
   ({ fastify: app } = await createPhalakaServer());
 });
 
@@ -199,6 +213,84 @@ describe('GET /api/kshetras', () => {
     expect(body[0]!.counts).toBeDefined();
     expect(body[1]!.error).toContain('database is locked');
     expect(body[1]!.counts).toBeUndefined();
+  });
+});
+
+describe('GET /api/processes', () => {
+  const WORKER = {
+    kind: 'worker' as const,
+    kshetraId: 'myapp',
+    pid: 4242,
+    status: 'working' as const,
+    phase: 'CODING',
+    heartbeatAgeMs: 1500,
+    paused: false,
+  };
+  const PHALAKA = { kind: 'phalaka' as const, pid: 99, status: 'healthy' as const, paused: false };
+
+  it('401 without a token', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/processes' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('200 with a valid token, validating against the zod schema', async () => {
+    mockReadProcessSnapshots.mockReturnValue([WORKER, PHALAKA]);
+    const res = await app.inject({ method: 'GET', url: `/api/processes?token=${TOKEN}` });
+    expect(res.statusCode).toBe(200);
+    const body = ProcessListSchema.parse(res.json());
+    expect(body).toHaveLength(2);
+    expect(body.map(p => p.kind)).toEqual(['worker', 'phalaka']);
+  });
+
+  it('merges activeBead + queueDepth onto worker rows from assembleKshetraStatus', async () => {
+    mockReadProcessSnapshots.mockReturnValue([WORKER]);
+    mockAssembleKshetraStatus.mockResolvedValue({
+      // followup is stripped by the schema — only id/title/agent/round survive.
+      activeBead: { id: 'proj-7', title: 'Ship it', agent: 'silpi', round: 2, followup: { round: 1, maxRounds: 3 } },
+      queueDepth: 5,
+    });
+    const res = await app.inject({ method: 'GET', url: `/api/processes?token=${TOKEN}` });
+    const body = ProcessListSchema.parse(res.json());
+    expect(body[0]!.activeBead).toEqual({ id: 'proj-7', title: 'Ship it', agent: 'silpi', round: 2 });
+    expect(body[0]!.queueDepth).toBe(5);
+    expect(body[0]!.error).toBeUndefined();
+  });
+
+  it('calls assembleKshetraStatus once per Kshetra, not once per process', async () => {
+    // Two processes share one Kshetra (a worker + a suthradhara session).
+    mockReadProcessSnapshots.mockReturnValue([
+      WORKER,
+      { kind: 'suthradhara', kshetraId: 'myapp', pid: 77, status: 'healthy', paused: false },
+    ]);
+    await app.inject({ method: 'GET', url: `/api/processes?token=${TOKEN}` });
+    expect(mockAssembleKshetraStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('isolates a per-Kshetra bd failure to that row; the rest still render', async () => {
+    mockLoadRegistry.mockReturnValue([KSHETRA, { ...KSHETRA, id: 'broken', name: 'Broken' }]);
+    mockReadProcessSnapshots.mockReturnValue([
+      WORKER,
+      { ...WORKER, kshetraId: 'broken', pid: 5252 },
+    ]);
+    mockAssembleKshetraStatus.mockImplementation(async (k: KshetraConfig) => {
+      if (k.id === 'broken') throw new Error('database is locked');
+      return { activeBead: { id: 'proj-7', title: 'Ship it' }, queueDepth: 5 };
+    });
+    const res = await app.inject({ method: 'GET', url: `/api/processes?token=${TOKEN}` });
+    const body = ProcessListSchema.parse(res.json());
+    expect(body[0]!.error).toBeUndefined();
+    expect(body[0]!.queueDepth).toBe(5);
+    expect(body[1]!.error).toContain('database is locked');
+    expect(body[1]!.activeBead).toBeUndefined();
+  });
+
+  it('does not enrich non-worker processes', async () => {
+    mockReadProcessSnapshots.mockReturnValue([PHALAKA]);
+    const res = await app.inject({ method: 'GET', url: `/api/processes?token=${TOKEN}` });
+    const body = ProcessListSchema.parse(res.json());
+    expect(mockAssembleKshetraStatus).not.toHaveBeenCalled();
+    expect(body[0]!.activeBead).toBeUndefined();
+    expect(body[0]!.queueDepth).toBeUndefined();
   });
 });
 

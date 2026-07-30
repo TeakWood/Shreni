@@ -6,6 +6,8 @@ import { readToken } from './token.js';
 import { beadsRead, readKshetraTasks, isValidBeadId } from './beads-read.js';
 import { readNotifications } from '../sthapathi/notifications.js';
 import { PR_NEEDS_FOLLOWUP_LABEL } from '../sthapathi/pr-followup.js';
+import { readProcessSnapshots } from './process-read.js';
+import { assembleKshetraStatus } from '../kshetra/status.js';
 import type { KshetraConfig } from '../kshetra/config.js';
 
 export const PHALAKA_VERSION = '1.0.0';
@@ -94,6 +96,44 @@ export const NotificationListResponseSchema = z.object({
 
 export const HealthSchema = z.object({ ok: z.literal(true), version: z.string() });
 
+// ── Process snapshots (control plane) ───────────────────────────────────────
+// Mirrors ProcessSnapshot in process-read.ts; the extra `error` field carries a
+// per-Kshetra bead-enrichment failure so one broken `bd` never blanks the fleet.
+
+export const ProcessStuckSchema = z.object({
+  since: z.string(),
+  reason: z.string(),
+  remediation: z.string(),
+  phase: z.string().optional(),
+  beadId: z.string().optional(),
+});
+
+export const ProcessActiveBeadSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  agent: z.string().optional(),
+  round: z.number().optional(),
+});
+
+export const ProcessSnapshotSchema = z.object({
+  kind: z.enum(['worker', 'phalaka', 'suthradhara']),
+  kshetraId: z.string().optional(),
+  pid: z.number().int(),
+  status: z.enum(['working', 'idle', 'paused-manual', 'stuck', 'stale-heartbeat', 'dead', 'healthy']),
+  phase: z.string().optional(),
+  heartbeatAgeMs: z.number().optional(),
+  paused: z.boolean(),
+  stuck: ProcessStuckSchema.optional(),
+  // Bead-derived enrichment, merged from assembleKshetraStatus() for worker rows.
+  activeBead: ProcessActiveBeadSchema.optional(),
+  queueDepth: z.number().int().nonnegative().optional(),
+  lastProgressAt: z.string().optional(),
+  // Set when this row's Kshetra failed bead enrichment; the row still renders.
+  error: z.string().optional(),
+});
+
+export const ProcessListSchema = z.array(ProcessSnapshotSchema);
+
 // ── Auth ────────────────────────────────────────────────────────────────────
 
 function extractToken(req: FastifyRequest): string | null {
@@ -169,6 +209,51 @@ export function registerPhalakaApi(app: FastifyInstance): void {
     if (!requireToken(req, reply)) return;
     const summaries = await Promise.all(loadRegistry().map(summarizeKshetra));
     return KshetraListSchema.parse(summaries);
+  });
+
+  app.get('/api/processes', async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+
+    // File-only snapshots first: fast, synchronous, and complete on their own
+    // (workers, Phalaka, Suthradhara). Bead-derived fields (activeBead/queueDepth)
+    // are then merged onto worker rows from the shared assembleKshetraStatus().
+    const snapshots = readProcessSnapshots();
+
+    // One bd read per Kshetra with a worker row, not one per process — dedupe the
+    // ids, then run them concurrently. A Kshetra whose bd is unreadable resolves to
+    // an error entry so its rows carry `error` while every other row still renders.
+    const workerKshetraIds = [
+      ...new Set(
+        snapshots.filter(s => s.kind === 'worker' && s.kshetraId).map(s => s.kshetraId as string),
+      ),
+    ];
+    const enrichment = new Map<string, { activeBead?: z.infer<typeof ProcessActiveBeadSchema>; queueDepth?: number; error?: string }>();
+    await Promise.all(
+      workerKshetraIds.map(async id => {
+        const cfg = findKshetra(id);
+        if (!cfg) return;
+        try {
+          const status = await assembleKshetraStatus(cfg);
+          enrichment.set(id, { activeBead: status.activeBead, queueDepth: status.queueDepth });
+        } catch (err) {
+          enrichment.set(id, { error: err instanceof Error ? err.message : String(err) });
+        }
+      }),
+    );
+
+    const enriched = snapshots.map(s => {
+      if (s.kind !== 'worker' || !s.kshetraId) return s;
+      const e = enrichment.get(s.kshetraId);
+      if (!e) return s;
+      return {
+        ...s,
+        activeBead: e.activeBead ?? s.activeBead,
+        queueDepth: e.queueDepth ?? s.queueDepth,
+        error: e.error,
+      };
+    });
+
+    return ProcessListSchema.parse(enriched);
   });
 
   app.get('/api/kshetras/:id/tasks', async (req, reply) => {
