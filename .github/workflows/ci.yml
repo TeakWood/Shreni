@@ -1,9 +1,17 @@
-# Tier 0 of the E2E/integration test ladder (Shreni-beads-k3n.1): the cheapest
-# gate. Runs the existing unit suite — plus typecheck and build — on every push
-# and PR. Until now the suite only ran in release-binaries.yml (release time), so
-# per-change regressions shipped green; this recovers value the tests already had
-# but weren't delivering. No secrets, no external CLIs — those come in Tier 1
-# (Shreni-beads-k3n.3), which adds a job here for the hermetic bd+git harness.
+# E2E/integration test ladder, Tiers 0 and 1 (Shreni-beads-k3n).
+#
+# Tier 0 (`test` job, k3n.1): the cheapest gate. Runs the existing unit suite —
+# plus typecheck and build — on every push and PR. Until now the suite only ran
+# in release-binaries.yml (release time), so per-change regressions shipped
+# green; this recovers value the tests already had but weren't delivering. No
+# secrets, no external CLIs.
+#
+# Tier 1 (`integration` job, k3n.3): the hermetic bd+git harness
+# (src/sthapathi/e2e-hermetic.test.ts) run against REAL bd and git in throwaway
+# tmp repos — only the LLM turn is stubbed. This is what catches contract drift
+# in bd's ready/show output, its flags, or git's squash-merge behaviour, which
+# the mocked unit suite structurally cannot. Deterministic and secret-free (the
+# real-provider Tier 2 is a separate, API-key-gated workflow, k3n.4).
 name: ci
 
 on:
@@ -30,3 +38,40 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+
+  # Tier 1 — hermetic bd+git integration (Shreni-beads-k3n.3). Runs the harness
+  # that mocks nothing at the bd/git seam, so it needs the real bd binary on
+  # PATH and a git identity for the fixture commits. gh is pre-installed on
+  # ubuntu-latest. Only the hermetic test file runs here — the full suite is the
+  # `test` job above — so a green here means the real external tools were
+  # exercised, not skipped.
+  integration:
+    runs-on: ubuntu-latest
+    # The harness spins up bare origins + working clones and drives a full
+    # pickup → branch → squash-merge → close cycle; give it headroom over the
+    # bd install (~130MB binary download) without inviting a hang to run forever.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install bd
+        # @beads/bd's postinstall SKIPS the release-binary download when CI is
+        # set (GitHub Actions sets CI=true), so a plain `npm i -g` leaves the
+        # wrapper without its binary and every bd call aborts with "bd binary not
+        # found". Clear CI for the install so the postinstall downloads it, then
+        # assert `bd version` — this is the guard that a silent install miss
+        # fails the job HERE rather than letting the harness self-skip green.
+        run: |
+          CI= npm install -g @beads/bd
+          bd version
+      - name: Git identity for fixture commits
+        run: |
+          git config --global user.name "shreni-ci"
+          git config --global user.email "ci@shreni.invalid"
+      - name: Run hermetic integration suite
+        run: pnpm test src/sthapathi/e2e-hermetic.test.ts
