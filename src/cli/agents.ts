@@ -1,5 +1,5 @@
 import { loadRegistry } from '../kshetra/registry';
-import { getKshetraStatus } from './status';
+import { assembleKshetraStatus } from '../kshetra/status';
 import type { KshetraConfig } from '../kshetra/config';
 
 export interface AgentLine {
@@ -18,7 +18,7 @@ export async function getAgentLines(): Promise<AgentLine[]> {
 
   const lines = await Promise.all(
     kshetras.map(async (k: KshetraConfig): Promise<AgentLine> => {
-      const info = await getKshetraStatus(k);
+      const info = await assembleKshetraStatus(k);
       return {
         kshetraId: k.id,
         kshetraName: k.name,
