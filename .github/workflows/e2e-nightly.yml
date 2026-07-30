@@ -1,0 +1,58 @@
+# Tier 2 — full end-to-end smoke against a REAL provider (Shreni-beads-k3n.4).
+#
+# The top of the E2E test ladder (Shreni-beads-k3n). Tiers 0 and 1 (ci.yml) gate
+# every push/PR: the mocked unit suite and the hermetic bd+git harness that STUBS
+# the LLM turn. This tier stubs nothing — it drives one genuine Silpi ↔ Viharapala
+# pass against a live provider on a throwaway Kshetra with a single trivial task
+# and asserts a real squash-merge to main. It is the only rung that catches drift
+# in the provider-CLI envelope, which no mock re-checks.
+#
+# Nondeterministic and token-costing, so it is NOT a per-PR gate: nightly on a
+# schedule + manual dispatch, gated on ANTHROPIC_API_KEY. This is a standalone
+# workflow on no branch's required-checks list, so a red run ALERTS (a failed
+# nightly on the default branch) without blocking any merge. Absent the secret
+# (forks, secretless dispatch) the harness skips clean with exit 0 → green.
+name: e2e-nightly
+
+on:
+  schedule:
+    - cron: '0 5 * * *' # nightly, 05:00 UTC
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # One trivial bead is ~6-7 min of real agent latency on a hosted runner; the
+    # harness's own SHRENI_E2E_TIMEOUT_MS (12 min) caps a hung provider call, and
+    # this job timeout is the outer backstop so nothing bills indefinitely.
+    timeout-minutes: 20
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Install bd + claude CLIs
+        # @beads/bd's postinstall SKIPS the release-binary download when CI is set
+        # (GitHub Actions sets CI=true), so a plain `npm i -g` leaves the wrapper
+        # without its binary and every bd call aborts with "bd binary not found".
+        # Clear CI for the bd install so the postinstall downloads it, then assert
+        # `bd version` so a silent miss fails HERE, not mid-run. The claude CLI is
+        # the provider the smoke drives.
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          CI= npm install -g @beads/bd
+          bd version
+      - name: Git identity for fixture commits
+        run: |
+          git config --global user.name "shreni-e2e"
+          git config --global user.email "e2e@shreni.invalid"
+      - name: Run Tier 2 full e2e
+        # Skips clean (exit 0) if ANTHROPIC_API_KEY is unset — e.g. a dispatch from
+        # a fork with no access to the secret — so the job is green-when-unconfigured.
+        run: pnpm e2e:full
