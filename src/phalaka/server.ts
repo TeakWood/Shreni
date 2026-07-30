@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { registerPhalakaApi } from './api.js';
+import { PhalakaChangeStream, registerPhalakaStream } from './stream.js';
 import { INDEX_HTML } from './ui.js';
 
 export const DEFAULT_PORT = 7348;
@@ -18,7 +19,14 @@ export async function createPhalakaServer(port = DEFAULT_PORT) {
 
   registerPhalakaApi(fastify);
 
-  return { fastify, port };
+  // Live change stream (SSE). One engine per server; it starts its watch/poll
+  // timers on the first connected client and stops them when the last leaves, so
+  // an idle dashboard costs nothing. Torn down with the server.
+  const stream = new PhalakaChangeStream();
+  registerPhalakaStream(fastify, stream);
+  fastify.addHook('onClose', async () => stream.close());
+
+  return { fastify, port, stream };
 }
 
 export async function startPhalakaServer(port = DEFAULT_PORT): Promise<void> {

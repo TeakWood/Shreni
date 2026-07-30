@@ -294,6 +294,22 @@ describe('GET /api/processes', () => {
   });
 });
 
+describe('GET /api/stream', () => {
+  // The 200 path hijacks the reply and holds the connection open, so it is
+  // covered by the engine-level tests in stream.test.ts; here we assert only that
+  // the SSE route is registered and inherits the shared token gate (it replies
+  // 401 before hijacking).
+  it('401 without a token', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/stream' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('401 with a wrong token', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/stream?token=nope' });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
 describe('GET /api/kshetras/:id/tasks', () => {
   it('200 with task list for a known Kshetra', async () => {
     mockReadKshetraTasks.mockResolvedValue({ kshetra: KSHETRA, tasks: [SUMMARY] });

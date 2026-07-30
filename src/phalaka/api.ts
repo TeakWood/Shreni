@@ -148,8 +148,9 @@ function extractToken(req: FastifyRequest): string | null {
 }
 
 // Returns true when the request is authorized; otherwise replies 401 and
-// returns false so the handler can bail.
-function requireToken(req: FastifyRequest, reply: FastifyReply): boolean {
+// returns false so the handler can bail. Exported so the SSE stream route
+// (stream.ts) gates on the exact same token check as every other /api/* route.
+export function requireToken(req: FastifyRequest, reply: FastifyReply): boolean {
   const expected = readToken();
   const provided = extractToken(req);
   if (!expected || provided !== expected) {
