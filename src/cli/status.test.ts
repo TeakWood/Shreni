@@ -27,7 +27,7 @@ vi.mock('../sthapathi/beads', () => ({
 
 // ── imports after mocks ───────────────────────────────────────────────────────
 
-const { resolveKshetra, getKshetraStatus, formatKshetraStatus, formatAge, runStatus, resumeHint } =
+const { resolveKshetra, assembleKshetraStatus, formatKshetraStatus, formatAge, runStatus, resumeHint } =
   await import('./status');
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
@@ -77,19 +77,19 @@ describe('resolveKshetra', () => {
   });
 });
 
-// ── getKshetraStatus ──────────────────────────────────────────────────────────
+// ── assembleKshetraStatus ──────────────────────────────────────────────────────────
 
-describe('getKshetraStatus', () => {
+describe('assembleKshetraStatus', () => {
   it('reports daemon not running when no PID file', async () => {
     mockReadPid.mockReturnValue(null);
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.daemonRunning).toBe(false);
   });
 
   it('reports daemon running when PID is alive', async () => {
     mockReadPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(true);
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.daemonRunning).toBe(true);
   });
 
@@ -99,7 +99,7 @@ describe('getKshetraStatus', () => {
         myapp: { paused: true, reason: 'api_down', message: 'Service unavailable', requiresManualResume: false },
       },
     });
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.paused).toBe(true);
     expect(info.pauseReason).toBe('api_down');
     expect(info.pauseMessage).toBe('Service unavailable');
@@ -107,7 +107,7 @@ describe('getKshetraStatus', () => {
 
   it('reports not paused when kshetra state is absent', async () => {
     mockLoadState.mockReturnValue({ kshetras: {} });
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.paused).toBe(false);
   });
 
@@ -120,7 +120,7 @@ describe('getKshetraStatus', () => {
       }
       return Promise.resolve('[]');
     });
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.activeBead).toEqual({ id: 'bd-1', title: 'Fix login', agent: 'Silpi', round: 2 });
     expect(info.activeBead?.followup).toBeUndefined();
   });
@@ -136,7 +136,7 @@ describe('getKshetraStatus', () => {
       }
       return Promise.resolve('[]');
     });
-    const info = await getKshetraStatus(ks);
+    const info = await assembleKshetraStatus(ks);
     expect(info.activeBead?.id).toBe('bd-9');
     expect(info.activeBead?.followup).toEqual({ round: 2, maxRounds: 3 });
     const rendered = formatKshetraStatus({ ...info });
@@ -151,20 +151,20 @@ describe('getKshetraStatus', () => {
       }
       return Promise.resolve('[]');
     });
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.activeBead?.round).toBe(1);
     expect(info.activeBead?.agent).toBeUndefined();
   });
 
   it('returns undefined activeBead when no in_progress beads', async () => {
     mockBdList.mockResolvedValue('[]');
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.activeBead).toBeUndefined();
   });
 
   it('reports queue depth from ready count', async () => {
     mockBdReady.mockResolvedValue(JSON.stringify([{ id: 'a' }, { id: 'b' }, { id: 'c' }]));
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.queueDepth).toBe(3);
   });
 
@@ -178,14 +178,14 @@ describe('getKshetraStatus', () => {
       }
       return Promise.resolve('[]');
     });
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.lastCompleted).toEqual({ id: 'recent', title: 'Recent task' });
   });
 
   it('handles bd errors gracefully (returns zeros/undefined)', async () => {
     mockBdList.mockRejectedValue(new Error('bd unreachable'));
     mockBdReady.mockRejectedValue(new Error('bd unreachable'));
-    const info = await getKshetraStatus(KSHETRA);
+    const info = await assembleKshetraStatus(KSHETRA);
     expect(info.activeBead).toBeUndefined();
     expect(info.queueDepth).toBe(0);
     expect(info.lastCompleted).toBeUndefined();
@@ -278,6 +278,61 @@ describe('formatKshetraStatus', () => {
     const recent = new Date(Date.now() - 5 * 60_000).toISOString();
     const out = formatKshetraStatus({ ...BASE, lastProgressAt: recent });
     expect(out).toContain('Last progress: 5m ago');
+  });
+
+  // Byte-identical golden for the full render. `shreni status` textual output is a
+  // stable operator-facing surface; extracting assembleKshetraStatus() into the
+  // shared module must not perturb a single character of it. Time is frozen so the
+  // formatAge() ("2h ago" / "5m ago") lines are deterministic.
+  it('renders the full status block byte-for-byte (golden)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-30T12:00:00.000Z'));
+    try {
+      const out = formatKshetraStatus({
+        kshetra: KSHETRA,
+        daemonRunning: true,
+        pid: 4242,
+        paused: false,
+        phase: 'WORKING',
+        activeBead: {
+          id: 'bd-1',
+          title: 'Fix login',
+          agent: 'Silpi',
+          round: 3,
+          followup: { round: 1, maxRounds: 5 },
+        },
+        queueDepth: 3,
+        lastCompleted: { id: 'bd-99', title: 'Old feature' },
+        lastProgressAt: '2026-06-30T11:55:00.000Z',
+        stuck: {
+          since: '2026-06-30T10:00:00.000Z',
+          reason: 'agent appears hung',
+          remediation: '  1) shreni resume\n  2) check logs',
+        },
+      });
+      expect(out).toBe(
+        [
+          'Kshetra: Myapp (myapp) — worker running (pid 4242)',
+          '──────────────────────────────────────────────────',
+          'Status:  active · phase WORKING',
+          '',
+          '⚠️  STUCK (since 2h ago): agent appears hung',
+          '    Try:',
+          '      1) shreni resume',
+          '      2) check logs',
+          '',
+          'Active bead: bd-1 · Fix login',
+          '  Agent: Silpi  Round: 3',
+          '  ↳ PR follow-up: addressing open-PR feedback (round 1/5)',
+          '',
+          'Queue depth: 3',
+          'Last completed: bd-99 · Old feature',
+          'Last progress: 5m ago',
+        ].join('\n'),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
