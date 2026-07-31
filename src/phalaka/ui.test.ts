@@ -129,9 +129,39 @@ describe('INDEX_HTML wiring (structural)', () => {
     expect(INDEX_HTML).toContain('?status=closed');
   });
 
-  it('polls on a 10s interval', () => {
+  it('drives the board off the SSE stream, not an always-on poll', () => {
     expect(INDEX_HTML).toContain('POLL_MS = 10000');
-    expect(INDEX_HTML).toContain('setInterval(loadBoard, POLL_MS)');
+    // The board is refreshed by SSE state/activity events; the only setInterval is
+    // the shared fallback poll (pollOnce), gated on the stream being down.
+    expect(INDEX_HTML).not.toContain('setInterval(loadBoard');
+    expect(INDEX_HTML).toContain('setInterval(pollOnce, POLL_MS)');
+  });
+});
+
+describe('INDEX_HTML board ↔ SSE wiring (structural)', () => {
+  it('refreshes the board on state and activity events (instant updates)', () => {
+    expect(INDEX_HTML).toContain("es.addEventListener('state'");
+    expect(INDEX_HTML).toContain("es.addEventListener('activity'");
+    expect(INDEX_HTML).toContain('function refreshBoardSoon');
+    // Both event handlers nudge the debounced board refresh.
+    expect(INDEX_HTML.match(/refreshBoardSoon\(\)/g)!.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('debounces bursts of events into one board rebuild', () => {
+    expect(INDEX_HTML).toContain('boardRefreshTimer');
+    expect(INDEX_HTML).toContain('setTimeout(');
+  });
+
+  it('re-opens the expanded row so a live refresh does not collapse it mid-read', () => {
+    expect(INDEX_HTML).toContain('function openRow');
+    expect(INDEX_HTML).toContain("row.getAttribute('data-bead-id') === expanded");
+  });
+
+  it('degrades the whole page to one 10s poll when the stream is down', () => {
+    expect(INDEX_HTML).toContain('function pollOnce');
+    expect(INDEX_HTML).toContain('loadBoard(); loadProcesses();');
+    expect(INDEX_HTML).toContain('startPoll');
+    expect(INDEX_HTML).toContain('stopPoll');
   });
 });
 
@@ -404,16 +434,16 @@ describe('INDEX_HTML process panel wiring (structural)', () => {
     expect(INDEX_HTML).toContain('upsertProcess(JSON.parse(e.data))');
   });
 
-  it('degrades to a 10s /api/processes poll when the stream is down', () => {
+  it('degrades to a 10s poll when the stream is down', () => {
     expect(INDEX_HTML).toContain("es.addEventListener('error'");
-    expect(INDEX_HTML).toContain('startProcPoll');
+    expect(INDEX_HTML).toContain('startPoll');
     expect(INDEX_HTML).toContain("api('/api/processes')");
-    expect(INDEX_HTML).toContain('setInterval(loadProcesses, POLL_MS)');
+    expect(INDEX_HTML).toContain('setInterval(pollOnce, POLL_MS)');
   });
 
   it('stops the fallback poll once the stream opens', () => {
     expect(INDEX_HTML).toContain("es.addEventListener('open'");
-    expect(INDEX_HTML).toContain('stopProcPoll');
+    expect(INDEX_HTML).toContain('stopPoll');
   });
 
   it('guards against a browser without EventSource', () => {
