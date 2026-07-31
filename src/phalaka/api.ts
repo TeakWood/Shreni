@@ -136,9 +136,10 @@ export const ProcessListSchema = z.array(ProcessSnapshotSchema);
 
 // ── Auth ────────────────────────────────────────────────────────────────────
 
-function extractToken(req: FastifyRequest): string | null {
-  const q = (req.query as { token?: unknown } | undefined)?.token;
-  if (typeof q === 'string' && q.length > 0) return q;
+// Header-only token reader: the `Authorization: Bearer <token>` form, used by
+// both the read gate (as one of two accepted carriers) and the mutation gate
+// (as the ONLY accepted carrier — see requireMutationAuth).
+function bearerToken(req: FastifyRequest): string | null {
   const auth = req.headers['authorization'];
   if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
     const t = auth.slice('Bearer '.length).trim();
@@ -147,12 +148,84 @@ function extractToken(req: FastifyRequest): string | null {
   return null;
 }
 
+function extractToken(req: FastifyRequest): string | null {
+  const q = (req.query as { token?: unknown } | undefined)?.token;
+  if (typeof q === 'string' && q.length > 0) return q;
+  return bearerToken(req);
+}
+
 // Returns true when the request is authorized; otherwise replies 401 and
 // returns false so the handler can bail. Exported so the SSE stream route
 // (stream.ts) gates on the exact same token check as every other /api/* route.
 export function requireToken(req: FastifyRequest, reply: FastifyReply): boolean {
   const expected = readToken();
   const provided = extractToken(req);
+  if (!expected || provided !== expected) {
+    reply.code(401).send({ error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+// ── Mutation auth (stricter gate for the POST action surface) ────────────────
+// Reads keep the query-or-Bearer requireToken; mutations get this stricter
+// sibling (Control Plane Actions ARD §6). It closes the two browser attack paths
+// a read-only token never had to defend against:
+//   1. Token via the `Authorization: Bearer` header ONLY — the query-string token
+//      that GET accepts is rejected here, keeping the destructive-action secret
+//      out of URLs / browser history / server logs / Referer (Attack A leak path).
+//   2. Origin/Host must be loopback — rejects any request whose Origin (if
+//      present) or Host resolves to something other than 127.0.0.1/localhost,
+//      closing DNS-rebinding (Attack B).
+
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost']);
+
+// Parse the hostname out of a bare `host[:port]` authority (the Host header has
+// no scheme, so we borrow one to reuse the URL parser — which also strips the
+// port and normalizes IPv6 brackets). Returns null on unparseable input.
+function hostnameFromAuthority(authority: string): string | null {
+  try {
+    return new URL(`http://${authority}`).hostname;
+  } catch {
+    return null;
+  }
+}
+
+// Parse the hostname out of an Origin (already a full `scheme://host[:port]`
+// URL). Returns null on unparseable input — including the opaque `"null"`
+// origin, which must be treated as non-loopback.
+function hostnameFromOrigin(origin: string): string | null {
+  try {
+    return new URL(origin).hostname;
+  } catch {
+    return null;
+  }
+}
+
+// Returns true when the request may perform a mutation; otherwise replies with
+// 403 (bad Origin/Host) or 401 (bad/missing header token) and returns false so
+// the handler can bail. The Origin/Host guard is checked BEFORE the token so a
+// foreign-origin request is refused without the secret ever being validated.
+export function requireMutationAuth(req: FastifyRequest, reply: FastifyReply): boolean {
+  // (2) Origin/Host loopback guard — reject cross-origin / rebinding first.
+  const origin = req.headers['origin'];
+  if (typeof origin === 'string' && origin.length > 0) {
+    const originHost = hostnameFromOrigin(origin);
+    if (!originHost || !LOOPBACK_HOSTNAMES.has(originHost)) {
+      reply.code(403).send({ error: 'forbidden origin' });
+      return false;
+    }
+  }
+  const host = req.headers['host'];
+  const hostName = typeof host === 'string' ? hostnameFromAuthority(host) : null;
+  if (!hostName || !LOOPBACK_HOSTNAMES.has(hostName)) {
+    reply.code(403).send({ error: 'forbidden host' });
+    return false;
+  }
+
+  // (1) Header-Bearer token ONLY — the query-string token is not consulted.
+  const expected = readToken();
+  const provided = bearerToken(req);
   if (!expected || provided !== expected) {
     reply.code(401).send({ error: 'unauthorized' });
     return false;
