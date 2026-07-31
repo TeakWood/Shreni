@@ -1,10 +1,20 @@
 @import 'tailwindcss';
 
-/* Dark-only first (the epic defers the light/dark toggle to a final bead).
-   These CSS variables give the light-ready seam without shipping a toggle yet. */
+/* Attribute-driven theming. Dark is the default and stays the untouched base:
+   every component keeps its existing dark utilities, and the `light:` variant
+   layers light overrides on top, active only under <html data-theme="light">.
+   A tiny head script in index.html applies the stored theme before paint;
+   `useTheme` keeps <html data-theme> in sync as the user toggles. */
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
+
 :root {
   --bg: #0f172a; /* slate-900 */
   --fg: #e2e8f0; /* slate-200 */
+}
+
+:root[data-theme='light'] {
+  --bg: #f8fafc; /* slate-50 */
+  --fg: #0f172a; /* slate-900 */
 }
 
 html,

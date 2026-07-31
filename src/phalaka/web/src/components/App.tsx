@@ -7,6 +7,7 @@ import { useEventStream } from '../api/useEventStream';
 import { Board } from './Board';
 import { ProcessPanel } from './ProcessPanel';
 import { TriageFeed } from './TriageFeed';
+import { useTheme } from './useTheme';
 
 type ProcMap = Record<string, ProcessSnapshot>;
 
@@ -33,6 +34,7 @@ export function App() {
   const [processes, setProcesses] = useState<ProcMap>({});
   const [processError, setProcessError] = useState<string | null>(null);
   const [showClosed, setShowClosed] = useState(false);
+  const [theme, toggleTheme] = useTheme();
   // Bumped on every board (re)load so KshetraCards re-pull their task lists.
   const [refreshTick, setRefreshTick] = useState(0);
 
@@ -89,18 +91,29 @@ export function App() {
 
   return (
     <div className="min-h-screen">
-      <header className="flex items-center gap-4 px-4 py-3 bg-slate-900 border-b border-slate-700">
-        <h1 className="text-lg font-semibold text-slate-100">Phalaka</h1>
+      <header className="flex items-center gap-4 px-4 py-3 bg-slate-900 border-b border-slate-700 light:bg-white light:border-slate-200">
+        <h1 className="text-lg font-semibold text-slate-100 light:text-slate-900">Phalaka</h1>
         <span className="text-xs text-slate-500">per-Kshetra task board</span>
-        <label className="ml-auto flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-          <input
-            type="checkbox"
-            className="accent-slate-500"
-            checked={showClosed}
-            onChange={e => setShowClosed(e.target.checked)}
-          />
-          Show closed
-        </label>
+        <div className="ml-auto flex items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-slate-400 light:text-slate-600 cursor-pointer">
+            <input
+              type="checkbox"
+              className="accent-slate-500"
+              checked={showClosed}
+              onChange={e => setShowClosed(e.target.checked)}
+            />
+            Show closed
+          </label>
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="flex items-center gap-1.5 text-xs px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 light:border-slate-300 light:text-slate-700 light:hover:bg-slate-100"
+            title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            aria-label="Toggle color theme"
+          >
+            {theme === 'dark' ? '☀ Light' : '☾ Dark'}
+          </button>
+        </div>
       </header>
       <main className="px-4 py-4 max-w-4xl mx-auto">
         <TriageFeed entries={triageEntries} />

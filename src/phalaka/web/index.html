@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Phalaka — Task Dashboard</title>
+    <script>
+      // Apply the persisted theme before first paint (dark is the default) so a
+      // light-mode reload never flashes the dark base. useTheme keeps this in sync.
+      try {
+        var t = localStorage.getItem('phalaka-theme');
+        document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

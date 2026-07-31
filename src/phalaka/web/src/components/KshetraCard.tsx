@@ -19,11 +19,11 @@ function rowKey(kshetraId: string, beadId: string): string {
 }
 
 function CountsLine({ kshetra }: { kshetra: KshetraSummary }) {
-  if (kshetra.error) return <span className="text-xs text-red-400">{kshetra.error}</span>;
+  if (kshetra.error) return <span className="text-xs text-red-400 light:text-red-600">{kshetra.error}</span>;
   const c = kshetra.counts;
   if (!c) return null;
   return (
-    <span className="text-xs text-slate-400">
+    <span className="text-xs text-slate-400 light:text-slate-600">
       {c.open} open · {c.in_progress} active · {c.blocked} blocked · {c.closed} closed
     </span>
   );
@@ -62,20 +62,20 @@ export function KshetraCard({ kshetra, token, showClosed, expandedKey, onToggleR
   }, [token, kshetra.id, showClosed, refreshTick]);
 
   const statusChip = kshetra.paused ? (
-    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-900 text-amber-300">paused</span>
+    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-900 text-amber-300 light:bg-amber-100 light:text-amber-800">paused</span>
   ) : kshetra.phase ? (
-    <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 font-mono">{kshetra.phase}</span>
+    <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 light:bg-slate-200 light:text-slate-700 font-mono">{kshetra.phase}</span>
   ) : null;
 
   return (
-    <section className="mb-6 rounded border border-slate-800 overflow-hidden">
-      <div className="flex items-center gap-3 px-3 py-2 bg-slate-800">
-        <h2 className="text-sm font-semibold text-slate-100">{kshetra.name}</h2>
-        <span className="text-xs text-slate-600 font-mono">{kshetra.id}</span>
+    <section className="mb-6 rounded border border-slate-800 light:border-slate-200 overflow-hidden">
+      <div className="flex items-center gap-3 px-3 py-2 bg-slate-800 light:bg-slate-100">
+        <h2 className="text-sm font-semibold text-slate-100 light:text-slate-900">{kshetra.name}</h2>
+        <span className="text-xs text-slate-600 light:text-slate-400 font-mono">{kshetra.id}</span>
         {statusChip}
         {kshetra.followup ? (
           <span
-            className="text-xs px-1.5 py-0.5 rounded bg-sky-900 text-sky-300"
+            className="text-xs px-1.5 py-0.5 rounded bg-sky-900 text-sky-300 light:bg-sky-100 light:text-sky-800"
             title="beads addressing open-PR feedback"
           >
             {kshetra.followup} PR follow-up
@@ -84,14 +84,14 @@ export function KshetraCard({ kshetra, token, showClosed, expandedKey, onToggleR
         <CountsLine kshetra={kshetra} />
       </div>
       {kshetra.stuck ? (
-        <div className="px-3 py-2 bg-red-950 border-t border-red-800 text-xs text-red-200">
+        <div className="px-3 py-2 bg-red-950 border-t border-red-800 text-xs text-red-200 light:bg-red-50 light:border-red-300 light:text-red-800">
           <div className="font-semibold">⚠️ STUCK — {kshetra.stuck.reason}</div>
-          <pre className="mt-1 whitespace-pre-wrap text-red-300/80">Try:{'\n'}{kshetra.stuck.remediation}</pre>
+          <pre className="mt-1 whitespace-pre-wrap text-red-300/80 light:text-red-700/80">Try:{'\n'}{kshetra.stuck.remediation}</pre>
         </div>
       ) : null}
       <div>
         {error ? (
-          <div className="px-3 py-2 text-sm text-red-400">{error}</div>
+          <div className="px-3 py-2 text-sm text-red-400 light:text-red-600">{error}</div>
         ) : tasks.length === 0 ? (
           <div className="px-3 py-2 text-sm text-slate-500">No tasks.</div>
         ) : (
