@@ -1,0 +1,15 @@
+@import 'tailwindcss';
+
+/* Dark-only first (the epic defers the light/dark toggle to a final bead).
+   These CSS variables give the light-ready seam without shipping a toggle yet. */
+:root {
+  --bg: #0f172a; /* slate-900 */
+  --fg: #e2e8f0; /* slate-200 */
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, sans-serif;
+}
