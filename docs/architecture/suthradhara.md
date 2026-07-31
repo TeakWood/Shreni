@@ -34,10 +34,9 @@ quality was invisible until Silpi produced something that missed the intent.
 Suthradhara is that missing step: a design session that refuses to file a half-formed
 epic.
 
-It is deliberately the *heavy* cousin of Vichara's <30-second capture. A bug spotted
-on a phone goes to Vichara; a feature that needs designing goes to Suthradhara. The
-two share mechanism (the CLI agentic loop, the `--allowedTools` boundary, the
-server-side confirm gate) but occupy opposite ends of the effort/ceremony spectrum.
+Suthradhara is deliberately a *heavy*, high-ceremony step — a focused design session,
+not a quick capture. It leans on the CLI agentic loop, the `--allowedTools` boundary,
+and the server-side confirm gate to keep that ceremony safe.
 
 ---
 
@@ -55,7 +54,7 @@ shreni suthradhara list    [@<id> | --kshetra <id>]   # list on-disk sessions
 ```
 
 The active Kshetra is resolved by `@<id>`, `--kshetra <id>`, or a `cwd` that falls
-inside a registered Kshetra's repo (the same `@`-mention mechanism Vichara uses). The
+inside a registered Kshetra's repo (the standard `@`-mention mechanism). The
 CLI runs with `cwd` = the resolved Kshetra repo, so all reads and `bd`/`git` calls
 auto-scope to that project.
 
@@ -102,8 +101,8 @@ and will not silently jump to Stage 3 with unchecked items.
 
 ## Codebase-aware grounding
 
-To interview and decompose well, Suthradhara reads the active Kshetra's repo the same
-way Vichara does — the **read allowlist carries over unchanged**: `Read`, `Grep`,
+To interview and decompose well, Suthradhara reads the active Kshetra's repo through a
+**read-only allowlist**: `Read`, `Grep`,
 `Glob`, read-only `bd` subcommands (`list`/`ready`/`show`/`search`/`memories`/…), and
 read-only `git` (`log`/`diff`/`status`/`show`/`branch`). Grounding is what separates a
 useful decomposition from a generic one: before proposing "add an auth middleware,"
@@ -127,8 +126,8 @@ is the load-bearing control.
 
 ### 1. Bead filing
 
-The harness allowlist is extended with *filing-only* `bd` subcommands — the same
-`--allowedTools` discipline as Vichara-Write:
+The harness allowlist is extended with *filing-only* `bd` subcommands — under the same
+`--allowedTools` discipline that governs every agent:
 
 | Capability | `bd` surface |
 |---|---|
@@ -256,8 +255,8 @@ modes, so they live in two places.
 **Layer 1 — the conversation transcript (on disk).** The transcript + current stage +
 rubric state + running requirement set persist as a per-session JSON record under
 `~/.shreni/suthradhara/<session-id>.json`. It is chatty, unstructured, and single-host — a
-poor fit for `bd` — so it stays on disk; `resume` rehydrates it. This is the Vichara
-divergence: Vichara runs each turn stateless, Suthradhara must retain the conversation.
+poor fit for `bd` — so it stays on disk; `resume` rehydrates it. Unlike a stateless
+per-turn agent, Suthradhara must retain the conversation across turns.
 
 **Layer 2 — the session bead (in `bd`).** Once Stage 3 yields a plan, the **server** creates
 a dedicated bead of type **`suthradhara-session`** — the durable spine of the session and
@@ -327,27 +326,10 @@ negative test stays green. The sole-writer invariant governs *executable work-st
 
 ---
 
-## Vichara → Suthradhara handoff (designed, pending)
-
-When a Vichara capture turns out to be more than a quick file — the operator realises the
-"bug" is really a feature, or the item needs scoping — Vichara can **hand the captured
-requirement off to Suthradhara**, which opens a design session **seeded** with that text
-(active Kshetra, title, any body/severity). The ingest is **one-way and seeded**, not a live
-bridge, and Vichara files nothing on handoff — Suthradhara's own confirm gate governs any
-resulting write.
-
-This handoff is **designed but not yet built**, and it is a **Vichara-side** feature — Suthradhara
-needs nothing from Vichara to function. It is therefore tracked under the **Vichara Write Interface**
-epic (`Shreni-beads-9sk`, deferred), not the Suthradhara epic, and lands when Vichara's write surface
-does. It is documented here for completeness; the seeded-ingest path is not present in
-`src/suthradhara/` today.
-
----
-
 ## Security
 
-Vichara's controls carry over (shared token, scoped `cwd`, harness allowlist as the authority);
-the net-new surface is the doc write:
+Suthradhara's base controls (shared token, scoped `cwd`, harness allowlist as the authority)
+carry the same weight as elsewhere in Shreni; the net-new surface is the doc write:
 
 - **Blast radius: "file beads + write one design note", never task state or code.** A leaked
   token lets an attacker file garbage beads and write a doc under the design dir. It **cannot**
@@ -364,13 +346,13 @@ the net-new surface is the doc write:
 
 ## Module map
 
-Standalone in `src/suthradhara/`, reusing Sthapathi/Vichara primitives as shared modules.
+Standalone in `src/suthradhara/`, reusing Sthapathi primitives as shared modules.
 
 | Module | Responsibility |
 |---|---|
 | `src/cli/suthradhara.ts` | CLI: `start`/`resume`/`stop`/`status`/`list`, Kshetra resolution, session-id parsing |
 | `src/cli/suthradhara-runner.ts` | The detached runner entrypoint — rehydrate, then drive the turn loop (or idle) |
-| `lifecycle.ts` | Detached-process spawn/stop/status/resume (Vichara process precedent) |
+| `lifecycle.ts` | Detached-process spawn/stop/status/resume |
 | `pid.ts` | PID file under `~/.shreni/suthradhara.*` |
 | `prompt.ts` | Stage-aware system prompt — the distilled state that IS the per-turn summary |
 | `rubric.ts` / `stages.ts` / `state.ts` | Readiness rubric logic; stage machine; session-state shape + pure mutators |
@@ -422,9 +404,6 @@ Tests ship with each module (Vitest), with emphasis on the boundary:
 - **Sthapathi** ([ARCHITECTURE.md](../../ARCHITECTURE.md)) — the unchanged consumer. Suthradhara
   files feature beads and manages its own non-executable session bead, but never transitions
   executable work. One filter line in the selection path; no state-machine change.
-- **Vichara** — the lightweight <30s capture surface. Complementary, not overlapping: a bug goes
-  to Vichara, a feature to Suthradhara. They share the CLI agentic loop, the `--allowedTools`
-  boundary, the server-side confirm gate, and the token/PID model.
 - **MCP grounding** ([mcp-grounding.md](./mcp-grounding.md)) — grounds a session in an external
   MCP server (Jira/Linear/Confluence) with interactive grant-on-demand; a general per-agent MCP
   capability, not a bespoke tracker integration.

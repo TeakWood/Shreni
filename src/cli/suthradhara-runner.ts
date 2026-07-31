@@ -25,8 +25,8 @@ import type { KshetraConfig, McpGrants } from '../kshetra/config';
 // lifecycle bookkeeping; when the process is spawned detached with stdio
 // 'ignore', stdin is not readable, readline closes immediately, and the runner
 // falls back to the idle heartbeat — preserving xa0.3's resume-proof behaviour
-// with no interactive input. A Vichara-style socket/PWA transport stays deferred
-// (§10). Each turn folds the exchange into state and saveSession()s.
+// with no interactive input. A socket/PWA transport stays deferred (§10). Each
+// turn folds the exchange into state and saveSession()s.
 
 const kshetraId = process.argv[2];
 const sessionId = process.argv[3];

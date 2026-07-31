@@ -3,8 +3,8 @@
 // per turn because it splices in live state: the current stage, the rubric's
 // current check marks, the requirement set so far, and the active Kshetra. That
 // live injection is what makes the model steer questioning toward the current
-// stage's job and refuse to jump ahead of the rubric (Vichara §7 divergence:
-// Suthradhara retains the conversation, but still re-grounds the prompt each turn).
+// stage's job and refuse to jump ahead of the rubric. Suthradhara retains the
+// conversation across turns, but still re-grounds the prompt each turn.
 
 import type { KshetraConfig } from '../kshetra/config';
 import type { SessionState } from './state';
