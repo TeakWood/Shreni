@@ -460,14 +460,12 @@ const BOOTSTRAP = `
     el.innerHTML = rows.join('') || '<span class="text-slate-500">No details.</span>';
   }
 
-  function toggleRow(kshetraId, row) {
+  // Open one row's detail (lazy-load once). Split out of toggleRow so a live
+  // board refresh can re-open the row the operator had expanded — otherwise an
+  // SSE-driven rebuild would yank an open task-detail shut mid-read.
+  function openRow(kshetraId, row) {
     var beadId = row.getAttribute('data-bead-id');
     var detail = row.querySelector('.task-detail');
-    var isOpen = !detail.classList.contains('hidden');
-    // collapse any other open row (one at a time)
-    var openRows = document.querySelectorAll('.task-detail:not(.hidden)');
-    for (var i = 0; i < openRows.length; i++) openRows[i].classList.add('hidden');
-    if (isOpen) { expanded = null; return; }
     expanded = beadId;
     detail.classList.remove('hidden');
     if (!detail.getAttribute('data-loaded')) {
@@ -476,6 +474,16 @@ const BOOTSTRAP = `
         .then(function (d) { renderDetail(detail, d); detail.setAttribute('data-loaded', '1'); })
         .catch(function (e) { detail.innerHTML = '<span class="text-red-400">' + escapeHtml(e.message) + '</span>'; });
     }
+  }
+
+  function toggleRow(kshetraId, row) {
+    var detail = row.querySelector('.task-detail');
+    var isOpen = !detail.classList.contains('hidden');
+    // collapse any other open row (one at a time)
+    var openRows = document.querySelectorAll('.task-detail:not(.hidden)');
+    for (var i = 0; i < openRows.length; i++) openRows[i].classList.add('hidden');
+    if (isOpen) { expanded = null; return; }
+    openRow(kshetraId, row);
   }
 
   function loadTasks(kshetraId, container) {
@@ -496,6 +504,8 @@ const BOOTSTRAP = `
       for (var j = 0; j < rows.length; j++) {
         (function (row) {
           row.querySelector('.task-head').addEventListener('click', function () { toggleRow(kshetraId, row); });
+          // Survive a live refresh: re-open whichever row was expanded before.
+          if (expanded && row.getAttribute('data-bead-id') === expanded) openRow(kshetraId, row);
         })(rows[j]);
       }
     }).catch(function (e) {
@@ -637,32 +647,52 @@ const BOOTSTRAP = `
     });
   }
 
-  // Poll fallback for the process panel — runs only while the SSE stream is down.
-  var procPollTimer = null;
-  function startProcPoll() {
-    if (procPollTimer) return;
-    loadProcesses();
-    procPollTimer = setInterval(loadProcesses, POLL_MS);
+  // ── One live channel for the whole page ────────────────────────────────────
+  // The SSE stream drives BOTH the process panel (via 'process' events) and the
+  // task board (via 'state' and 'activity' events). When the stream is down a
+  // single fallback poll refreshes both at the 10s cadence — never both a live
+  // stream and a poll at once. This is the one-channel wiring bead 6gd.7 asks for.
+
+  // Debounced board refresh: 'state' (phase/paused/stuck/counts) and 'activity'
+  // (task claimed/done) events both nudge this, so a burst of activity lines
+  // drained in one 2s server tick coalesces into a single /api/kshetras rebuild.
+  var boardRefreshTimer = null;
+  function refreshBoardSoon() {
+    if (boardRefreshTimer) return;
+    boardRefreshTimer = setTimeout(function () {
+      boardRefreshTimer = null;
+      loadBoard();
+    }, 300);
   }
-  function stopProcPoll() {
-    if (procPollTimer) { clearInterval(procPollTimer); procPollTimer = null; }
+
+  // Fallback poll — runs ONLY while the SSE stream is down. Refreshes the board
+  // and the process panel together so the whole page degrades as one unit.
+  var pollTimer = null;
+  function pollOnce() { loadBoard(); loadProcesses(); }
+  function startPoll() {
+    if (pollTimer) return;
+    pollOnce();
+    pollTimer = setInterval(pollOnce, POLL_MS);
+  }
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
   function connectStream() {
     // No EventSource (old browser) → straight to poll fallback.
-    if (!window.EventSource) { setStreamStatus('polling', false); startProcPoll(); return; }
+    if (!window.EventSource) { setStreamStatus('polling', false); startPoll(); return; }
     var es;
     try {
       es = new EventSource(apiUrl('/api/stream', TOKEN));
     } catch (e) {
       setStreamStatus('polling', false);
-      startProcPoll();
+      startPoll();
       return;
     }
     es.addEventListener('open', function () {
-      // Stream is live — cancel the fallback poll; SSE now drives the panel.
+      // Stream is live — cancel the fallback poll; SSE now drives the whole page.
       setStreamStatus('live', true);
-      stopProcPoll();
+      stopPoll();
     });
     es.addEventListener('process', function (e) {
       try {
@@ -670,11 +700,18 @@ const BOOTSTRAP = `
         renderProcesses();
       } catch (err) { /* a corrupt frame never breaks the panel */ }
     });
+    // Worker phase / paused / stuck banners changed (state.json) — refresh banners
+    // and counts. The board reads richer data from /api/kshetras than the raw
+    // state payload carries, so this is a doorbell to re-fetch, not a direct apply.
+    es.addEventListener('state', function () { refreshBoardSoon(); });
+    // A task transitioned (claimed / done / synced) — re-fetch so the affected
+    // Kshetra's rows and counts update instantly instead of waiting for a poll.
+    es.addEventListener('activity', function () { refreshBoardSoon(); });
     es.addEventListener('error', function () {
       // Stream dropped. EventSource auto-reconnects; poll in the meantime so the
-      // panel keeps refreshing until 'open' fires again and stops the poll.
+      // whole page keeps refreshing until 'open' fires again and stops the poll.
       setStreamStatus('polling', false);
-      startProcPoll();
+      startPoll();
     });
   }
 
@@ -684,10 +721,9 @@ const BOOTSTRAP = `
   });
 
   wireTriageCopy();
-  loadBoard();
-  setInterval(loadBoard, POLL_MS);
-  loadProcesses(); // seed the panel (with bead enrichment) before the stream opens
-  connectStream();
+  loadBoard();      // initial paint before the stream opens
+  loadProcesses();  // seed the panel (with bead enrichment) before the stream opens
+  connectStream();  // SSE drives board + panel live; falls back to a 10s poll when down
 `;
 
 export const INDEX_HTML = `<!DOCTYPE html>
