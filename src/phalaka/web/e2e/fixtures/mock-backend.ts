@@ -37,7 +37,8 @@ declare global {
 // here — EventSource is mocked in-page — but is fulfilled empty as a backstop.
 export async function routeRestApi(page: Page, data: BackendData): Promise<void> {
   await page.route('**/api/**', async route => {
-    const path = new URL(route.request().url()).pathname;
+    const url = new URL(route.request().url());
+    const path = url.pathname;
 
     if (path === '/api/stream') {
       await route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' });
@@ -52,7 +53,13 @@ export async function routeRestApi(page: Page, data: BackendData): Promise<void>
       body = data.processes;
     } else if ((taskList = path.match(/^\/api\/kshetras\/([^/]+)\/tasks$/))) {
       const kshetraId = decodeURIComponent(taskList[1]);
-      body = { kshetraId, tasks: data.tasksByKshetra[kshetraId] ?? [] };
+      // Honour ?status=closed exactly like the backend: the card fires a second
+      // request for closed beads only when the "Show closed" toggle is on.
+      const tasks =
+        url.searchParams.get('status') === 'closed'
+          ? (data.closedTasksByKshetra?.[kshetraId] ?? [])
+          : (data.tasksByKshetra[kshetraId] ?? []);
+      body = { kshetraId, tasks };
     } else {
       const detail = path.match(/^\/api\/kshetras\/([^/]+)\/tasks\/([^/]+)$/);
       if (detail) body = data.detailsByBead[decodeURIComponent(detail[2])] ?? {};
