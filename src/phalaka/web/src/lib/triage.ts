@@ -40,15 +40,15 @@ export function triageSeverityRank(severity: string): number {
 export function triageSeverityClass(severity: string): string {
   switch (severity) {
     case 'stuck':
-      return 'bg-red-800 text-red-100';
+      return 'bg-red-800 text-red-100 light:bg-red-100 light:text-red-800';
     case 'dead':
-      return 'bg-slate-800 text-red-300';
+      return 'bg-slate-800 text-red-300 light:bg-red-50 light:text-red-700';
     case 'stale-heartbeat':
-      return 'bg-yellow-700 text-yellow-100';
+      return 'bg-yellow-700 text-yellow-100 light:bg-yellow-100 light:text-yellow-800';
     case 'blocked':
-      return 'bg-sky-800 text-sky-100';
+      return 'bg-sky-800 text-sky-100 light:bg-sky-100 light:text-sky-800';
     default:
-      return 'bg-slate-700 text-slate-300';
+      return 'bg-slate-700 text-slate-300 light:bg-slate-200 light:text-slate-700';
   }
 }
 

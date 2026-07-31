@@ -15,17 +15,17 @@ export function priorityLabel(priority: number): string {
 export function statusBadgeClass(status: string): string {
   switch (status) {
     case 'open':
-      return 'bg-sky-700 text-sky-100';
+      return 'bg-sky-700 text-sky-100 light:bg-sky-100 light:text-sky-800';
     case 'in_progress':
-      return 'bg-amber-700 text-amber-100';
+      return 'bg-amber-700 text-amber-100 light:bg-amber-100 light:text-amber-800';
     case 'blocked':
-      return 'bg-red-800 text-red-100';
+      return 'bg-red-800 text-red-100 light:bg-red-100 light:text-red-800';
     case 'closed':
-      return 'bg-slate-600 text-slate-200';
+      return 'bg-slate-600 text-slate-200 light:bg-slate-200 light:text-slate-700';
     case 'deferred':
-      return 'bg-slate-700 text-slate-400';
+      return 'bg-slate-700 text-slate-400 light:bg-slate-200 light:text-slate-600';
     default:
-      return 'bg-slate-700 text-slate-300';
+      return 'bg-slate-700 text-slate-300 light:bg-slate-200 light:text-slate-700';
   }
 }
 
@@ -42,21 +42,21 @@ export function processKey(snap: { kind: string; kshetraId?: string }): string {
 export function processStatusPillClass(status: string): string {
   switch (status) {
     case 'working':
-      return 'bg-emerald-700 text-emerald-100';
+      return 'bg-emerald-700 text-emerald-100 light:bg-emerald-100 light:text-emerald-800';
     case 'healthy':
-      return 'bg-emerald-800 text-emerald-100';
+      return 'bg-emerald-800 text-emerald-100 light:bg-emerald-100 light:text-emerald-800';
     case 'idle':
-      return 'bg-slate-600 text-slate-200';
+      return 'bg-slate-600 text-slate-200 light:bg-slate-200 light:text-slate-700';
     case 'paused-manual':
-      return 'bg-amber-700 text-amber-100';
+      return 'bg-amber-700 text-amber-100 light:bg-amber-100 light:text-amber-800';
     case 'stale-heartbeat':
-      return 'bg-yellow-700 text-yellow-100';
+      return 'bg-yellow-700 text-yellow-100 light:bg-yellow-100 light:text-yellow-800';
     case 'stuck':
-      return 'bg-red-800 text-red-100';
+      return 'bg-red-800 text-red-100 light:bg-red-100 light:text-red-800';
     case 'dead':
-      return 'bg-slate-800 text-red-300';
+      return 'bg-slate-800 text-red-300 light:bg-red-50 light:text-red-700';
     default:
-      return 'bg-slate-700 text-slate-300';
+      return 'bg-slate-700 text-slate-300 light:bg-slate-200 light:text-slate-700';
   }
 }
 

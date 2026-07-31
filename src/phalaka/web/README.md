@@ -44,4 +44,9 @@ pnpm typecheck    # tsc --noEmit
 
 ## Theme
 
-Dark-only for now; a light/dark toggle is a separate, final bead (deferred).
+Light/dark, **dark by default**. A header toggle flips it and persists the choice
+in `localStorage` (`phalaka-theme`). Dark is the untouched base — every component
+keeps its dark Tailwind utilities and the `light:` variant (a `@custom-variant` in
+`index.css`, keyed on `<html data-theme="light">`) layers light overrides on top.
+A tiny head script in `index.html` applies the stored theme before first paint to
+avoid a flash; `useTheme` keeps `<html data-theme>` in sync thereafter.
