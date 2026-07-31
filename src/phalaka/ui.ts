@@ -191,6 +191,216 @@ export function renderProcessRow(snap: ProcSnap): string {
   );
 }
 
+// ── Triage feed (control plane) ───────────────────────────────────────────────
+// Fleet-wide "needs a human" feed (ADR §6 / bead 6gd.6): one entry per stuck
+// worker, dead/stale process, or blocked queue across every Kshetra, each with a
+// copyable CLI line. For a stuck worker that line is the watchdog remediation
+// shown VERBATIM — the exact seam the Phase-2 action buttons will replace. Derived
+// purely from the process snapshots the panel already holds plus the board's
+// Kshetra summaries, so no new endpoint is needed. (repeated-stall is not a
+// separate source: the watchdog folds it into a `stuck` marker whose reason string
+// already says "…repeated N×", so it surfaces here as a stuck entry.)
+
+export type TriageSeverity = 'stuck' | 'dead' | 'stale-heartbeat' | 'blocked';
+
+export interface TriageEntry {
+  key: string; // stable identity — DOM key + dedupe
+  severity: TriageSeverity;
+  label: string; // the offending process / Kshetra
+  reason: string; // why it needs a human
+  remediation: string; // copyable CLI line(s)
+  kshetraId?: string;
+  beadId?: string;
+}
+
+// Urgency order: a wedged (stuck) or crashed (dead) worker outranks an
+// early-warning stale heartbeat, which outranks a merely blocked queue.
+export function triageSeverityRank(severity: string): number {
+  switch (severity) {
+    case 'stuck':
+      return 0;
+    case 'dead':
+      return 1;
+    case 'stale-heartbeat':
+      return 2;
+    case 'blocked':
+      return 3;
+    default:
+      return 99;
+  }
+}
+
+export function triageSeverityClass(severity: string): string {
+  switch (severity) {
+    case 'stuck':
+      return 'bg-red-800 text-red-100';
+    case 'dead':
+      return 'bg-slate-800 text-red-300';
+    case 'stale-heartbeat':
+      return 'bg-yellow-700 text-yellow-100';
+    case 'blocked':
+      return 'bg-sky-800 text-sky-100';
+    default:
+      return 'bg-slate-700 text-slate-300';
+  }
+}
+
+// Map one process snapshot to a triage entry, or null when the process is
+// healthy/idle/paused (nothing a human must act on). Only stuck/dead/stale rows
+// escalate here — mirroring the ProcessStatus derivation in process-read.ts.
+export function triageEntryForProcess(snap: {
+  kind: string;
+  kshetraId?: string;
+  status: string;
+  phase?: string;
+  heartbeatAgeMs?: number;
+  stuck?: { reason: string; remediation: string; beadId?: string };
+}): TriageEntry | null {
+  const label = processLabel(snap);
+  const id = snap.kshetraId || '<id>';
+  if (snap.status === 'stuck') {
+    return {
+      key: 'stuck:' + processKey(snap),
+      severity: 'stuck',
+      label,
+      kshetraId: snap.kshetraId,
+      beadId: snap.stuck ? snap.stuck.beadId : undefined,
+      reason: snap.stuck ? snap.stuck.reason : 'worker is stuck and awaiting a human',
+      // The watchdog's own remediation, shown verbatim. Falls back to the ACK/resume
+      // line when a snapshot carries the status but not the marker payload.
+      remediation:
+        snap.stuck && snap.stuck.remediation ? snap.stuck.remediation : 'shreni resume --kshetra ' + id,
+    };
+  }
+  if (snap.status === 'dead') {
+    const restart =
+      snap.kind === 'phalaka'
+        ? 'shreni phalaka start'
+        : snap.kind === 'suthradhara'
+          ? 'shreni suthradhara start --kshetra ' + id
+          : 'shreni start --kshetra ' + id + '   # RECOVER reconciles the crashed worker on restart';
+    return {
+      key: 'dead:' + processKey(snap),
+      severity: 'dead',
+      label,
+      kshetraId: snap.kshetraId,
+      reason: 'the ' + snap.kind + ' process is not running (crashed or was killed)',
+      remediation: restart,
+    };
+  }
+  if (snap.status === 'stale-heartbeat') {
+    return {
+      key: 'stale:' + processKey(snap),
+      severity: 'stale-heartbeat',
+      label,
+      kshetraId: snap.kshetraId,
+      reason:
+        'no heartbeat for ' +
+        formatAge(snap.heartbeatAgeMs) +
+        ' while phase=' +
+        (snap.phase || '?') +
+        ' — the worker may be hanging',
+      remediation:
+        'shreni logs --kshetra ' + id + '   # inspect; if truly hung: shreni resume --kshetra ' + id,
+    };
+  }
+  return null;
+}
+
+// Map one Kshetra board summary to a blocked-queue triage entry, or null when
+// nothing is blocked. One aggregate row per Kshetra (the summary carries only a
+// count, not the individual blocked beads).
+export function triageEntryForKshetra(k: {
+  id: string;
+  name?: string;
+  counts?: { blocked: number };
+}): TriageEntry | null {
+  const blocked = k.counts ? k.counts.blocked : 0;
+  if (!blocked) return null;
+  return {
+    key: 'blocked:' + k.id,
+    severity: 'blocked',
+    label: k.name || k.id,
+    kshetraId: k.id,
+    reason:
+      blocked +
+      (blocked === 1 ? ' bead blocked' : ' beads blocked') +
+      ' — review the blockers; some may need manual unblocking',
+    remediation: 'cd <repo> && bd list --status=blocked   # see what is blocking, then unblock',
+  };
+}
+
+// Aggregate the whole fleet's needs-a-human items and sort by urgency, then key.
+export function collectTriageEntries(
+  processes: Array<Parameters<typeof triageEntryForProcess>[0]>,
+  kshetras: Array<Parameters<typeof triageEntryForKshetra>[0]>,
+): TriageEntry[] {
+  const entries: TriageEntry[] = [];
+  for (const p of processes) {
+    const e = triageEntryForProcess(p);
+    if (e) entries.push(e);
+  }
+  for (const k of kshetras) {
+    const e = triageEntryForKshetra(k);
+    if (e) entries.push(e);
+  }
+  entries.sort((a, b) => {
+    const d = triageSeverityRank(a.severity) - triageSeverityRank(b.severity);
+    if (d !== 0) return d;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  });
+  return entries;
+}
+
+// Render one triage entry: severity pill, offending label, optional bead id, a
+// Copy button carrying the command, the reason, and the command in a <pre>.
+export function renderTriageEntry(entry: TriageEntry): string {
+  const pill =
+    '<span class="px-2 py-0.5 rounded text-xs font-medium ' +
+    triageSeverityClass(entry.severity) +
+    '">' +
+    escapeHtml(entry.severity) +
+    '</span>';
+  const label = '<span class="text-sm font-medium text-slate-100">' + escapeHtml(entry.label) + '</span>';
+  const bead = entry.beadId
+    ? '<span class="text-xs text-slate-500 font-mono">' + escapeHtml(entry.beadId) + '</span>'
+    : '';
+  // The command lives on the button too, so a click copies it without re-reading
+  // the <pre> (the seam a Phase-2 action button replaces in place).
+  const copyBtn =
+    '<button type="button" class="triage-copy shrink-0 text-xs px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-200" data-copy="' +
+    escapeHtml(entry.remediation) +
+    '">Copy</button>';
+  const reason = '<div class="mt-1 text-xs text-slate-300">' + escapeHtml(entry.reason) + '</div>';
+  const cmd =
+    '<pre class="triage-cmd mt-2 px-2 py-1.5 rounded bg-slate-950 text-xs text-emerald-200 whitespace-pre-wrap overflow-x-auto">' +
+    escapeHtml(entry.remediation) +
+    '</pre>';
+  return (
+    '<div class="triage-entry px-3 py-2 border-b border-slate-800" data-triage-key="' +
+    escapeHtml(entry.key) +
+    '">' +
+    '<div class="flex items-center gap-3">' +
+    pill +
+    label +
+    bead +
+    '<span class="flex-1"></span>' +
+    copyBtn +
+    '</div>' +
+    reason +
+    cmd +
+    '</div>'
+  );
+}
+
+// Render the whole feed, or a healthy empty state when nothing needs a human.
+export function renderTriageFeed(entries: TriageEntry[]): string {
+  if (!entries.length) {
+    return '<div class="px-3 py-2 text-sm text-emerald-300">✓ Nothing needs a human — the fleet is healthy.</div>';
+  }
+  return entries.map(renderTriageEntry).join('');
+}
+
 const HELPERS = [
   apiUrl,
   isActiveStatus,
@@ -203,6 +413,13 @@ const HELPERS = [
   formatAge,
   processLabel,
   renderProcessRow,
+  triageSeverityRank,
+  triageSeverityClass,
+  triageEntryForProcess,
+  triageEntryForKshetra,
+  collectTriageEntries,
+  renderTriageEntry,
+  renderTriageFeed,
 ]
   .map(f => f.toString())
   .join('\n\n');
@@ -214,6 +431,7 @@ const BOOTSTRAP = `
   var POLL_MS = 10000;
   var showClosed = false;
   var expanded = null; // currently expanded bead id
+  var lastKshetras = []; // latest /api/kshetras summaries — feeds blocked-queue triage
 
   function api(path) {
     return fetch(apiUrl(path, TOKEN)).then(function (r) {
@@ -293,6 +511,8 @@ const BOOTSTRAP = `
 
   function loadBoard() {
     api('/api/kshetras').then(function (kshetras) {
+      lastKshetras = kshetras;
+      renderTriage(); // refresh blocked-queue entries from the new counts
       var board = document.getElementById('board');
       board.innerHTML = '';
       kshetras.forEach(function (k) {
@@ -363,6 +583,47 @@ const BOOTSTRAP = `
     var keys = Object.keys(processes).sort();
     container.innerHTML = keys.map(function (k) { return renderProcessRow(processes[k]); }).join('') ||
       '<div class="px-3 py-2 text-sm text-slate-500">No processes.</div>';
+    renderTriage(); // process status flips (stuck/dead/stale) drive the feed too
+  }
+
+  // ── Triage feed (needs a human) ─────────────────────────────────────────────
+  // Recomputed from the same live process snapshots + board summaries whenever
+  // either changes. Pure aggregation/render (collectTriageEntries/renderTriageFeed);
+  // this only bridges the in-page state to the DOM.
+  function renderTriage() {
+    var container = document.getElementById('triage');
+    if (!container) return;
+    var procList = Object.keys(processes).map(function (k) { return processes[k]; });
+    var entries = collectTriageEntries(procList, lastKshetras);
+    container.innerHTML = renderTriageFeed(entries);
+    var badge = document.getElementById('triage-count');
+    if (badge) {
+      badge.textContent = entries.length ? String(entries.length) : '0';
+      badge.className = 'text-xs px-1.5 py-0.5 rounded ' +
+        (entries.length ? 'bg-red-800 text-red-100' : 'bg-slate-700 text-slate-400');
+    }
+  }
+
+  // Copy a remediation line to the clipboard (event delegation on the stable
+  // #triage container, so it survives every innerHTML refresh).
+  function wireTriageCopy() {
+    var container = document.getElementById('triage');
+    if (!container) return;
+    container.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('.triage-copy') : null;
+      if (!btn) return;
+      var text = btn.getAttribute('data-copy') || '';
+      function done() {
+        var prev = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = prev; }, 1200);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        done();
+      }
+    });
   }
 
   function loadProcesses() {
@@ -422,6 +683,7 @@ const BOOTSTRAP = `
     loadBoard();
   });
 
+  wireTriageCopy();
   loadBoard();
   setInterval(loadBoard, POLL_MS);
   loadProcesses(); // seed the panel (with bead enrichment) before the stream opens
@@ -449,6 +711,14 @@ export const INDEX_HTML = `<!DOCTYPE html>
     </label>
   </header>
   <main class="px-4 py-4 max-w-4xl mx-auto">
+    <section class="mb-6 rounded border border-slate-800 overflow-hidden">
+      <div class="flex items-center gap-3 px-3 py-2 bg-slate-800">
+        <h2 class="text-sm font-semibold text-slate-100">Needs a human</h2>
+        <span id="triage-count" class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-400">0</span>
+        <span class="text-xs text-slate-500">fleet-wide triage</span>
+      </div>
+      <div id="triage"></div>
+    </section>
     <section class="mb-6 rounded border border-slate-800 overflow-hidden">
       <div class="flex items-center gap-3 px-3 py-2 bg-slate-800">
         <h2 class="text-sm font-semibold text-slate-100">Processes</h2>

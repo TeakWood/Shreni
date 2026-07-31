@@ -12,6 +12,13 @@ import {
   formatAge,
   processLabel,
   renderProcessRow,
+  triageSeverityRank,
+  triageSeverityClass,
+  triageEntryForProcess,
+  triageEntryForKshetra,
+  collectTriageEntries,
+  renderTriageEntry,
+  renderTriageFeed,
 } from './ui.js';
 
 describe('apiUrl', () => {
@@ -206,6 +213,176 @@ describe('renderProcessRow', () => {
     expect(html).toContain('data-proc-key="phalaka:"');
     expect(html).toContain('pid 10');
     expect(html).not.toContain('♥');
+  });
+});
+
+describe('triageSeverityRank', () => {
+  it('orders stuck < dead < stale-heartbeat < blocked, unknown last', () => {
+    expect(triageSeverityRank('stuck')).toBeLessThan(triageSeverityRank('dead'));
+    expect(triageSeverityRank('dead')).toBeLessThan(triageSeverityRank('stale-heartbeat'));
+    expect(triageSeverityRank('stale-heartbeat')).toBeLessThan(triageSeverityRank('blocked'));
+    expect(triageSeverityRank('weird')).toBeGreaterThan(triageSeverityRank('blocked'));
+  });
+});
+
+describe('triageSeverityClass', () => {
+  it('gives each severity a distinct class and a fallback', () => {
+    const classes = ['stuck', 'dead', 'stale-heartbeat', 'blocked'].map(triageSeverityClass);
+    expect(new Set(classes).size).toBe(4);
+    expect(triageSeverityClass('weird')).toContain('slate');
+  });
+});
+
+describe('triageEntryForProcess', () => {
+  it('surfaces a stuck worker with the watchdog remediation verbatim', () => {
+    const e = triageEntryForProcess({
+      kind: 'worker',
+      kshetraId: 'proj',
+      status: 'stuck',
+      stuck: { reason: 'repeated 5× without progress', remediation: '  1) do the thing\n  2) shreni resume', beadId: 'proj-7' },
+    });
+    expect(e).not.toBeNull();
+    expect(e!.severity).toBe('stuck');
+    expect(e!.key).toBe('stuck:worker:proj');
+    expect(e!.reason).toBe('repeated 5× without progress');
+    expect(e!.remediation).toBe('  1) do the thing\n  2) shreni resume'); // verbatim
+    expect(e!.beadId).toBe('proj-7');
+  });
+
+  it('falls back to a resume line when a stuck row lacks the marker payload', () => {
+    const e = triageEntryForProcess({ kind: 'worker', kshetraId: 'proj', status: 'stuck' });
+    expect(e!.remediation).toBe('shreni resume --kshetra proj');
+  });
+
+  it('gives a dead process a kind-appropriate restart command', () => {
+    const worker = triageEntryForProcess({ kind: 'worker', kshetraId: 'proj', status: 'dead' });
+    expect(worker!.severity).toBe('dead');
+    expect(worker!.remediation).toContain('shreni start --kshetra proj');
+    expect(triageEntryForProcess({ kind: 'phalaka', status: 'dead' })!.remediation).toBe('shreni phalaka start');
+    expect(triageEntryForProcess({ kind: 'suthradhara', kshetraId: 'proj', status: 'dead' })!.remediation).toBe(
+      'shreni suthradhara start --kshetra proj',
+    );
+  });
+
+  it('surfaces a stale heartbeat with its age and an inspect command', () => {
+    const e = triageEntryForProcess({
+      kind: 'worker',
+      kshetraId: 'proj',
+      status: 'stale-heartbeat',
+      phase: 'CODING',
+      heartbeatAgeMs: 3 * 60_000,
+    });
+    expect(e!.severity).toBe('stale-heartbeat');
+    expect(e!.reason).toContain('3m');
+    expect(e!.reason).toContain('phase=CODING');
+    expect(e!.remediation).toContain('shreni logs --kshetra proj');
+  });
+
+  it('returns null for a healthy/working/idle/paused process', () => {
+    expect(triageEntryForProcess({ kind: 'worker', kshetraId: 'proj', status: 'working' })).toBeNull();
+    expect(triageEntryForProcess({ kind: 'worker', kshetraId: 'proj', status: 'idle' })).toBeNull();
+    expect(triageEntryForProcess({ kind: 'worker', kshetraId: 'proj', status: 'paused-manual' })).toBeNull();
+    expect(triageEntryForProcess({ kind: 'phalaka', status: 'healthy' })).toBeNull();
+  });
+});
+
+describe('triageEntryForKshetra', () => {
+  it('emits one aggregate entry when beads are blocked', () => {
+    const e = triageEntryForKshetra({ id: 'proj', name: 'Project', counts: { blocked: 3 } });
+    expect(e!.severity).toBe('blocked');
+    expect(e!.key).toBe('blocked:proj');
+    expect(e!.label).toBe('Project');
+    expect(e!.reason).toContain('3 beads blocked');
+    expect(e!.remediation).toContain('bd list --status=blocked');
+  });
+
+  it('uses the singular when exactly one bead is blocked', () => {
+    expect(triageEntryForKshetra({ id: 'p', counts: { blocked: 1 } })!.reason).toContain('1 bead blocked');
+  });
+
+  it('returns null when nothing is blocked or counts are absent', () => {
+    expect(triageEntryForKshetra({ id: 'p', counts: { blocked: 0 } })).toBeNull();
+    expect(triageEntryForKshetra({ id: 'p' })).toBeNull();
+  });
+});
+
+describe('collectTriageEntries', () => {
+  it('aggregates process + Kshetra items and sorts by urgency then key', () => {
+    const processes = [
+      { kind: 'worker', kshetraId: 'b', status: 'stale-heartbeat', phase: 'CODING', heartbeatAgeMs: 180000 },
+      { kind: 'worker', kshetraId: 'a', status: 'stuck', stuck: { reason: 'hung', remediation: 'fix it', beadId: 'a-1' } },
+      { kind: 'worker', kshetraId: 'c', status: 'working' }, // healthy → dropped
+      { kind: 'suthradhara', kshetraId: 'd', status: 'dead' },
+    ];
+    const kshetras = [{ id: 'e', name: 'E', counts: { blocked: 2 } }];
+    const entries = collectTriageEntries(processes, kshetras);
+    expect(entries.map(e => e.severity)).toEqual(['stuck', 'dead', 'stale-heartbeat', 'blocked']);
+  });
+
+  it('returns an empty array when the whole fleet is healthy', () => {
+    expect(collectTriageEntries([{ kind: 'worker', kshetraId: 'a', status: 'idle' }], [])).toEqual([]);
+  });
+});
+
+describe('renderTriageEntry', () => {
+  it('renders a severity pill, escaped fields and a copyable command', () => {
+    const html = renderTriageEntry({
+      key: 'stuck:worker:proj',
+      severity: 'stuck',
+      label: 'proj',
+      reason: 'hung on <thing>',
+      remediation: 'shreni resume --kshetra proj',
+      beadId: 'proj-7',
+    });
+    expect(html).toContain('data-triage-key="stuck:worker:proj"');
+    expect(html).toContain('hung on &lt;thing&gt;'); // reason escaped
+    expect(html).toContain('proj-7');
+    expect(html).toContain('data-copy="shreni resume --kshetra proj"'); // copyable
+    expect(html).toContain('triage-copy');
+    expect(html).toContain('<pre'); // command shown verbatim
+  });
+});
+
+describe('renderTriageFeed', () => {
+  it('shows a healthy empty state when nothing needs a human', () => {
+    expect(renderTriageFeed([])).toContain('Nothing needs a human');
+  });
+
+  it('renders one row per entry', () => {
+    const html = renderTriageFeed([
+      { key: 'k1', severity: 'dead', label: 'a', reason: 'r', remediation: 'c1' },
+      { key: 'k2', severity: 'blocked', label: 'b', reason: 'r', remediation: 'c2' },
+    ]);
+    expect(html.match(/triage-entry/g)!.length).toBe(2);
+    expect(html).toContain('data-triage-key="k1"');
+    expect(html).toContain('data-triage-key="k2"');
+  });
+});
+
+describe('INDEX_HTML triage feed wiring (structural)', () => {
+  it('renders a triage section with a count badge', () => {
+    expect(INDEX_HTML).toContain('id="triage"');
+    expect(INDEX_HTML).toContain('id="triage-count"');
+    expect(INDEX_HTML).toContain('Needs a human');
+  });
+
+  it('inlines the triage render helpers so the page can call them', () => {
+    expect(INDEX_HTML).toContain('function collectTriageEntries');
+    expect(INDEX_HTML).toContain('function renderTriageFeed');
+    expect(INDEX_HTML).toContain('function triageEntryForProcess');
+  });
+
+  it('recomputes triage from both process and board updates', () => {
+    expect(INDEX_HTML).toContain('function renderTriage');
+    expect(INDEX_HTML).toContain('lastKshetras = kshetras');
+    // renderTriage is invoked from both renderProcesses and loadBoard.
+    expect(INDEX_HTML.match(/renderTriage\(\)/g)!.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('wires clipboard copy via delegation on the stable container', () => {
+    expect(INDEX_HTML).toContain('wireTriageCopy');
+    expect(INDEX_HTML).toContain('.triage-copy');
+    expect(INDEX_HTML).toContain('navigator.clipboard.writeText');
   });
 });
 
