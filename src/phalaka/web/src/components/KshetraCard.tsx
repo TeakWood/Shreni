@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { BeadSummary, KshetraSummary } from '../lib/types';
-import { fetchTasks } from '../api/client';
+import { fetchTasks, postAction } from '../api/client';
 import { TaskRow } from './TaskRow';
 
 interface Props {
@@ -35,6 +35,20 @@ function CountsLine({ kshetra }: { kshetra: KshetraSummary }) {
 export function KshetraCard({ kshetra, token, showClosed, expandedKey, onToggleRow, refreshTick }: Props) {
   const [tasks, setTasks] = useState<BeadSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Action (pause/resume) state. D2 (wait-for-SSE): we never flip the chip
+  // locally — a click fires the POST and shows a brief pending state; the paused
+  // chip changes only when the next board re-fetch (rung by the SSE `state`
+  // event) delivers fresh props, keeping state.json the single source of truth.
+  const [pending, setPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  // D3: resume can report the pause is cleared but no worker is running to
+  // self-heal — surface that primitive's hint (the `shreni start` command) as
+  // text. No inline restart button in this slice (P2a).
+  const [needsStartHint, setNeedsStartHint] = useState<string | null>(null);
+
+  // D1: a running card offers Pause; a paused OR stuck card offers Resume (ACK).
+  // Pausing an already-latched Kshetra is a no-op, so a stuck card never shows Pause.
+  const isPausedOrStuck = kshetra.paused === true || kshetra.stuck != null;
 
   useEffect(() => {
     let cancelled = false;
@@ -61,6 +75,23 @@ export function KshetraCard({ kshetra, token, showClosed, expandedKey, onToggleR
     };
   }, [token, kshetra.id, showClosed, refreshTick]);
 
+  async function onAction() {
+    // D4: the in-flight guard — ignore re-clicks while a request is pending.
+    if (pending) return;
+    setPending(true);
+    setActionError(null);
+    setNeedsStartHint(null);
+    try {
+      const res = await postAction(token, kshetra.id, isPausedOrStuck ? 'resume' : 'pause');
+      if (res.status === 'resumed_needs_start') setNeedsStartHint(res.hint);
+      // D2: intentionally NO local chip flip — the SSE `state` event drives the refresh.
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(false);
+    }
+  }
+
   const statusChip = kshetra.paused ? (
     <span className="text-xs px-1.5 py-0.5 rounded bg-amber-900 text-amber-300 light:bg-amber-100 light:text-amber-800">paused</span>
   ) : kshetra.phase ? (
@@ -82,7 +113,26 @@ export function KshetraCard({ kshetra, token, showClosed, expandedKey, onToggleR
           </span>
         ) : null}
         <CountsLine kshetra={kshetra} />
+        <button
+          type="button"
+          onClick={onAction}
+          disabled={pending}
+          aria-busy={pending}
+          className="ml-auto text-xs px-2 py-0.5 rounded border border-slate-600 text-slate-200 hover:bg-slate-700 light:border-slate-300 light:text-slate-700 light:hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {pending ? '…' : isPausedOrStuck ? 'Resume' : 'Pause'}
+        </button>
       </div>
+      {needsStartHint ? (
+        <div className="px-3 py-1.5 bg-slate-800/60 border-t border-slate-700 text-xs text-slate-300 light:bg-slate-50 light:border-slate-200 light:text-slate-700">
+          Resumed — no live worker to self-heal. Run <code className="font-mono text-sky-300 light:text-sky-700">{needsStartHint}</code> to restart it.
+        </div>
+      ) : null}
+      {actionError ? (
+        <div className="px-3 py-1.5 border-t border-red-800 text-xs text-red-400 light:border-red-300 light:text-red-600">
+          Action failed: {actionError}
+        </div>
+      ) : null}
       {kshetra.stuck ? (
         <div className="px-3 py-2 bg-red-950 border-t border-red-800 text-xs text-red-200 light:bg-red-50 light:border-red-300 light:text-red-800">
           <div className="font-semibold">⚠️ STUCK — {kshetra.stuck.reason}</div>

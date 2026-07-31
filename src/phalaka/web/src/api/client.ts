@@ -3,7 +3,9 @@
 // API path — same scheme as the old vanilla bootstrap.
 
 import type {
+  ActionResponse,
   BeadDetail,
+  KshetraAction,
   KshetraSummary,
   ProcessSnapshot,
   TaskListResponse,
@@ -51,4 +53,24 @@ export function fetchTaskDetail(
     '/api/kshetras/' + encodeURIComponent(kshetraId) + '/tasks/' + encodeURIComponent(beadId),
     token,
   );
+}
+
+// Mutating actions (pause/resume) use a STRICTER auth contract than the reads
+// above: the token rides in the `Authorization: Bearer` HEADER, never the query
+// string. The server's requireMutationAuth rejects the query-string token for
+// mutations so the destructive-action secret stays out of URLs/history/logs.
+// See src/phalaka/api.ts §Mutation auth.
+export function postAction(
+  token: string,
+  kshetraId: string,
+  action: KshetraAction,
+): Promise<ActionResponse> {
+  const path = '/api/kshetras/' + encodeURIComponent(kshetraId) + '/actions/' + action;
+  return fetch(path, {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + token },
+  }).then(r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json() as Promise<ActionResponse>;
+  });
 }

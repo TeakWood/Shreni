@@ -62,6 +62,23 @@ export interface BeadDetail extends BeadSummary {
   labels: string[];
 }
 
+// Mirrors PauseActionResponseSchema / ResumeActionResponseSchema in api.ts — the
+// bodies the two POST action routes return. resumed_needs_start carries the
+// `shreni start` command to run when no live worker was present to self-heal.
+export interface PauseActionResponse {
+  status: 'paused';
+  id: string;
+}
+
+export type ResumeActionResponse =
+  | { status: 'resumed'; id: string }
+  | { status: 'resumed_self_heal'; id: string }
+  | { status: 'resumed_needs_start'; id: string; hint: string };
+
+export type ActionResponse = PauseActionResponse | ResumeActionResponse;
+
+export type KshetraAction = 'pause' | 'resume';
+
 export type ProcessKind = 'worker' | 'phalaka' | 'suthradhara';
 
 export type ProcessStatus =
