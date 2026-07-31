@@ -22,5 +22,14 @@
         "matcher": ""
       }
     ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(bd show *)",
+      "Bash(bd ready*)",
+      "Bash(bd list *)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm vitest *)"
+    ]
   }
 }
