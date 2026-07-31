@@ -50,3 +50,24 @@ keeps its dark Tailwind utilities and the `light:` variant (a `@custom-variant` 
 `index.css`, keyed on `<html data-theme="light">`) layers light overrides on top.
 A tiny head script in `index.html` applies the stored theme before first paint to
 avoid a flash; `useTheme` keeps `<html data-theme>` in sync thereafter.
+
+## Tests
+
+Two layers, both in this standalone package (off the backend + SEA binary):
+
+- **Unit / component** — `pnpm test` (vitest): `lib/` logic + `renderToStaticMarkup`
+  component tests + one jsdom `App` smoke test.
+- **E2E** — `pnpm test:e2e` (Playwright, chromium): real-browser regression guard
+  for rendering + interactions the jsdom smoke can't reach (theme toggle, SSE live
+  updates, lazy task-row expansion). Config: `playwright.config.ts`; specs in
+  `e2e/*.spec.ts`.
+
+E2E tests are **hermetic**: `e2e/fixtures/mock-backend.ts` mocks the whole backend
+in-browser — `page.route('**/api/**')` answers the REST endpoints from
+`e2e/fixtures/data.ts`, and an in-page `EventSource` mock replaces the SSE stream so
+a spec drives `process`/`state`/`activity`/`keepalive` frames on demand (the `sse`
+controller on the `backend` fixture). No live Phalaka server, `bd` database, or
+agents are needed. The `webServer` builds the single-file bundle and serves it with
+`vite preview`, so the tests exercise the **shipped** artifact.
+
+First run needs the browser once: `pnpm exec playwright install chromium`.

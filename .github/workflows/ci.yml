@@ -75,3 +75,29 @@ jobs:
           git config --global user.email "ci@shreni.invalid"
       - name: Run hermetic integration suite
         run: pnpm test src/sthapathi/e2e-hermetic.test.ts
+
+  # Phalaka web E2E (Shreni-beads-zy9.1). Real-browser regression guard for the
+  # dashboard. The web app is a STANDALONE package (src/phalaka/web) with its own
+  # lockfile — deliberately off the root dep tree + SEA binary — so it installs
+  # separately here, not via the root `pnpm install`. Tests are hermetic: the
+  # backend + SSE stream are mocked in-browser (e2e/fixtures/mock-backend.ts), so
+  # no live Phalaka server, bd DB, or agents run. Chromium only.
+  phalaka-web-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src/phalaka/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: src/phalaka/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run E2E suite
+        run: pnpm test:e2e
