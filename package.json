@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:web": "node scripts/build-phalaka-web.mjs",
     "typecheck": "tsc --noEmit",
     "certify": "tsx scripts/certify-pack.ts",
     "e2e:full": "tsx scripts/e2e-full.ts",
