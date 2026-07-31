@@ -35,6 +35,16 @@ vi.mock('./process-read.js', () => ({ readProcessSnapshots: mockReadProcessSnaps
 const mockAssembleKshetraStatus = vi.fn<(k: KshetraConfig) => Promise<unknown>>();
 vi.mock('../kshetra/status.js', () => ({ assembleKshetraStatus: mockAssembleKshetraStatus }));
 
+// The action routes call the Sthapathi-owned primitives; stub them so the route
+// tests exercise the HTTP surface (auth, variant mapping, 404, error isolation)
+// without a real state.json write — that write is covered by cli/pause.test.ts.
+const mockPauseKshetraById = vi.fn<(id: string) => unknown>();
+const mockResumeKshetraById = vi.fn<(id: string) => unknown>();
+vi.mock('../cli/pause.js', () => ({
+  pauseKshetraById: (id: string) => mockPauseKshetraById(id),
+  resumeKshetraById: (id: string) => mockResumeKshetraById(id),
+}));
+
 const { createPhalakaServer } = await import('./server.js');
 const {
   PHALAKA_VERSION,
@@ -43,6 +53,8 @@ const {
   BeadDetailSchema,
   NotificationListResponseSchema,
   ProcessListSchema,
+  PauseActionResponseSchema,
+  ResumeActionResponseSchema,
 } = await import('./api.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
@@ -90,6 +102,8 @@ beforeEach(async () => {
   mockReadNotifications.mockReturnValue([]);
   mockReadProcessSnapshots.mockReturnValue([]);
   mockAssembleKshetraStatus.mockResolvedValue({ activeBead: undefined, queueDepth: 0 });
+  mockPauseKshetraById.mockReturnValue({ status: 'paused', id: 'myapp' });
+  mockResumeKshetraById.mockReturnValue({ status: 'resumed', id: 'myapp' });
   ({ fastify: app } = await createPhalakaServer());
 });
 
@@ -400,5 +414,112 @@ describe('GET /api/kshetras/:id/tasks/:beadId', () => {
     mockShow.mockResolvedValue(null);
     const res = await app.inject({ method: 'GET', url: `/api/kshetras/myapp/tasks/proj-404?token=${TOKEN}` });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// Fastify's inject defaults the Host header to `localhost` (a loopback name), so
+// unless a test sets a foreign Origin/Host these requests pass the Origin/Host
+// guard and reach the token check — letting us assert the token rules in isolation.
+describe('POST /api/kshetras/:id/actions/pause', () => {
+  it('401 without a header token (query token is NOT accepted for mutations)', async () => {
+    const res = await app.inject({ method: 'POST', url: `/api/kshetras/myapp/actions/pause?token=${TOKEN}` });
+    expect(res.statusCode).toBe(401);
+    expect(mockPauseKshetraById).not.toHaveBeenCalled();
+  });
+
+  it('403 on a foreign Origin (before the token is even checked)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/myapp/actions/pause',
+      headers: { authorization: `Bearer ${TOKEN}`, origin: 'https://evil.com' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(mockPauseKshetraById).not.toHaveBeenCalled();
+  });
+
+  it('200 with the header token: pauses via the primitive (reason:manual state write)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/myapp/actions/pause',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockPauseKshetraById).toHaveBeenCalledWith('myapp');
+    expect(PauseActionResponseSchema.parse(res.json())).toEqual({ status: 'paused', id: 'myapp' });
+  });
+
+  it('404 for an unknown Kshetra (primitive returns not_found)', async () => {
+    mockPauseKshetraById.mockReturnValue({ status: 'not_found', id: 'ghost' });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/ghost/actions/pause',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('isolates an unexpected primitive failure to a 502', async () => {
+    mockPauseKshetraById.mockImplementation(() => { throw new Error('state.json is locked'); });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/myapp/actions/pause',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toContain('state.json is locked');
+  });
+});
+
+describe('POST /api/kshetras/:id/actions/resume', () => {
+  it('401 without a header token', async () => {
+    const res = await app.inject({ method: 'POST', url: `/api/kshetras/myapp/actions/resume?token=${TOKEN}` });
+    expect(res.statusCode).toBe(401);
+    expect(mockResumeKshetraById).not.toHaveBeenCalled();
+  });
+
+  it('403 on a foreign Origin', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/myapp/actions/resume',
+      headers: { authorization: `Bearer ${TOKEN}`, origin: 'https://evil.com' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('404 for an unknown Kshetra', async () => {
+    mockResumeKshetraById.mockReturnValue({ status: 'not_found', id: 'ghost' });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/ghost/actions/resume',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  // Every non-not_found variant the primitive can emit must map through unchanged,
+  // hint included — the card keys off `status` and renders the `resumed_needs_start` hint.
+  it.each([
+    { variant: { status: 'resumed', id: 'myapp' } },
+    { variant: { status: 'resumed_self_heal', id: 'myapp' } },
+    { variant: { status: 'resumed_needs_start', id: 'myapp', hint: 'shreni start --kshetra myapp' } },
+  ])('200 maps the $variant.status variant from the primitive verbatim', async ({ variant }) => {
+    mockResumeKshetraById.mockReturnValue(variant);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/myapp/actions/resume',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(ResumeActionResponseSchema.parse(res.json())).toEqual(variant);
+  });
+
+  it('isolates an unexpected primitive failure to a 502', async () => {
+    mockResumeKshetraById.mockImplementation(() => { throw new Error('boom'); });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/kshetras/myapp/actions/resume',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(502);
   });
 });

@@ -8,6 +8,7 @@ import { readNotifications } from '../sthapathi/notifications.js';
 import { PR_NEEDS_FOLLOWUP_LABEL } from '../sthapathi/pr-followup.js';
 import { readProcessSnapshots } from './process-read.js';
 import { assembleKshetraStatus } from '../kshetra/status.js';
+import { pauseKshetraById, resumeKshetraById } from '../cli/pause.js';
 import type { KshetraConfig } from '../kshetra/config.js';
 
 export const PHALAKA_VERSION = '1.0.0';
@@ -133,6 +134,26 @@ export const ProcessSnapshotSchema = z.object({
 });
 
 export const ProcessListSchema = z.array(ProcessSnapshotSchema);
+
+// ── Action responses (control plane mutations) ──────────────────────────────
+// One schema per mutating route, encoding the owning primitive's success
+// variants verbatim (src/cli/pause.ts). The primitives' `not_found` variant is
+// NOT modelled here — the route maps it to HTTP 404 before parsing, so a parsed
+// body is always a real outcome the operator can act on.
+
+export const PauseActionResponseSchema = z.object({
+  status: z.literal('paused'),
+  id: z.string(),
+});
+
+// resume has three success shapes, discriminated on `status`; only
+// resumed_needs_start carries the `hint` (the `shreni start` command to run when
+// no live worker is present to self-heal). See ResumeResult in src/cli/pause.ts.
+export const ResumeActionResponseSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('resumed'), id: z.string() }),
+  z.object({ status: z.literal('resumed_self_heal'), id: z.string() }),
+  z.object({ status: z.literal('resumed_needs_start'), id: z.string(), hint: z.string() }),
+]);
 
 // ── Auth ────────────────────────────────────────────────────────────────────
 
@@ -373,6 +394,40 @@ export function registerPhalakaApi(app: FastifyInstance): void {
       const detail = await beadsRead(kshetra).show(beadId);
       if (!detail) return reply.code(404).send({ error: `unknown bead: ${beadId}` });
       return BeadDetailSchema.parse(detail);
+    } catch (err) {
+      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── Mutating action surface (requireMutationAuth, Control Plane Actions ARD) ──
+  // Both routes are a straight line: mutation-auth gate → Sthapathi-owned
+  // primitive (src/cli/pause.ts, sole writer of state.json) → zod-validated
+  // response. The card reflects the change via the existing SSE watch of
+  // state.json; these handlers never write state or touch bd/git directly.
+  //
+  // Error handling mirrors the read routes: the primitive's `not_found` variant
+  // maps to 404; an unexpected throw is isolated to a 502 so a single failing
+  // action never takes the server down.
+
+  app.post('/api/kshetras/:id/actions/pause', async (req, reply) => {
+    if (!requireMutationAuth(req, reply)) return;
+    const { id } = req.params as { id: string };
+    try {
+      const result = pauseKshetraById(id);
+      if (result.status === 'not_found') return reply.code(404).send({ error: `unknown kshetra: ${id}` });
+      return PauseActionResponseSchema.parse(result);
+    } catch (err) {
+      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/kshetras/:id/actions/resume', async (req, reply) => {
+    if (!requireMutationAuth(req, reply)) return;
+    const { id } = req.params as { id: string };
+    try {
+      const result = resumeKshetraById(id);
+      if (result.status === 'not_found') return reply.code(404).send({ error: `unknown kshetra: ${id}` });
+      return ResumeActionResponseSchema.parse(result);
     } catch (err) {
       return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
     }
