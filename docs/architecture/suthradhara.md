@@ -58,8 +58,15 @@ inside a registered Kshetra's repo (the standard `@`-mention mechanism). The
 CLI runs with `cwd` = the resolved Kshetra repo, so all reads and `bd`/`git` calls
 auto-scope to that project.
 
-`start` prints the new session id and the exact `resume` command; a session id
-embeds its Kshetra id, so `resume <session-id>` needs no redundant `@<id>`.
+When invoked from a terminal, **`start` and `resume` attach the interview REPL to
+your TTY and run it in the foreground** — the runner is spawned with inherited
+stdio, and the CLI blocks until the session ends (type a message + Enter each
+turn; end with `/exit` or Ctrl-D). On exit the CLI prints the exact `resume`
+command; a session id embeds its Kshetra id, so `resume <session-id>` needs no
+redundant `@<id>`. When stdin is **not** a TTY (scripted/CI use), the runner is
+instead spawned detached and log-backed, closes its readline immediately, and
+idles on the heartbeat — provisioning a resumable session with no interactive
+input (see [Session model & persistence](#session-model--persistence--two-layers)).
 
 ---
 

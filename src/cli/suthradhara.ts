@@ -109,6 +109,8 @@ export async function runSuthradhara(sub: string | undefined, opts: RunOpts): Pr
     const result = await startSession(kshetra);
     if (result.status === 'already_running') {
       console.log(`suthradhara[${result.kshetraId}]: already running (pid ${result.pid})`);
+    } else if (result.wait) {
+      await runForegroundRepl(result.kshetraId, result.sessionId, 'started', result.wait);
     } else {
       console.log(`suthradhara[${result.kshetraId}]: started (pid ${result.pid})`);
       console.log(`Session: ${result.sessionId}`);
@@ -155,10 +157,36 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
     console.log(
       `suthradhara[${result.kshetraId}]: already running (pid ${result.pid}); resume is a no-op`,
     );
+  } else if (result.wait) {
+    await runForegroundRepl(result.kshetraId, result.sessionId, 'resumed', result.wait);
   } else {
     console.log(`suthradhara[${result.kshetraId}]: resumed (pid ${result.pid})`);
     console.log(`Session: ${result.sessionId}`);
   }
+}
+
+// Drive an attached foreground interview: print a banner, hand the terminal to
+// the child REPL, and block until it exits. SIGINT is swallowed for the wait's
+// duration so Ctrl-C reaches the child (which runs its own clean shutdown and
+// teardown) instead of killing this parent first and leaving the PID/worktree
+// dangling.
+async function runForegroundRepl(
+  kshetraId: string,
+  sessionId: string,
+  verb: 'started' | 'resumed',
+  wait: () => Promise<number>,
+): Promise<void> {
+  console.log(`suthradhara[${kshetraId}]: ${verb} interview (session ${sessionId})`);
+  console.log('Type your message and press Enter. End the session with /exit or Ctrl-D.');
+  const swallow = (): void => {};
+  process.on('SIGINT', swallow);
+  try {
+    await wait();
+  } finally {
+    process.off('SIGINT', swallow);
+  }
+  console.log(`\nsuthradhara[${kshetraId}]: session ended.`);
+  console.log(`Resume with: shreni suthradhara resume ${sessionId}`);
 }
 
 function runList(opts: RunOpts, kshetras: KshetraConfig[]): void {

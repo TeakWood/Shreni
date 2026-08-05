@@ -152,6 +152,23 @@ describe('runSuthradhara', () => {
     logSpy.mockRestore();
   });
 
+  it('start runs a foreground REPL and awaits it when the lifecycle returns a wait handle', async () => {
+    const wait = vi.fn().mockResolvedValue(0);
+    mockStartSession.mockResolvedValue({
+      status: 'started', kshetraId: 'alpha', sessionId: ALPHA_SESSION, pid: 100, wait,
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runSuthradhara('start', {
+      args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
+    });
+    expect(wait).toHaveBeenCalledTimes(1);
+    const output = logSpy.mock.calls.map(c => c[0]).join('\n');
+    expect(output).toContain('started interview');
+    expect(output).toContain('session ended');
+    expect(output).toContain(`resume ${ALPHA_SESSION}`);
+    logSpy.mockRestore();
+  });
+
   it('start reports already_running without spawning again', async () => {
     mockStartSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -225,6 +242,23 @@ describe('runSuthradhara', () => {
     const output = logSpy.mock.calls.map(c => c[0]).join('\n');
     expect(output).toContain('resumed (pid 200)');
     expect(output).toContain(`Session: ${ALPHA_SESSION}`);
+    logSpy.mockRestore();
+  });
+
+  it('resume runs a foreground REPL and awaits it when the lifecycle returns a wait handle', async () => {
+    const wait = vi.fn().mockResolvedValue(0);
+    mockResumeSession.mockResolvedValue({
+      status: 'resumed', kshetraId: 'alpha', sessionId: ALPHA_SESSION, pid: 200, wait,
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runSuthradhara('resume', {
+      args: [ALPHA_SESSION], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A],
+    });
+    expect(wait).toHaveBeenCalledTimes(1);
+    const output = logSpy.mock.calls.map(c => c[0]).join('\n');
+    expect(output).toContain('resumed interview');
+    expect(output).toContain('session ended');
+    expect(output).toContain(`resume ${ALPHA_SESSION}`);
     logSpy.mockRestore();
   });
 

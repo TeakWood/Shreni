@@ -153,6 +153,37 @@ describe('startSession', () => {
     expect(result.status).toBe('started');
     expect(mockSpawn).toHaveBeenCalled();
   });
+
+  it('interactive: spawns attached (stdio inherit, not detached) and returns a wait handle', async () => {
+    const handlers: Record<string, (arg: number) => void> = {};
+    const child = {
+      pid: 8888,
+      on: vi.fn((ev: string, cb: (arg: number) => void) => {
+        handlers[ev] = cb;
+      }),
+    };
+    mockSpawn.mockReturnValue(child);
+
+    const result = await startSession(KSHETRA, fakeLaunch, true);
+    expect(result.status).toBe('started');
+    if (result.status !== 'started') return;
+    expect(result.pid).toBe(8888);
+
+    const [, , opts] = mockSpawn.mock.calls[0];
+    expect(opts).toMatchObject({ stdio: 'inherit', cwd: WORKTREE_PATH });
+    expect(opts).not.toHaveProperty('detached');
+    expect(mockWritePid).toHaveBeenCalledWith('myapp', 8888);
+
+    // wait() resolves with the exit code once the child exits — and tears down
+    // like stopSession (clear PID + reap worktree) since nobody runs `stop`.
+    expect(typeof result.wait).toBe('function');
+    const reapsBefore = mockReapWorktrees.mock.calls.length;
+    const waitP = result.wait!();
+    handlers.exit(0);
+    await expect(waitP).resolves.toBe(0);
+    expect(mockClearPid).toHaveBeenCalledWith('myapp');
+    expect(mockReapWorktrees.mock.calls.length).toBe(reapsBefore + 1);
+  });
 });
 
 describe('resumeSession', () => {
@@ -230,6 +261,31 @@ describe('resumeSession', () => {
     await expect(resumeSession(KSHETRA, SESSION_ID, fakeLaunch)).rejects.toThrow(
       /repo path does not exist/,
     );
+  });
+
+  it('interactive: spawns attached and returns a wait handle that tears down on exit', async () => {
+    mockLoadSession.mockReturnValue(state);
+    const handlers: Record<string, (arg: number) => void> = {};
+    const child = {
+      pid: 9999,
+      on: vi.fn((ev: string, cb: (arg: number) => void) => {
+        handlers[ev] = cb;
+      }),
+    };
+    mockSpawn.mockReturnValue(child);
+
+    const result = await resumeSession(KSHETRA, SESSION_ID, fakeLaunch, true);
+    expect(result.status).toBe('resumed');
+    if (result.status !== 'resumed') return;
+
+    const [, , opts] = mockSpawn.mock.calls[0];
+    expect(opts).toMatchObject({ stdio: 'inherit', cwd: WORKTREE_PATH });
+    expect(opts).not.toHaveProperty('detached');
+
+    const waitP = result.wait!();
+    handlers.exit(0);
+    await expect(waitP).resolves.toBe(0);
+    expect(mockClearPid).toHaveBeenCalledWith('myapp');
   });
 });
 

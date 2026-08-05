@@ -32,12 +32,15 @@ import {
 // enforces it), but each Kshetra accumulates many persisted transcripts —
 // `resume <session-id>` re-spawns the runner pointed at a specific one.
 
+// `wait` is present only for an interactive (attached-TTY) spawn: it resolves
+// with the child's exit code once the foreground REPL ends, after teardown. In
+// the detached path it is absent and the caller returns immediately.
 export type SessionStartResult =
-  | { status: 'started'; kshetraId: string; sessionId: string; pid: number }
+  | { status: 'started'; kshetraId: string; sessionId: string; pid: number; wait?: () => Promise<number> }
   | { status: 'already_running'; kshetraId: string; pid: number };
 
 export type SessionResumeResult =
-  | { status: 'resumed'; kshetraId: string; sessionId: string; pid: number }
+  | { status: 'resumed'; kshetraId: string; sessionId: string; pid: number; wait?: () => Promise<number> }
   | { status: 'already_running'; kshetraId: string; pid: number };
 
 export type SessionStopResult =
@@ -70,6 +73,7 @@ function kshetraIdFromSessionArg(sessionId: string): string {
 export async function startSession(
   kshetra: KshetraConfig,
   launchFactory: LaunchFactory = defaultLaunch,
+  interactive: boolean = Boolean(process.stdin.isTTY),
 ): Promise<SessionStartResult> {
   const existing = readSuthradharaPid(kshetra.id);
   if (existing !== null && isAlive(existing)) {
@@ -95,8 +99,8 @@ export async function startSession(
   await reapSessionWorktrees(kshetra);
   const worktreePath = await createSessionWorktree(kshetra, sessionId);
 
-  const pid = spawnRunner(kshetra, launchFactory(sessionId), worktreePath);
-  return { status: 'started', kshetraId: kshetra.id, sessionId, pid };
+  const { pid, wait } = spawnRunner(kshetra, launchFactory(sessionId), worktreePath, interactive);
+  return { status: 'started', kshetraId: kshetra.id, sessionId, pid, wait };
 }
 
 // Resume an existing session's transcript. The state file must already exist
@@ -106,6 +110,7 @@ export async function resumeSession(
   kshetra: KshetraConfig,
   sessionId: string,
   launchFactory: LaunchFactory = defaultLaunch,
+  interactive: boolean = Boolean(process.stdin.isTTY),
 ): Promise<SessionResumeResult> {
   const existing = readSuthradharaPid(kshetra.id);
   if (existing !== null && isAlive(existing)) {
@@ -139,14 +144,55 @@ export async function resumeSession(
   // one at the same path first, so a resume after an unclean stop is safe).
   const worktreePath = await createSessionWorktree(kshetra, sessionId);
 
-  const pid = spawnRunner(kshetra, launchFactory(sessionId), worktreePath);
-  return { status: 'resumed', kshetraId: kshetra.id, sessionId, pid };
+  const { pid, wait } = spawnRunner(kshetra, launchFactory(sessionId), worktreePath, interactive);
+  return { status: 'resumed', kshetraId: kshetra.id, sessionId, pid, wait };
 }
 
-function spawnRunner(kshetra: KshetraConfig, launch: Launch, cwd: string): number {
-  mkdirSync(kshetraDir(kshetra.id), { recursive: true });
-  const logFd = openSync(suthradharaLogPath(kshetra.id), 'a');
+interface SpawnedRunner {
+  pid: number;
+  // Present only for an interactive spawn — resolves once the foreground REPL
+  // exits and teardown (pid clear + worktree reap) has run.
+  wait?: () => Promise<number>;
+}
 
+function spawnRunner(
+  kshetra: KshetraConfig,
+  launch: Launch,
+  cwd: string,
+  interactive: boolean,
+): SpawnedRunner {
+  mkdirSync(kshetraDir(kshetra.id), { recursive: true });
+
+  if (interactive) {
+    // Attach the runner to the operator's terminal so its readline reads real
+    // keystrokes and replies print live — this is what turns `start`/`resume`
+    // into an actual interview (ARD §10, CLI-first). No detach/unref: the caller
+    // blocks on `wait` for the whole session, and Ctrl-C/EOF/`/exit` ends it.
+    const child = spawn(launch.command, launch.args, { stdio: 'inherit', cwd });
+    if (child.pid === undefined) {
+      throw new Error(`Failed to spawn suthradhara session for "${kshetra.id}"`);
+    }
+    writeSuthradharaPid(kshetra.id, child.pid);
+
+    // On exit, tear down like stopSession would (the operator won't run `stop`
+    // for a foreground session): drop the PID file and reap this session's
+    // worktree. `resume` re-creates the worktree, so reaping here is safe.
+    const wait = (): Promise<number> =>
+      new Promise<number>((resolve) => {
+        const finish = (code: number): void => {
+          clearSuthradharaPid(kshetra.id);
+          void reapSessionWorktrees(kshetra).finally(() => resolve(code));
+        };
+        child.on('exit', (code) => finish(code ?? 0));
+        child.on('error', () => finish(1));
+      });
+    return { pid: child.pid, wait };
+  }
+
+  // Detached, log-file-backed spawn: no readable stdin, so the runner idles on
+  // its heartbeat and stays resumable (the pre-TTY behaviour, kept for non-TTY
+  // callers such as scripted/CI invocations).
+  const logFd = openSync(suthradharaLogPath(kshetra.id), 'a');
   const child = spawn(launch.command, launch.args, {
     detached: true,
     stdio: ['ignore', logFd, logFd],
@@ -159,7 +205,7 @@ function spawnRunner(kshetra: KshetraConfig, launch: Launch, cwd: string): numbe
 
   writeSuthradharaPid(kshetra.id, child.pid);
   child.unref();
-  return child.pid;
+  return { pid: child.pid };
 }
 
 export async function stopSession(

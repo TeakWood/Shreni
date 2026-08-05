@@ -94,13 +94,20 @@ export function runReplSession(
   let state = initial;
   let busy = false;
   const queue: string[] = [];
+  // An attached TTY (the `start`/`resume` foreground path) gets line editing and
+  // a visible turn prompt; a detached stdio-'ignore' spawn is not a TTY, so this
+  // is false and the loop stays a silent resumable idler.
+  const interactive = Boolean(process.stdin.isTTY);
+  const writePrompt = (): void => {
+    if (interactive) process.stdout.write('you> ');
+  };
   // In-memory session grants from interactive grant-on-demand (pmb.6). Held only
   // in this process — a new session or a resume starts empty (an `always` grant
   // reaches the next session via kshetra.yaml, not this map). Threaded through
   // every turn and updated from the turn's result.
   let sessionGrants: McpGrants = {};
 
-  const rl = createInterface({ input: process.stdin, terminal: false });
+  const rl = createInterface({ input: process.stdin, terminal: interactive });
 
   // While a turn is mid-flight and awaiting an operator grant decision, the next
   // stdin line is that answer — not a new interview message. `pendingLine` diverts
@@ -136,7 +143,12 @@ export function runReplSession(
   const drain = async (): Promise<void> => {
     if (busy) return;
     const message = queue.shift();
-    if (message === undefined) return;
+    if (message === undefined) {
+      // Nothing left to process — surface the turn prompt so the operator knows
+      // it's their move (no-op when not attached to a TTY).
+      writePrompt();
+      return;
+    }
     busy = true;
     try {
       const result = await runInterviewTurn(state, kshetra, message, deps, sessionGrants);
@@ -190,11 +202,16 @@ export function runReplSession(
     void drain();
   });
 
-  // EOF / no interactive input: don't exit — a detached session must stay
-  // resumable. A no-op interval keeps the event loop alive (mirrors worker.ts).
+  // A no-op interval keeps the event loop alive (mirrors worker.ts).
   const HEARTBEAT_MS = 30_000;
   const heartbeat = setInterval(() => { /* keep-alive */ }, HEARTBEAT_MS);
-  rl.on('close', () => { /* keep the heartbeat; process stays alive for resume */ });
+  rl.on('close', () => {
+    // Attached TTY: EOF (Ctrl-D) is the operator ending the interview — exit so
+    // the foreground `start`/`resume` command returns. Detached (stdin 'ignore'):
+    // readline closes immediately with no input, so stay alive on the heartbeat
+    // and remain resumable, exactly as before.
+    if (interactive) shutdown();
+  });
 
   function shutdown(): void {
     clearInterval(heartbeat);
