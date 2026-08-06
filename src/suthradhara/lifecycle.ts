@@ -1,6 +1,8 @@
 import { spawn } from 'child_process';
-import { openSync, mkdirSync, existsSync } from 'fs';
+import { existsSync } from 'fs';
+import { randomUUID } from 'crypto';
 import type { KshetraConfig } from '../kshetra/config';
+import type { SpawnSpec } from '../agents/providers/types';
 import {
   readSuthradharaPid,
   writeSuthradharaPid,
@@ -8,40 +10,52 @@ import {
   isAlive,
   suthradharaLogPath,
 } from './pid';
-import { kshetraDir } from '../cli/pid';
-import { selfExec, type Launch } from '../cli/self-exec';
 import {
   generateSessionId,
   loadSession,
   saveSession,
   SessionNotFoundError,
 } from './persistence';
-import { newSessionState } from './state';
-import {
-  createSessionWorktree,
-  reapSessionWorktrees,
-} from './worktree';
+import { newSessionState, type SessionState } from './state';
+import { createSessionWorktree, reapSessionWorktrees } from './worktree';
+import { buildPlanningSession, defaultKickoff } from './session';
+import { clearHandoff } from './handoff';
 
-// Detached-process lifecycle for one Suthradhara session, per Kshetra. Mirrors
-// the Phalaka precedent: `start` is idempotent on a live PID; `stop` clears a
-// stale PID file; `status` reports the running-or-not state without side
-// effects.
-//
-// xa0.3 threads a session id through here so the runner can hydrate Layer-1
-// state on boot. Only one live session per Kshetra at a time (the pid file
-// enforces it), but each Kshetra accumulates many persisted transcripts —
-// `resume <session-id>` re-spawns the runner pointed at a specific one.
+// Lifecycle for a launched Claude Code planning session, per Kshetra (epic d3y).
+// In the launched-session model Suthradhara no longer runs a detached node
+// runner driving a headless-turn REPL — it spawns an INTERACTIVE `claude`
+// session in the session worktree and blocks on it. The pid file still enforces
+// one live session per Kshetra; the worktree is created fresh per unit (or
+// reused for the launcher's "extend" path) and reaped by the control loop.
 
-// `wait` is present only for an interactive (attached-TTY) spawn: it resolves
-// with the child's exit code once the foreground REPL ends, after teardown. In
-// the detached path it is absent and the caller returns immediately.
-export type SessionStartResult =
-  | { status: 'started'; kshetraId: string; sessionId: string; pid: number; wait?: () => Promise<number> }
-  | { status: 'already_running'; kshetraId: string; pid: number };
+// A spawned interactive session: its pid, and a `wait` that resolves with the
+// exit code once the session ends (clearing the pid file). It deliberately does
+// NOT reap the worktree — the launcher control loop owns worktree teardown so an
+// "extend" can relaunch into the same checkout.
+export interface Spawned {
+  pid: number;
+  wait: () => Promise<number>;
+}
 
-export type SessionResumeResult =
-  | { status: 'resumed'; kshetraId: string; sessionId: string; pid: number; wait?: () => Promise<number> }
-  | { status: 'already_running'; kshetraId: string; pid: number };
+// Seam so tests never launch real claude: given the spec + cwd, return a Spawned.
+export type SpawnPlanning = (spec: SpawnSpec, cwd: string) => Spawned;
+
+export interface LaunchResult {
+  status: 'launched';
+  kshetraId: string;
+  sessionId: string;
+  claudeSessionId: string;
+  worktreePath: string;
+  pid: number;
+  wait: () => Promise<number>;
+}
+export interface AlreadyRunning {
+  status: 'already_running';
+  kshetraId: string;
+  pid: number;
+}
+export type SessionStartResult = LaunchResult | AlreadyRunning;
+export type SessionResumeResult = LaunchResult | AlreadyRunning;
 
 export type SessionStopResult =
   | { status: 'stopped'; kshetraId: string; pid: number }
@@ -55,180 +69,169 @@ export interface SessionStatusResult {
   logPath: string;
 }
 
-// The lifecycle needs to build the child-process command with a session id
-// that's chosen inside startSession. Callers (production and tests) supply a
-// factory rather than a fixed Launch so the id can flow through cleanly.
-export type LaunchFactory = (sessionId: string) => Launch;
-
-const defaultLaunch: LaunchFactory = (sessionId) =>
-  selfExec('__suthradhara-runner', [kshetraIdFromSessionArg(sessionId), sessionId]);
-
-// Session ids are `<kshetraId>-<yyyymmddThhmmss>-<hex>`, so the kshetra id is
-// everything up to the trailing timestamp+hex tail. Kept local — no other
-// caller needs to parse a session id apart.
-function kshetraIdFromSessionArg(sessionId: string): string {
-  return sessionId.replace(/-\d{8}T\d{6}-[0-9a-f]{4}$/, '');
+// Production spawn: attach the interactive session to the operator's terminal
+// (stdio inherited) in the worktree, and resolve `wait` when it exits. No
+// detach/unref: the caller (the control loop) blocks on `wait`. Pid bookkeeping
+// is spawnAndTrack's job, so this only reports the exit code.
+function defaultSpawn(spec: SpawnSpec, cwd: string): Spawned {
+  const child = spawn(spec.bin, spec.args, {
+    stdio: 'inherit',
+    cwd,
+    env: { ...process.env, ...(spec.env ?? {}) },
+  });
+  if (child.pid === undefined) {
+    throw new Error(`Failed to spawn claude planning session (bin: ${spec.bin})`);
+  }
+  const wait = (): Promise<number> =>
+    new Promise<number>((resolve) => {
+      child.on('exit', (code) => resolve(code ?? 0));
+      child.on('error', () => resolve(1));
+    });
+  return { pid: child.pid, wait };
 }
 
-export async function startSession(
-  kshetra: KshetraConfig,
-  launchFactory: LaunchFactory = defaultLaunch,
-  interactive: boolean = Boolean(process.stdin.isTTY),
-): Promise<SessionStartResult> {
+export interface StartOpts {
+  // Reuse this existing worktree instead of reaping + creating a fresh one — the
+  // launcher's "extend this topic" path keeps the operator on the same branch.
+  reuseWorktree?: string;
+  // Seed the planning prompt with a prior design doc (the "extend" path).
+  extendDocRelPath?: string;
+  // Test seams.
+  spawn?: SpawnPlanning;
+  uuid?: () => string;
+}
+
+function guardRunning(kshetra: KshetraConfig): AlreadyRunning | null {
   const existing = readSuthradharaPid(kshetra.id);
   if (existing !== null && isAlive(existing)) {
     return { status: 'already_running', kshetraId: kshetra.id, pid: existing };
   }
-
-  if (!existsSync(kshetra.repo.path)) {
-    throw new Error(
-      `Kshetra "${kshetra.id}" repo path does not exist: ${kshetra.repo.path}`,
-    );
-  }
-
-  // Create the session state on disk before spawning so that `list` sees it
-  // immediately and a crash between spawn and first save can't leave the
-  // operator with a session id they can't resume.
-  const sessionId = generateSessionId(kshetra.id);
-  saveSession(newSessionState(sessionId, kshetra.id));
-
-  // Reap any leaked worktree from a prior crashed session (only one runs per
-  // Kshetra), then give this session its own detached checkout (ARD §4). The
-  // runner — and the interview child that inherits its cwd — reads/greps there,
-  // isolated from the build tree at repo.path.
-  await reapSessionWorktrees(kshetra);
-  const worktreePath = await createSessionWorktree(kshetra, sessionId);
-
-  const { pid, wait } = spawnRunner(kshetra, launchFactory(sessionId), worktreePath, interactive);
-  return { status: 'started', kshetraId: kshetra.id, sessionId, pid, wait };
+  return null;
 }
 
-// Resume an existing session's transcript. The state file must already exist
-// and must belong to this Kshetra; otherwise fail loudly rather than silently
-// creating a fresh state under the same id.
+function assertRepoExists(kshetra: KshetraConfig): void {
+  if (!existsSync(kshetra.repo.path)) {
+    throw new Error(`Kshetra "${kshetra.id}" repo path does not exist: ${kshetra.repo.path}`);
+  }
+}
+
+// Spawn the session, write its pid, and wrap `wait` so it clears the pid on exit.
+function spawnAndTrack(
+  kshetra: KshetraConfig,
+  spec: SpawnSpec,
+  worktreePath: string,
+  doSpawn: SpawnPlanning,
+): { pid: number; wait: () => Promise<number> } {
+  const child = doSpawn(spec, worktreePath);
+  writeSuthradharaPid(kshetra.id, child.pid);
+  const wait = (): Promise<number> =>
+    child.wait().then((code) => {
+      if (readSuthradharaPid(kshetra.id) === child.pid) clearSuthradharaPid(kshetra.id);
+      return code;
+    });
+  return { pid: child.pid, wait };
+}
+
+// Start a fresh planning unit: (reap +) create the worktree, mint session ids,
+// persist the record, and launch an interactive `claude` seeded with the
+// planning prompt. Idempotent-guarded on a live pid.
+export async function startSession(
+  kshetra: KshetraConfig,
+  opts: StartOpts = {},
+): Promise<SessionStartResult> {
+  const running = guardRunning(kshetra);
+  if (running) return running;
+  assertRepoExists(kshetra);
+
+  const sessionId = generateSessionId(kshetra.id);
+  let worktreePath = opts.reuseWorktree;
+  if (!worktreePath) {
+    await reapSessionWorktrees(kshetra);
+    worktreePath = await createSessionWorktree(kshetra, sessionId);
+  }
+  const claudeSessionId = (opts.uuid ?? randomUUID)();
+
+  const state: SessionState = {
+    ...newSessionState(sessionId, kshetra.id),
+    claudeSessionId,
+    worktreePath,
+  };
+  saveSession(state);
+  clearHandoff(worktreePath); // drop any stale handoff from a prior unit
+
+  const spec = buildPlanningSession({
+    kshetra,
+    claudeSessionId,
+    kickoff: defaultKickoff(Boolean(opts.extendDocRelPath)),
+    extendDocRelPath: opts.extendDocRelPath,
+  });
+
+  const { pid, wait } = spawnAndTrack(kshetra, spec, worktreePath, opts.spawn ?? defaultSpawn);
+  return { status: 'launched', kshetraId: kshetra.id, sessionId, claudeSessionId, worktreePath, pid, wait };
+}
+
+// Resume an existing session: reattach to its Claude Code conversation via
+// `--resume`. The state file must exist and belong to this Kshetra. A session
+// that never launched (no claudeSessionId) is started fresh under its stored id.
 export async function resumeSession(
   kshetra: KshetraConfig,
   sessionId: string,
-  launchFactory: LaunchFactory = defaultLaunch,
-  interactive: boolean = Boolean(process.stdin.isTTY),
+  opts: StartOpts = {},
 ): Promise<SessionResumeResult> {
-  const existing = readSuthradharaPid(kshetra.id);
-  if (existing !== null && isAlive(existing)) {
-    return { status: 'already_running', kshetraId: kshetra.id, pid: existing };
-  }
+  const running = guardRunning(kshetra);
+  if (running) return running;
+  assertRepoExists(kshetra);
 
-  if (!existsSync(kshetra.repo.path)) {
-    throw new Error(
-      `Kshetra "${kshetra.id}" repo path does not exist: ${kshetra.repo.path}`,
-    );
-  }
-
-  let state;
+  let state: SessionState;
   try {
     state = loadSession(sessionId);
   } catch (err) {
     if (err instanceof SessionNotFoundError) {
-      throw new Error(
-        `Cannot resume: session "${sessionId}" not found under ~/.shreni/suthradhara/.`,
-      );
+      throw new Error(`Cannot resume: session "${sessionId}" not found under ~/.shreni/suthradhara/.`);
     }
     throw err;
   }
   if (state.kshetraId !== kshetra.id) {
-    throw new Error(
-      `Session "${sessionId}" belongs to kshetra "${state.kshetraId}", not "${kshetra.id}".`,
-    );
+    throw new Error(`Session "${sessionId}" belongs to kshetra "${state.kshetraId}", not "${kshetra.id}".`);
   }
 
-  // Re-establish the session's worktree (createSessionWorktree removes any stale
-  // one at the same path first, so a resume after an unclean stop is safe).
   const worktreePath = await createSessionWorktree(kshetra, sessionId);
+  const resume = Boolean(state.claudeSessionId);
+  const claudeSessionId = state.claudeSessionId ?? (opts.uuid ?? randomUUID)();
+  saveSession({ ...state, worktreePath, claudeSessionId, status: 'active' });
 
-  const { pid, wait } = spawnRunner(kshetra, launchFactory(sessionId), worktreePath, interactive);
-  return { status: 'resumed', kshetraId: kshetra.id, sessionId, pid, wait };
-}
-
-interface SpawnedRunner {
-  pid: number;
-  // Present only for an interactive spawn — resolves once the foreground REPL
-  // exits and teardown (pid clear + worktree reap) has run.
-  wait?: () => Promise<number>;
-}
-
-function spawnRunner(
-  kshetra: KshetraConfig,
-  launch: Launch,
-  cwd: string,
-  interactive: boolean,
-): SpawnedRunner {
-  mkdirSync(kshetraDir(kshetra.id), { recursive: true });
-
-  if (interactive) {
-    // Attach the runner to the operator's terminal so its readline reads real
-    // keystrokes and replies print live — this is what turns `start`/`resume`
-    // into an actual interview (ARD §10, CLI-first). No detach/unref: the caller
-    // blocks on `wait` for the whole session, and Ctrl-C/EOF/`/exit` ends it.
-    const child = spawn(launch.command, launch.args, { stdio: 'inherit', cwd });
-    if (child.pid === undefined) {
-      throw new Error(`Failed to spawn suthradhara session for "${kshetra.id}"`);
-    }
-    writeSuthradharaPid(kshetra.id, child.pid);
-
-    // On exit, tear down like stopSession would (the operator won't run `stop`
-    // for a foreground session): drop the PID file and reap this session's
-    // worktree. `resume` re-creates the worktree, so reaping here is safe.
-    const wait = (): Promise<number> =>
-      new Promise<number>((resolve) => {
-        const finish = (code: number): void => {
-          clearSuthradharaPid(kshetra.id);
-          void reapSessionWorktrees(kshetra).finally(() => resolve(code));
-        };
-        child.on('exit', (code) => finish(code ?? 0));
-        child.on('error', () => finish(1));
-      });
-    return { pid: child.pid, wait };
-  }
-
-  // Detached, log-file-backed spawn: no readable stdin, so the runner idles on
-  // its heartbeat and stays resumable (the pre-TTY behaviour, kept for non-TTY
-  // callers such as scripted/CI invocations).
-  const logFd = openSync(suthradharaLogPath(kshetra.id), 'a');
-  const child = spawn(launch.command, launch.args, {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    cwd,
+  const spec = buildPlanningSession({
+    kshetra,
+    claudeSessionId,
+    resume,
+    kickoff: resume ? undefined : defaultKickoff(false),
   });
 
-  if (child.pid === undefined) {
-    throw new Error(`Failed to spawn suthradhara session for "${kshetra.id}"`);
-  }
-
-  writeSuthradharaPid(kshetra.id, child.pid);
-  child.unref();
-  return { pid: child.pid };
+  const { pid, wait } = spawnAndTrack(kshetra, spec, worktreePath, opts.spawn ?? defaultSpawn);
+  return { status: 'launched', kshetraId: kshetra.id, sessionId, claudeSessionId, worktreePath, pid, wait };
 }
 
-export async function stopSession(
-  kshetra: KshetraConfig,
-): Promise<SessionStopResult> {
+// Reap the current worktree(s) for a Kshetra — the control loop calls this when
+// the operator chooses "end" or "new story". Exposed so worktree teardown lives
+// in one place.
+export async function teardownWorktrees(kshetra: KshetraConfig): Promise<void> {
+  await reapSessionWorktrees(kshetra);
+}
+
+export async function stopSession(kshetra: KshetraConfig): Promise<SessionStopResult> {
   const kshetraId = kshetra.id;
   const pid = readSuthradharaPid(kshetraId);
   if (pid === null) {
-    // No live session, but a crash could still have leaked a worktree — sweep.
     await reapSessionWorktrees(kshetra);
     return { status: 'not_running', kshetraId };
   }
-
   if (!isAlive(pid)) {
     clearSuthradharaPid(kshetraId);
     await reapSessionWorktrees(kshetra);
     return { status: 'stale_pid_cleared', kshetraId };
   }
-
   process.kill(pid, 'SIGTERM');
   clearSuthradharaPid(kshetraId);
-  // Session over → tear down its worktree (a sweep, since only one runs per
-  // Kshetra and stop doesn't carry the session id). Prune reaps admin entries.
   await reapSessionWorktrees(kshetra);
   return { status: 'stopped', kshetraId, pid };
 }
@@ -236,10 +239,5 @@ export async function stopSession(
 export function statusSession(kshetraId: string): SessionStatusResult {
   const pid = readSuthradharaPid(kshetraId);
   const running = pid !== null && isAlive(pid);
-  return {
-    kshetraId,
-    running,
-    pid: running ? pid : null,
-    logPath: suthradharaLogPath(kshetraId),
-  };
+  return { kshetraId, running, pid: running ? pid : null, logPath: suthradharaLogPath(kshetraId) };
 }

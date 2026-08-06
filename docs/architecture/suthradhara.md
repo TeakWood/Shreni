@@ -35,48 +35,54 @@ Suthradhara is that missing step: a design session that refuses to file a half-f
 epic.
 
 Suthradhara is deliberately a *heavy*, high-ceremony step — a focused design session,
-not a quick capture. It leans on the CLI agentic loop, the `--allowedTools` boundary,
-and the server-side confirm gate to keep that ceremony safe.
+not a quick capture. It keeps that ceremony safe not by re-implementing an agent loop
+but by **launching a real interactive Claude Code session** — seeded with a planning
+system-prompt and wrapped in a **launcher-owned control loop** — so the operator is at
+the keyboard for every question and every write, and is never left in a free-roaming
+agent between planning units.
 
 ---
 
 ## Using it
 
-Suthradhara is **CLI-first** — a terminal REPL, because design intake is a focused,
+Suthradhara is **CLI-first** — a terminal session, because design intake is a focused,
 keyboard-heavy desk activity.
 
 ```bash
-shreni suthradhara start   [@<id> | --kshetra <id>]   # begin an interview session
-shreni suthradhara resume  <session-id>               # rehydrate an interrupted session
+shreni suthradhara start   [@<id> | --kshetra <id>]   # launch a planning session
+shreni suthradhara resume  <session-id>               # reattach to an interrupted session
 shreni suthradhara status  [@<id> | --kshetra <id>]   # is a session running?
-shreni suthradhara stop    [@<id> | --kshetra <id>]   # stop the detached process
+shreni suthradhara stop    [@<id> | --kshetra <id>]   # stop the running session
 shreni suthradhara list    [@<id> | --kshetra <id>]   # list on-disk sessions
 ```
 
 The active Kshetra is resolved by `@<id>`, `--kshetra <id>`, or a `cwd` that falls
 inside a registered Kshetra's repo (the standard `@`-mention mechanism). The
-CLI runs with `cwd` = the resolved Kshetra repo, so all reads and `bd`/`git` calls
-auto-scope to that project.
+launched session runs with `cwd` = the session's isolated worktree, so all reads and
+`bd`/`git` calls auto-scope to that project (see
+[Worktree isolation](../guides/suthradhara-worktree-isolation.md)).
 
-When invoked from a terminal, **`start` and `resume` attach the interview REPL to
-your TTY and run it in the foreground** — the runner is spawned with inherited
-stdio, and the CLI blocks until the session ends (type a message + Enter each
-turn; end with `/exit` or Ctrl-D). On exit the CLI prints the exact `resume`
-command; a session id embeds its Kshetra id, so `resume <session-id>` needs no
-redundant `@<id>`. When stdin is **not** a TTY (scripted/CI use), the runner is
-instead spawned detached and log-backed, closes its readline immediately, and
-idles on the heartbeat — provisioning a resumable session with no interactive
-input (see [Session model & persistence](#session-model--persistence--two-layers)).
+`start` and `resume` **launch an interactive Claude Code session** (`stdio` inherited,
+attached to your TTY) in the session worktree, seeded with the planning system-prompt,
+and then **enter the launcher control loop**: the CLI blocks on the live session, and
+when the session ends (Ctrl-D / `/exit`) it prints a completion summary and a bounded
+menu — **[1] extend this topic · [2] new story · [3] end**. `resume <session-id>`
+reattaches to the underlying Claude Code conversation via `claude --resume`; a session
+id embeds its Kshetra id, so `resume <session-id>` needs no redundant `@<id>`. The
+control loop is why the operator is never stranded in a free-roaming agent: completion
+always returns here, not to an open prompt (see
+[The launcher control loop](#the-launcher-control-loop)).
 
 ---
 
 ## The phased interview
 
 Suthradhara runs **one agent through phased stages** — not five agents, not a rigid
-wizard. The stages are a rubric the model advances through and *may revisit*:
-clarification routinely reopens discovery, and design work can expose a missing
-requirement. The current stage is tracked in session state and steers the system
-prompt, but the model owns the conversation.
+wizard. The stages are rendered into the planning system-prompt as a rubric the model
+advances through and *may revisit*: clarification routinely reopens discovery, and
+design work can expose a missing requirement. There is **no machine gate** advancing
+the stages — the launched session self-governs against the rubric and owns the
+conversation.
 
 | Stage | Hat | Purpose | Exit condition |
 |---|---|---|---|
@@ -84,13 +90,14 @@ prompt, but the model owns the conversation.
 | **2 · Clarify** | Product → Technical | Active interview: resolve ambiguity, enumerate edge cases, non-functional requirements, explicit **in/out of scope**, priorities, constraints. | The readiness rubric is satisfied; open questions answered or explicitly deferred. |
 | **3 · Decompose** | Technical | Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized for one `Silpi ↔ Viharapala` pass, ordered by dependency. | Every child has title, description, acceptance criteria, priority; deps drawn; nothing is "and then figure out X". |
 | **4 · Design** | Technical | Synthesise the decisions into a design note: chosen approach, key components and their touch-points in real files, alternatives, risks. | The note explains *why* the decomposition looks the way it does, referencing real files. |
-| **5 · Confirm & commit** | — | Present the full bundle; operator edits/approves; only then write the doc + file the beads. | Operator confirms; artifacts written; bead ids echoed. |
+| **5 · Confirm & commit** | — | Present the full bundle; operator edits/approves; only then file the beads, write the doc, sync beads, and push the doc branch. | Operator approves; artifacts filed and pushed; bead ids echoed. |
 
 ### The readiness rubric
 
-The interview's job is to *know when it has enough*. Suthradhara self-assesses against
-an explicit checklist before it will propose a decomposition, and surfaces what is
-still missing rather than guessing:
+The interview's job is to *know when it has enough*. The planning prompt carries an
+explicit checklist that the session must satisfy (or explicitly defer) before it will
+propose a decomposition, and it is told to surface what is still missing rather than
+guessing:
 
 - **Intent** — the problem and desired outcome, not just a feature name.
 - **Users / stories** — who benefits and the concrete scenarios.
@@ -99,20 +106,20 @@ still missing rather than guessing:
 - **Non-functional** — perf/security/UX/compat constraints, or an explicit "none".
 - **Dependencies / unknowns** — external systems, prerequisite work, deferred questions.
 
-An item may be checked as **"deferred (Qn)"** — captured as an open question in the
-design note rather than blocking — so the interview can converge without forcing false
-precision. Suthradhara shows the rubric state when the operator asks "are we ready?"
-and will not silently jump to Stage 3 with unchecked items.
+An item may be **deferred** — captured as an open question in the design note rather
+than blocking — so the interview can converge without forcing false precision. The
+prompt instructs the session to show the rubric state when the operator asks "are we
+ready?" and not to jump to Stage 3 with unmet items.
 
 ---
 
 ## Codebase-aware grounding
 
-To interview and decompose well, Suthradhara reads the active Kshetra's repo through a
-**read-only allowlist**: `Read`, `Grep`,
-`Glob`, read-only `bd` subcommands (`list`/`ready`/`show`/`search`/`memories`/…), and
-read-only `git` (`log`/`diff`/`status`/`show`/`branch`). Grounding is what separates a
-useful decomposition from a generic one: before proposing "add an auth middleware,"
+To interview and decompose well, Suthradhara reads the active Kshetra's repo. The
+launched session is a **full Claude Code session** — `Read`, `Grep`, `Glob`, `Bash`,
+`bd`, and `git` are all available — and the operator, at the keyboard, approves Claude
+Code's own permission prompts for each call. Grounding is what separates a useful
+decomposition from a generic one: before proposing "add an auth middleware,"
 Suthradhara greps the existing request pipeline, reads the router, and checks whether a
 session abstraction already exists — then shapes the beads around what it finds.
 
@@ -121,85 +128,89 @@ decomposition but is not required to ship.
 
 Grounding also reaches **past the repo boundary**: the operator can ground a session
 in an external source of record (a Jira/Linear/Confluence ticket) over MCP — *"let's
-work on PROJ-123"* — with interactive, grant-on-demand authorization. See
-[MCP grounding](./mcp-grounding.md).
+work on PROJ-123"* — with authorization governed by Claude Code's interactive
+permission prompts (there is no separate grant machinery; the operator is present).
+See [MCP grounding](./mcp-grounding.md).
 
 ---
 
-## The write surface & boundary
+## What the session files — and how it does it
 
-Suthradhara has exactly **two** confirmed write surfaces, and the boundary around them
-is the load-bearing control.
+Suthradhara has two write surfaces — **beads** and a **design doc** — and in the
+launched-session model the session performs both **itself**, directly. There is no
+server-side write authority, no `--allowedTools` whitelist, and no server-authored
+file: the session runs `bd`, `git`, and `Write` under the operator's live approval.
 
-### 1. Bead filing
+### Bead filing
 
-The harness allowlist is extended with *filing-only* `bd` subcommands — under the same
-`--allowedTools` discipline that governs every agent:
+The session files the plan with plain `bd`:
 
 | Capability | `bd` surface |
 |---|---|
 | File the epic | `bd create … -t epic\|feature` |
 | File children | `bd create … -t task\|bug\|feature` (acceptance criteria in the body) |
-| Link dependencies | `bd dep add …` |
+| Link dependencies | `bd dep add <blocked> <blocker>` |
 
-**Never allowlisted** (and covered by a mandatory negative test): `bd update --claim`,
-`bd close`, and any wildcard (`Bash(bd:*)`, `Bash(bd update:*)`) that would silently
-re-admit them. The allowlist is an **enumeration of exact subcommands**. Sthapathi
-remains the sole owner of task-state transitions — Suthradhara *files* work but never
-*transitions* it.
+`bd` resolves its database from the absolute `BEADS_DIR` the launcher injects (the
+worktree has no `.beads/` symlink — see the
+[worktree guide](../guides/suthradhara-worktree-isolation.md)).
 
-### 2. Design-doc file write
+Suthradhara *files* work but never *transitions* it: **Sthapathi remains the sole
+owner of task-state transitions** (`bd update --claim`, `bd close`). That invariant is
+no longer enforced by a compiled allowlist — a full session *could* run those commands —
+but the planning prompt scopes the session to filing, and the operator is at the
+keyboard approving each `bd` call.
 
-Suthradhara is the first agent in the system that puts a file on disk, so the grant is
-**scoped to a single designated docs directory** — `.shreni/design/` under the repo
-root by default (`DEFAULT_DESIGN_DIR`), a distinct subtree from `.shreni/` config.
+### Design-doc file write
 
-- **Path allowlist, not a blanket `Write`.** A resolved target outside the design-docs
-  dir is rejected **before any content is written** — enforced by a path guard in
-  `designdoc.ts`, not by the prompt.
-- **Server-authors-the-file.** The model emits the doc content; the *server* writes it
-  to the vetted path. The boundary lives server-side; the model is never granted a
-  native `Write` tool. (ARD Q4, resolved to server-writes.)
-- **No git.** Writing the file is the whole action — no `git add/commit/push`. The file
-  lands in the working tree; a human (or a later, separate flow) commits it.
-
-> A test asserts a write **inside** the design dir succeeds and a write to an arbitrary
-> source path (e.g. `src/index.ts`) is **denied**. Getting the path scope wrong would
-> turn a design agent into an arbitrary file writer, so this test is as load-bearing as
-> the `bd` negative test.
+The session writes the design note with its own `Write` tool to
+`.shreni/design/<slug>.md` **inside the worktree** (`DESIGN_DIR = .shreni/design`).
+The doc is then committed and pushed on a branch (see below) rather than written
+straight into the shared build tree.
 
 ---
 
-## Confirmation & commit
+## Confirmation & completion — the two-gate protocol
 
-Suthradhara proposes; the operator commits. Because a single confirm triggers *both* a
-set of `bd` writes and a file write, the bundle is confirmed **as a unit**.
+Suthradhara proposes; the operator commits. At the end of Stage 4 the session renders
+a **decomposition proposal** — the design note (full text, or a revision when updating
+an existing note), the epic and each child (type, title, priority, acceptance
+criteria), and the dependency edges — and asks the operator to **Approve / Edit /
+Cancel**. Edit reopens the interview and re-proposes; Cancel discards the pending
+bundle and nothing is written.
 
-1. At the end of Stage 4, Suthradhara renders a **commit proposal**: the design note
-   (full text, or a diff when updating an existing note), the epic and each child (type,
-   title, priority, acceptance criteria), the dependency edges, and the literal `bd`
-   commands + target doc path it intends to write.
-2. The operator can **Confirm / Edit / Cancel**. Edit loops back into conversation and
-   re-proposes; Cancel discards the pending bundle and nothing is written.
-3. On **Confirm**, the **server** (the authority, not the model) commits the bundle,
-   journaling each step into the session bead as it lands: write the doc, file the epic,
-   file each child, add the dep edges — recording the doc sha and every returned id. It
-   echoes back the parent id + child ids + the doc path.
+On approval the session runs a **two-gate completion protocol** itself, grounded in
+this Kshetra's real remotes and paths (`repo.remote`, `beads.remote`,
+`repo.mainBranch` from `src/kshetra/config.ts`):
+
+- **Gate ① — plan approved.** File the epic, then each child, with `bd create`;
+  add the dependency edges with `bd dep add`. Write the design note to
+  `.shreni/design/<slug>.md` in the worktree. Then **sync beads** to `beads.remote`:
+  `bd export -o "$BEADS_DIR/issues.jsonl"` → `git -C "$BEADS_DIR" add/commit` →
+  `pull --rebase && push`, verifying the beads repo is up to date with origin. Report
+  the epic id, child ids, and doc path, and tell the operator the doc is ready to review.
+- **Gate ② — design-doc/ARD approved.** Create a `suthradhara/<slug>` branch off the
+  worktree's detached HEAD, commit the doc, and **push the branch** to `repo.remote`.
+  The session **never merges to `main`** — the operator merges the branch on their own
+  time. Then write the JSON handoff and stop.
 
 There is **no fast-path** — a design bundle is never an emergency; every commit is
-pre-confirmed. The server-side confirm gate (`confirm.ts`) is also the anti-injection
-control: repo content read during grounding is untrusted, and nothing commits without an
-explicit operator confirm.
+pre-approved by the operator in the conversation, and every `bd`/`git`/`Write` call is
+additionally gated by Claude Code's live permission prompt. That human-in-the-loop
+approval is also the anti-injection control: repo content read during grounding is
+untrusted, and nothing is filed or pushed without the operator present.
 
-### Idempotent by reconcile, not replay
+### The handoff record
 
-The commit is not a blind re-run. Because the session bead records the plan up front and
-each committed item as it lands, a crash mid-commit is recovered by **reconciling against
-the session bead**: on resume the server reads it and creates only what is missing (epic
-present? each child present? deps added? doc written with matching sha?). Deterministic
-child ids (`<epic>.1…`, fixed once the epic exists) make existence-checks exact, so
-re-running files each item **exactly once**. Partial failure is reported with precisely
-what did and didn't land, straight from the journal.
+Just before it exits, the session writes a small JSON **handoff**
+(`.suthradhara-handoff.json`) to the worktree root — `branch`, `epicId`, `docPath`,
+`summary` (`src/suthradhara/handoff.ts`). The session and the launcher are separate
+processes with no shared memory, so this file **is** the channel between them: the
+launcher reads it to render the completion summary and the merge prompt. It is
+transient state, never committed (Gate ②'s `git add` names only the design doc).
+Recovery is graceful — an absent or malformed handoff (a session that crashed before
+writing it) yields a **degraded summary**, never a crash; the branch was still pushed
+and the beads still filed, both recoverable from `git`/`bd`.
 
 ---
 
@@ -214,8 +225,9 @@ questions · links to the filed epic and children), the *length* follows the dis
 
 The challenge is not "keep the doc small" — it is "deliver a possibly-deep doc to
 Silpi/Viharapala without taxing every unrelated task." Delivery is by **on-demand read**:
-the full doc lives in the design-docs dir, and the epic and **each child bead link to its
-path** in their description. Silpi/Viharapala `Read` it while working those beads — so the
+the full doc lives under `.shreni/design/`, and the epic and **each child bead link to its
+path** in their description. Once the operator merges the `suthradhara/<slug>` branch,
+the doc lands on `main`; Silpi/Viharapala `Read` it while working those beads — so the
 full depth is available exactly where relevant, and only there. Fifty features → fifty
 docs, none forced into an unrelated task's context.
 
@@ -232,191 +244,186 @@ human-curated file.** Suthradhara reuses all three and invents no fourth channel
 ### Evolving an existing feature — update, don't fork
 
 A feature is rarely designed once. When the operator returns to **extend or change** an
-existing feature, Suthradhara treats the existing doc as the source of truth and **revises
-it in place** rather than forking a second doc that leaves the first stale (which would rot
-the on-demand-read guarantee — an executor could read the wrong one). The flow (`evolve.ts`):
+existing feature, the planning prompt directs the session to treat the existing doc as the
+source of truth and **revise it in place** rather than forking a second doc that leaves the
+first stale (which would rot the on-demand-read guarantee — an executor could read the
+wrong one):
 
-1. **Locate.** Before Stage 3/4, search the design-docs dir *and* the linked-from beads
-   for the doc(s) covering the named feature (the same read grounding — `Glob`/`Grep` over
-   the docs dir, `bd search`/`bd show` on related beads). Any match is loaded.
+1. **Locate.** In discovery, detect new-feature vs. change-to-existing; for a change,
+   `Glob`/`Grep` under `.shreni/design/` *and* `bd search`/`bd show` the linked-from beads
+   for the doc(s) covering the named feature. Any match is loaded.
 2. **Reconcile in the interview.** Clarification is framed against the existing design:
    what changes, what is added, what is now **obsolete**. Superseded decisions are edited
    or struck, never left contradicting the new ones.
-3. **Update in place, shown as a diff.** The commit proposal renders the change as a diff
-   against the existing file; on confirm the *same* file is rewritten. Path-scope and
-   server-authors-the-file rules are unchanged — an update is just a write to an existing
-   in-dir path.
+3. **Update in place.** On approval the *same* file is rewritten — an update is just a
+   `Write` to an existing in-dir path.
 4. **Reconcile the beads too.** New or changed work is filed as children (or a follow-on
    epic) that link to the same doc and reference prior beads — one doc, one bead lineage.
 
-Ambiguity is the operator's to resolve: no existing doc → create one; **more than one**
-plausible match → Suthradhara **asks which to evolve** rather than guessing.
+The **launcher's "extend this topic"** menu choice reinforces this: it relaunches a fresh
+session in the *same* worktree and branch, seeding the planning prompt with the
+just-written doc's path so the new session frames its work as an extension of that topic
+(see [The launcher control loop](#the-launcher-control-loop)). Ambiguity is the operator's
+to resolve: no existing doc → create one; **more than one** plausible match → the session
+asks which to evolve rather than guessing.
 
 ---
 
-## Session model & persistence — two layers
+## Session model & persistence
 
-A design session needs two kinds of durable state, with different shapes and failure
-modes, so they live in two places.
+Because a launched Claude Code session **owns the conversation itself**, Suthradhara no
+longer persists a transcript, stage, or rubric ledger of its own — Claude Code holds that
+memory and `claude --resume` rehydrates it. What Suthradhara keeps on disk is a
+deliberately **slim session record** (`src/suthradhara/state.ts`, `persistence.ts`) at
+`~/.shreni/suthradhara/<session-id>.json`:
 
-**Layer 1 — the conversation transcript (on disk).** The transcript + current stage +
-rubric state + running requirement set persist as a per-session JSON record under
-`~/.shreni/suthradhara/<session-id>.json`. It is chatty, unstructured, and single-host — a
-poor fit for `bd` — so it stays on disk; `resume` rehydrates it. Unlike a stateless
-per-turn agent, Suthradhara must retain the conversation across turns.
+- the Suthradhara **session id** and its **Kshetra id**;
+- the **Claude Code session id** it drives (assigned via `--session-id` on first launch,
+  reattached via `claude --resume <id>`);
+- the **worktree path** the session runs in;
+- lifecycle **status** (`active` until the operator ends it or `stop` is called, then
+  `ended`, kept for the `list` view).
 
-**Layer 2 — the session bead (in `bd`).** Once Stage 3 yields a plan, the **server** creates
-a dedicated bead of type **`suthradhara-session`** — the durable spine of the session and
-its commit journal. It is structured, small, operator-visible, crash-durable, and
-git-shipped — exactly what `bd` is for.
+The record is versioned (`SESSION_STATE_VERSION`); `loadSession` rejects an unknown
+version rather than mis-hydrating. There is no separate "session bead" — a launched
+session files directly and creates no per-session audit bead.
 
-The split is deliberate: **the transcript resumes the *interview*; the session bead resumes
-the *commit***, and makes an in-flight design session a first-class, operator-visible object.
+---
 
-### Distilled state IS the conversation summary
+## The launcher control loop
 
-Each interview turn is a **fresh, stateless `claude` invocation** — there is no
-provider-native conversation memory. Rather than replay the whole transcript (which grows
-unbounded and buries the signal), the per-turn context is the **distilled session state**:
-current stage, rubric check marks, running requirement bullets, open questions, any pending
-proposal — rendered into the system prompt (`prompt.ts`). *That distilled state IS the
-running summary.* It is a **monotonic ledger** of what has been decided and what remains, so
-a completed stage does not come back and tokens go only to unsettled work.
+`start`/`resume` do not just spawn a session — they enter a **launcher-owned control
+loop** (`runPlanningLoop` in `src/cli/suthradhara.ts`) that sits above each short-lived
+session so the operator is never left in a free-roaming agent:
 
-For this to be safe, distillation **must actually happen every turn**. The model emits,
-alongside its natural-language reply, an explicit **state delta** in a fenced
-` ```suthradhara-delta ` JSON block (requirements to add, rubric keys satisfied or
-deferred-with-question, new open questions, stage advance). The server validates the delta
-and applies it via pure mutators (`addRequirement`, `checkRubricItem`, `deferRubricItem`,
-`addOpenQuestion`) **before** `saveSession` (`distill.ts`). The delta is model-emitted
-structured data — not heuristic parsing of the reply (brittle), not a second summarizer pass
-(extra cost). Parsing is **fail-safe**: a missing or malformed block yields a null delta, so
-the turn's reply still reaches the operator and no partial state is applied. Nothing decided
-is lost by dropping chatter, because every decision already lives in the artifact it produced
-(the doc + the filed beads); the operator changes a settled decision by amending those and
-extending the conversation, not by replaying the transcript.
+```
+loop:
+  launch one interactive claude planning session (in the session worktree) → block on it
+  on exit → read the handoff → print:
+     • summary (epic id, doc path, branch) + "merge this branch when ready" (never auto-merged)
+     • menu: [1] extend this topic   [2] new story   [3] end
+        1 → fresh claude session, SAME worktree + branch, seeded with the just-written doc
+        2 → fresh worktree + fresh claude session (blank topic, off main)
+        3 → teardown (reap the worktree), exit
+```
 
-### The turn loop
+Properties: a **new Claude Code session per planning unit** (context never bleeds between
+topics); the operator **cannot drift** (completion returns to the 3-way menu, not a free
+prompt); scoping is by **prompt + short lifecycle**, not by tool-stripping — the session
+needs `Write`/`bd`/`git` to file directly, so a hard sandbox would be incompatible. While
+a child session runs, the loop swallows `SIGINT` so Ctrl-C reaches the interactive session,
+not the parent.
 
-`turnloop.ts` is the driver: read the operator message → build the stage-aware spawn
-(`prompt.ts`) → spawn `claude` (`capture.ts`) → capture the reply + state delta → apply
-distillation → append transcript → `saveSession`, routing a confirm frame through to filing
-+ the session bead + the commit bundle.
+---
 
-**Transport is an attached-TTY REPL** (ARD Q11): the loop reads operator messages
-line-by-line from the runner's **stdin** and writes replies to **stdout** — no socket, no
-control channel. The detached pid/log/stop/status machinery stays for lifecycle bookkeeping;
-when a session is spawned detached with stdio `ignore`, stdin is not readable, readline closes
-immediately, and the runner falls back to an idle heartbeat — preserving resume-proof
-behaviour with no interactive input. Turns are serialised through a queue so a line typed while
-a turn is still spawning `claude` waits rather than racing the shared session state.
+## Queue isolation
 
-### Queue isolation — the session bead never reaches Sthapathi
+Sthapathi's whole input is `bd ready`, and a plain open bead is `ready` by default. A
+launched Suthradhara session files only **executable feature beads** (the epic and its
+children), which Sthapathi is *meant* to pick up — that is the handoff. It creates **no**
+tracking/audit bead of its own, so there is nothing extra to hide from the poll.
 
-Sthapathi's whole input is `bd ready`, and a plain open bead is `ready` by default. Two
-mechanisms exclude the session bead together:
-
-- **Structural.** The server creates it `in_progress`, owned by a `suthradhara` actor;
-  `bd ready` returns only *unclaimed* work, so an in-progress bead is out of the pool — and
-  this is accurate, because the bead is being actively worked interactively.
-- **Type filter (race-proof).** The type is set at creation (`--type=suthradhara-session`),
-  and `selectNext` in `src/sthapathi/pickup.ts` skips it. Because the type is present from the
-  first instant, any brief window before `in_progress` applies is still excluded — no poll
-  race. This is the one Suthradhara-driven touch to Sthapathi: a single line in the *selection*
-  path, unit-tested ("`pickNext` never returns a session bead, even a `ready` one"), **not** a
-  state-machine change.
-
-The server (not the model) creates/journals/closes the session bead against the one id it
-owns, so the model's allowlist still provably excludes `bd close`/`bd update --claim` — the
-negative test stays green. The sole-writer invariant governs *executable work-state*; a
-`suthradhara-session` bead is not that.
+The one Suthradhara-driven touch to Sthapathi is a **backward-compatibility filter**:
+`selectNext`/`pickNext` in `src/sthapathi/pickup.ts` skip any bead whose type is
+`suthradhara-session` (`SUTHRADHARA_SESSION_TYPE`, an inlined constant). The *legacy*
+commit engine created such beads as its per-session spine; that engine is gone, but a
+Kshetra's DB may still hold historical `suthradhara-session` beads, so the filter stays —
+Sthapathi must never try to "work" one. This is a single line in the *selection* path,
+unit-tested (`pickNext` never returns a `suthradhara-session` bead, even a `ready` one),
+**not** a state-machine change (ARD §9.1 / §13.1).
 
 ---
 
 ## Security
 
-Suthradhara's base controls (shared token, scoped `cwd`, harness allowlist as the authority)
-carry the same weight as elsewhere in Shreni; the net-new surface is the doc write:
+Suthradhara's base controls (shared token, scoped `cwd`/worktree, the operator at the
+keyboard) carry the same weight as elsewhere in Shreni. The launched-session model moves
+the boundary from a compiled allowlist to **live human approval**:
 
-- **Blast radius: "file beads + write one design note", never task state or code.** A leaked
-  token lets an attacker file garbage beads and write a doc under the design dir. It **cannot**
-  claim/close beads, edit source, or push — worst case is triageable spam.
-- **Doc-write is path-scoped by construction**; the single most important new test asserts
-  out-of-dir writes are denied.
-- **Confirmation as anti-injection.** Repo content read during grounding is untrusted; the
-  server-side confirm gate is what stops an unattended write.
-- **Argument hygiene.** Bead titles/bodies and doc content are passed to `bd` as discrete args
-  and written as file *data*, never shell-interpolated.
+- **Blast radius: "file beads + write one design note + push a doc branch", never task
+  state or a merge to `main`.** The session can file beads, write a doc under
+  `.shreni/design/`, and push a `suthradhara/<slug>` branch. It does **not** merge to
+  `main` (Gate ② pushes only) — the operator merges manually.
+- **Human-in-the-loop as the control.** Every `bd`/`git`/`Write` runs under Claude Code's
+  interactive permission prompt, with the operator present. There is no unattended write
+  surface: a scripted, non-interactive launch would stall at the first permission prompt
+  rather than filing anything.
+- **Anti-injection.** Repo content read during grounding is untrusted; the operator's
+  presence and approval at each write is what stops an injected instruction from filing or
+  pushing on its own.
+- **Argument hygiene.** Bead titles/bodies and doc content are handled as `bd` args and
+  file data, never shell-interpolated.
 - **No API key on host** — the `claude` CLI's own session, like every other agent.
 
 ---
 
 ## Module map
 
-Standalone in `src/suthradhara/`, reusing Sthapathi primitives as shared modules.
+Standalone in `src/suthradhara/`, plus the CLI and the one Sthapathi touch-point.
 
 | Module | Responsibility |
 |---|---|
-| `src/cli/suthradhara.ts` | CLI: `start`/`resume`/`stop`/`status`/`list`, Kshetra resolution, session-id parsing |
-| `src/cli/suthradhara-runner.ts` | The detached runner entrypoint — rehydrate, then drive the turn loop (or idle) |
-| `lifecycle.ts` | Detached-process spawn/stop/status/resume |
-| `pid.ts` | PID file under `~/.shreni/suthradhara.*` |
-| `prompt.ts` | Stage-aware system prompt — the distilled state that IS the per-turn summary |
-| `rubric.ts` / `stages.ts` / `state.ts` | Readiness rubric logic; stage machine; session-state shape + pure mutators |
-| `interview.ts` | Interview scaffolding |
-| `distill.ts` | Parse + apply the per-turn state delta before save (fail-safe) |
-| `turnloop.ts` | The driver: input → spawn → capture → distill → save; route confirm frame |
-| `capture.ts` | Spawn one `claude` turn and return the final assistant text (stream-json parse) |
-| `confirm.ts` | Server-side confirm gate — holds a proposal until an explicit confirm frame |
-| `decomposition.ts` | The Stage-3 structured decomposition object |
-| `allowlist.ts` | Read-only vs. filing tool sets — the exact write surface |
-| `filing.ts` | Compile a decomposition into the ordered `bd create`/`bd dep add` plan |
-| `designdoc.ts` | Path-scoped, server-authored design-doc write + the out-of-dir path guard |
-| `evolve.ts` | Locate + reconcile + update an existing feature's doc in place (no fork) |
-| `commit.ts` | The post-confirm server-side transaction: doc + epic + children + deps, journaled |
-| `sessionbead.ts` | Layer-2 session bead: create/journal/close + resume-reconcile |
-| `session.ts` / `persistence.ts` | Layer-1 on-disk transcript/stage/rubric; list/save/load |
-| `src/sthapathi/pickup.ts` *(existing)* | One line: `selectNext` skips `suthradhara-session` beads |
+| `src/cli/suthradhara.ts` | CLI dispatch (`start`/`resume`/`stop`/`status`/`list`), Kshetra + session-id resolution, and the **launcher control loop** (`runPlanningLoop`, `renderSummary`, `parseMenuChoice`) |
+| `lifecycle.ts` | Launch/resume/stop/status: (reap +) create the worktree, spawn the **interactive** `claude` in it, track the pid, block on exit |
+| `session.ts` | `buildPlanningSession` — the interactive spawn spec (`--session-id`/`--resume`, `--append-system-prompt`, MCP config, `--model`, `BEADS_DIR`); `defaultKickoff` |
+| `prompt.ts` | `buildPlanningPrompt` — the composed-once planning system-prompt: role boundary, five stages, rubric, proposal shape, and the two-gate completion protocol |
+| `handoff.ts` | The JSON handoff contract (`readHandoff`/`writeHandoff`/`clearHandoff`) between a session and the launcher |
+| `state.ts` / `persistence.ts` | The slim on-disk session record (schema + I/O): id ↔ Claude Code session id ↔ worktree + status; `list`/`save`/`load` |
+| `pid.ts` | PID file under `~/.shreni/suthradhara.*` — one live session per Kshetra |
+| `worktree.ts` | Per-session detached git worktree: create/reap/prune (see the worktree guide) |
+| `src/sthapathi/pickup.ts` *(existing)* | One line: `pickNext` skips legacy `suthradhara-session` beads |
 
 ---
 
 ## Testing
 
-Tests ship with each module (Vitest), with emphasis on the boundary:
+Tests ship with each module (Vitest), with emphasis on the launcher contract and the
+planning prompt:
 
-- **Filing allowlist** — asserts *presence* of `bd create`/`bd dep add` and **absence** of
-  `bd close`/`bd update --claim`/`Bash(bd:*)`. The single most important guard.
-- **Doc-write scope** — a write inside the design dir succeeds; a write to an arbitrary source
-  path is denied.
-- **Confirm gate** — a commit-bearing turn writes nothing (no `bd`, no file) until a confirm
-  frame arrives; cancel discards; partial-failure reporting lists exactly what was written.
-- **Rubric** — the stage logic won't advance to a decomposition proposal with unchecked items;
-  deferred items are recorded as open questions.
-- **Session persistence** — a session round-trips through save/resume with stage, rubric, and
-  requirements intact.
-- **Distillation faithfulness** — a turn conveying a requirement and satisfying a rubric item
-  leaves that requirement in `requirements` and that rubric key satisfied, and it appears in the
-  *next* turn's rendered prompt.
-- **Queue isolation** — `pickNext` never returns a `suthradhara-session` bead, even a `ready` one.
-- **Commit idempotency** — a commit interrupted after the epic + some children reconciles against
-  the session bead on resume and files the remaining items exactly once; a full re-run files
-  nothing new.
-- **Argument hygiene** — a bead title with shell metacharacters is filed verbatim and executes
-  nothing.
+- **Planning prompt** (`prompt.test.ts`) — the prompt names the Kshetra/repo, walks the
+  five stages, carries both completion gates, grounds the beads-sync/doc-push in the real
+  remotes/paths, instructs writing the handoff, **drops** the old server-side delta
+  protocol, and adds the extend block only when a prior doc is seeded.
+- **Spawn builder** (`session.test.ts`) — a fresh launch is an **interactive** invocation
+  (no `-p`/stream-json), pins the session id and appends the system prompt + kickoff, sets
+  the model/project settings/`BEADS_DIR` and **no `--allowedTools` whitelist**; a resume
+  reattaches via `--resume` and omits the system prompt + kickoff.
+- **Control loop** (`cli/suthradhara.test.ts`) — `renderSummary` renders epic/doc/branch +
+  a merge prompt (and degrades gracefully with no handoff); `parseMenuChoice` maps
+  digits/words; `runPlanningLoop` transitions: **end** tears down + stops, **extend**
+  relaunches in the *same* worktree seeded with the prior doc, **new story** tears down the
+  old worktree before starting fresh, and an unrecognised answer re-asks.
+- **Lifecycle** (`lifecycle.test.ts`) — a fresh unit creates a worktree, persists ids, and
+  launches an interactive claude; the pid clears when the session exits; the "extend" path
+  reuses a given worktree; a live pid refuses a second launch; resume reattaches or starts
+  fresh; teardown reaps the worktrees.
+- **Handoff** (`handoff.test.ts`) — round-trips the record at the fixed dot-prefixed path;
+  `readHandoff` returns null (never throws) on an absent file, malformed JSON, or a
+  missing/wrong-typed field.
+- **Session persistence** (`state.test.ts`, `persistence.test.ts`) — a slim `active` record
+  at the current schema version **carries no interview-ledger fields** (transcript / rubric
+  / stage / pending are gone); save/load round-trips the launched-session fields, rejects a
+  traversal id and an unsupported schema version; `list` summarises by status.
+- **Queue isolation** (`sthapathi/pickup`) — `pickNext` never returns a
+  `suthradhara-session` bead, even a `ready` one.
+- **Worktree** (`worktree.test.ts`) — create/reap/prune and the leak-sweep semantics (see
+  the worktree guide).
 
 ---
 
 ## Relationships
 
 - **Sthapathi** ([ARCHITECTURE.md](../../ARCHITECTURE.md)) — the unchanged consumer. Suthradhara
-  files feature beads and manages its own non-executable session bead, but never transitions
-  executable work. One filter line in the selection path; no state-machine change.
+  files feature beads for it to pick up but never transitions executable work. One
+  backward-compat filter line in the selection path; no state-machine change.
 - **MCP grounding** ([mcp-grounding.md](./mcp-grounding.md)) — grounds a session in an external
-  MCP server (Jira/Linear/Confluence) with interactive grant-on-demand; a general per-agent MCP
-  capability, not a bespoke tracker integration.
+  MCP server (Jira/Linear/Confluence); callability is governed by Claude Code's interactive
+  permission prompts, a general per-agent MCP capability, not a bespoke tracker integration.
 - **Extension seams** ([extension-points.md](./extension-points.md)) — Suthradhara runs entirely
   on the core's local defaults; it needs no optional package.
 - **Worktree isolation** ([../guides/suthradhara-worktree-isolation.md](../guides/suthradhara-worktree-isolation.md))
   — each intake session runs in its own detached git worktree so planning never shares a working
   directory with a build. Developer how-to for the lifecycle, the `BEADS_DIR` invariant, and
   recovering leaked worktrees.
+</content>
+</invoke>

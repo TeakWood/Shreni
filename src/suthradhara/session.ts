@@ -2,17 +2,31 @@ import type { KshetraConfig } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
 import { resolveMcpConnection, McpConnectionError } from '../kshetra/mcp-connect';
-import { readOnlyAllowlist, filingAllowlist } from './allowlist';
-import { mergeGrants } from './grant';
-import { buildSystemPrompt } from './prompt';
-import type { SessionState } from './state';
-import type { McpGrants } from '../kshetra/config';
+import { buildPlanningPrompt } from './prompt';
 
-// Raised when the spawn wiring cannot be built — today only a configured MCP
-// server whose `secretEnv` names a host env var that is unset (pmb.4). Failing
-// here means the token is missing BEFORE the session starts, never silently at
-// the first tool call. Distinct class so the runner can report it as an operator
-// fix ("export the token"), not an internal fault.
+// Compose the INTERACTIVE `claude` invocation for a launched planning session
+// (epic d3y). Unlike the old per-turn headless spawn (buildClaudeSpawn, removed
+// with the interview engine), this drops `-p`/`--output-format stream-json`: the
+// operator drives a real interactive Claude Code session that holds the
+// conversation itself and executes the completion protocol (files beads, writes
+// the doc, syncs beads, pushes the branch). The runner spawns it with inherited
+// stdio in the session worktree.
+//
+// TOOLS. This is a full session — it must Write the design doc and run bd/git —
+// so there is NO `--allowedTools` whitelist and no grant-on-demand layer: the
+// operator is at the keyboard and approves Claude Code's own permission prompts.
+// The read-only/grant machinery the headless turns needed is gone.
+//
+// MCP grounding. Every server DEFINED in kshetra.mcp.servers is connected via
+// `--mcp-config <abs path>` (secretEnv injected into the child env), so the model
+// can reach the operator's tickets during discovery; callability is governed by
+// Claude Code's interactive permission prompts, not a compiled allowlist.
+//
+// SESSION IDENTITY. A fresh launch pins the Claude Code session id with
+// `--session-id <uuid>` so `resume` can later reattach with `--resume <uuid>`;
+// on resume we pass `--resume` alone and let Claude Code restore the prior
+// conversation (system prompt included), so we do not re-append it.
+
 export class SuthradharaSpawnError extends Error {
   constructor(message: string) {
     super(message);
@@ -20,65 +34,32 @@ export class SuthradharaSpawnError extends Error {
   }
 }
 
-// Compose the claude-CLI invocation for a Suthradhara interview turn. Pure —
-// exported so xa0.2 (stage-aware prompt) can call it per turn and later beads
-// (xa0.4/xa0.5) can swap the allowlist without touching lifecycle code.
-//
-// cwd is the target Kshetra's repo (the detached runner sets it, lifecycle.ts,
-// and the child claude inherits it) so claude reads/greps the RIGHT code base
-// and `--setting-sources project` / an ambient project `.mcp.json` resolve there.
-// --allowedTools is a positive whitelist (Read/Glob/Grep + read-only bd/git)
-// and permission-mode 'default' means an unlisted tool needs approval — with
-// stdio ignored in a detached process there's nowhere to approve, so an
-// unlisted tool is effectively denied. That's what makes xa0.1's "no bd write
-// or file write" hold.
-//
-// MCP grounding (pmb.4): every server DEFINED in kshetra.mcp.servers is connected
-// via `--mcp-config <abs path>`, and we deliberately do NOT pass
-// `--strict-mcp-config` — so an operator's ambient project `.mcp.json` also
-// connects. Connection injects the server's tool SCHEMAS into the model (the
-// model SEES `mcp__jira__get_issue`) while callability stays gated by
-// --allowedTools, which carries the read-only surface plus Suthradhara's
-// statically-granted MCP tools (pmb.5): an ungranted MCP tool stays
-// visible-but-denied until pmb.6 grants it interactively. Verified
-// against claude 2.1.212: a denied MCP tool_use rides `permission_denials` in the
-// `result` message and does NOT error the turn (capture.ts reads exactly that).
-export interface SuthradharaSpawnOpts {
+export interface PlanningSessionOpts {
   kshetra: KshetraConfig;
-  systemPrompt: string;
-  userPrompt: string;
-  // In-memory session grants from interactive grant-on-demand (pmb.6), merged on
-  // top of the statically-configured per-role grants for THIS turn's allowlist.
-  // Absent on a fresh turn; the turn loop passes the accumulated map when it
-  // re-spawns after an operator `y`/`always`. Never touches disk here — persistence
-  // of an `always` grant is a separate step (persistMcpGrant).
-  sessionGrants?: McpGrants;
+  // The Claude Code session id to pin (fresh) or reattach (resume).
+  claudeSessionId: string;
+  // Resume an existing Claude Code conversation rather than starting fresh. When
+  // true we pass `--resume <id>` and omit the system prompt + kickoff (Claude
+  // Code restores them); when false we pass `--session-id <id>` +
+  // `--append-system-prompt` + the kickoff message.
+  resume?: boolean;
+  // The first operator-facing message that kicks the interview off (fresh launch
+  // only). Delivered as claude's initial positional prompt.
+  kickoff?: string;
+  // When the operator chose "extend this topic", the prior session's design-doc
+  // repo-relative path — seeded into the planning prompt (fresh launch only).
+  extendDocRelPath?: string;
 }
 
-export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
+// Build the interactive spawn spec. Pure — exported so the runner and tests can
+// assemble the invocation without spawning a process.
+export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
   const { kshetra } = opts;
-  // Read-only surface PLUS Suthradhara's MCP grants, compiled to exact
-  // `mcp__<server>__<tool>` ids (pmb.5). The grant map is the statically-configured
-  // per-role grants (agents.suthradhara.mcp) MERGED with any in-memory session
-  // grants the operator approved this session via grant-on-demand (pmb.6).
-  // buildFilingSpawn swaps this whole value for filingAllowlist(), which takes no
-  // grants — so the granted tracker-read tools ride only the interview turn, never
-  // the bd-write turn.
-  const allowlist = readOnlyAllowlist(
-    mergeGrants(kshetra.agents.suthradhara?.mcp, opts.sessionGrants),
-  );
 
-  // Ambient MCP connect + secret injection (shared resolver). Suthradhara connects
-  // EVERY defined server — callability is separately gated by --allowedTools (it
-  // runs --permission-mode default, where an allow-list IS the boundary), so
-  // connecting all defined servers is safe; an ungranted tool stays
-  // visible-but-denied. --mcp-config points claude at each server's def file
-  // (repo-relative → absolute against repo.path); secretEnv resolves the NAMED
-  // host env var and carries it into the child env — never the yaml. A secretEnv
-  // naming an unset var fails loud here, before the session starts. resolveMcp
-  // throws McpConnectionError; rewrap it so the runner still sees the
-  // Suthradhara-specific error type.
-  let mcpConfigArgs: string[];
+  // Connect every defined MCP server (secretEnv resolved into the child env). A
+  // secretEnv naming an unset host var fails loud here, before the session
+  // starts. Rewrap McpConnectionError as the Suthradhara-specific type.
+  let mcpConfigArgs: string[] = [];
   const secretEnv: Record<string, string> = {};
   try {
     const conn = resolveMcpConnection(kshetra, Object.keys(kshetra.mcp?.servers ?? {}));
@@ -89,77 +70,40 @@ export function buildClaudeSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
     throw err;
   }
 
-  const args = [
-    '-p',
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--permission-mode', 'default',
-    '--append-system-prompt', opts.systemPrompt,
-    '--no-session-persistence',
-    '--setting-sources', 'project',
-    ...mcpConfigArgs,
-    '--model', kshetra.agents.model,
-    '--allowedTools', allowlist.join(','),
-  ];
+  const args: string[] = [];
+  if (opts.resume) {
+    args.push('--resume', opts.claudeSessionId);
+  } else {
+    args.push('--session-id', opts.claudeSessionId);
+    args.push('--append-system-prompt', buildPlanningPrompt(kshetra, {
+      extendDocRelPath: opts.extendDocRelPath,
+    }));
+  }
+  args.push('--setting-sources', 'project');
+  args.push(...mcpConfigArgs);
+  args.push('--model', kshetra.agents.model);
+  // Positional kickoff prompt (fresh launch only). claude treats a trailing
+  // positional in interactive mode as the first user message.
+  if (!opts.resume && opts.kickoff) {
+    args.push(opts.kickoff);
+  }
 
   return {
     bin: resolveBin('SHRENI_CLAUDE_BIN', 'claude'),
     args,
-    // BEADS_DIR is absolute (kshetra.beads.path) and load-bearing once the child
-    // runs in a Suthradhara worktree (ARD §4.4): the `.beads/` symlink is
-    // gitignored, so a fresh worktree does NOT contain it — cwd auto-discovery
-    // would fail. Passing the absolute dir makes every read-only `bd` (and the
-    // post-confirm `bd create`) resolve to the one shared dolt DB regardless of
-    // cwd, exactly as commit.ts's server-side `bd` runner already does.
-    env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', BEADS_DIR: kshetra.beads.path, ...secretEnv },
-    // The operator's message rides STDIN, not a trailing positional argument.
-    // `claude`'s --allowedTools is variadic (<tools...>) and greedily consumes a
-    // following positional — a trailing prompt arg gets swallowed as a "tool" and
-    // the CLI then errors "Input must be provided ..." (verified on 2.1.212).
-    // Delivering the prompt on stdin sidesteps arg ordering entirely; capture.ts
-    // pipes spec.stdin into the child.
-    stdin: opts.userPrompt,
+    // BEADS_DIR is absolute (kshetra.beads.path) and load-bearing in a worktree:
+    // the `.beads/` symlink is gitignored, so a fresh worktree has none and cwd
+    // auto-discovery would fail. Passing the absolute dir makes every `bd` (read
+    // and the completion-protocol `bd create`/`bd export`) resolve to the one
+    // shared dolt DB regardless of cwd.
+    env: { CLAUDE_CODE_ENTRYPOINT: 'cli', BEADS_DIR: kshetra.beads.path, ...secretEnv },
   };
 }
 
-// The single entry point a turn loop calls: derive the stage-aware system prompt
-// from the live session state (xa0.2) and compose the read-only spawn. Kept here
-// so the runner doesn't need to know how the prompt is assembled — it hands over
-// state + the operator's message and gets a ready-to-spawn spec back.
-export function buildInterviewSpawn(
-  state: SessionState,
-  kshetra: KshetraConfig,
-  userPrompt: string,
-  sessionGrants?: McpGrants,
-): SpawnSpec {
-  return buildClaudeSpawn({
-    kshetra,
-    systemPrompt: buildSystemPrompt(state, kshetra),
-    userPrompt,
-    sessionGrants,
-  });
-}
-
-// The allowlist an interview/proposal turn runs under. It is ALWAYS the
-// read-only surface — no persisted session state ever grants a conversational
-// turn the filing verbs. That is the concrete meaning of "server is authority
-// / no bd write before confirm" (ARD §6.1): the model can propose a
-// decomposition and have it held (`pending`), but it can never file one on its
-// own initiative. Filing is reachable only through the post-confirm step, which
-// builds its own spawn (buildFilingSpawn) after applyConfirmFrame returns
-// `confirmed` — a path the interview loop cannot enter by itself.
-export function allowlistForTurn(_state: SessionState): string[] {
-  return readOnlyAllowlist();
-}
-
-// The spawn for the server's post-confirm filing turn: the read-only surface
-// PLUS `bd create` / `bd dep add` (filingAllowlist). This is the ONLY spawn
-// that carries the write verbs, and the confirm handler is its only caller —
-// it is never built from persisted state, so it cannot be reached without an
-// explicit confirm frame having just been processed.
-export function buildFilingSpawn(opts: SuthradharaSpawnOpts): SpawnSpec {
-  const spec = buildClaudeSpawn(opts);
-  const idx = spec.args.indexOf('--allowedTools');
-  if (idx >= 0) spec.args[idx + 1] = filingAllowlist().join(',');
-  return spec;
+// The default kickoff message for a fresh planning session — a short nudge into
+// Stage 1 (discovery). Kept here so the runner and tests share one source.
+export function defaultKickoff(extend: boolean): string {
+  return extend
+    ? 'Continue planning — extend the prior topic. Start by reading the seeded design doc, then ask me what to add or change.'
+    : "Let's plan a feature. Start the discovery interview: ask me what problem I want to solve, who hits it, and why now.";
 }

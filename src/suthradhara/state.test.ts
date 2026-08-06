@@ -1,58 +1,27 @@
 import { describe, it, expect } from 'vitest';
-import {
-  newSessionState,
-  emptyRubric,
-  SESSION_STATE_VERSION,
-  RUBRIC_KEYS,
-  STAGES,
-} from './state';
+import { newSessionState, SESSION_STATE_VERSION } from './state';
 
 describe('newSessionState', () => {
-  it('starts every interview in the discovery stage', () => {
-    const s = newSessionState('sid', 'myapp', '2026-07-27T10:00:00.000Z');
-    expect(s.stage).toBe('discovery');
+  it('creates a slim active record at the current schema version', () => {
+    const s = newSessionState('myapp-20260727T140312-a3f2', 'myapp', '2026-08-06T00:00:00.000Z');
+    expect(s).toEqual({
+      version: SESSION_STATE_VERSION,
+      id: 'myapp-20260727T140312-a3f2',
+      kshetraId: 'myapp',
+      createdAt: '2026-08-06T00:00:00.000Z',
+      updatedAt: '2026-08-06T00:00:00.000Z',
+      status: 'active',
+    });
   });
 
-  it('stamps the id, kshetra, and timestamps consistently', () => {
-    const now = '2026-07-27T10:00:00.000Z';
-    const s = newSessionState('sid', 'myapp', now);
-    expect(s.id).toBe('sid');
-    expect(s.kshetraId).toBe('myapp');
-    expect(s.createdAt).toBe(now);
-    expect(s.updatedAt).toBe(now);
-  });
-
-  it('carries the current schema version so loadSession can reject foreign shapes', () => {
-    const s = newSessionState('sid', 'myapp');
-    expect(s.version).toBe(SESSION_STATE_VERSION);
-  });
-
-  it('initialises the rubric with every key set to false', () => {
-    const s = newSessionState('sid', 'myapp');
-    for (const key of RUBRIC_KEYS) {
-      expect(s.rubric[key]).toBe(false);
+  it('carries no interview-ledger fields (transcript/rubric/stage/pending are gone)', () => {
+    const s = newSessionState('myapp-20260727T140312-a3f2', 'myapp') as Record<string, unknown>;
+    for (const gone of ['transcript', 'rubric', 'stage', 'pending', 'requirements', 'openQuestions']) {
+      expect(s[gone]).toBeUndefined();
     }
   });
 
-  it('starts with empty requirements, transcript, and open questions', () => {
-    const s = newSessionState('sid', 'myapp');
-    expect(s.requirements).toEqual([]);
-    expect(s.transcript).toEqual([]);
-    expect(s.openQuestions).toEqual([]);
-  });
-});
-
-describe('emptyRubric', () => {
-  it('returns a fresh object each call (no shared mutable default)', () => {
-    const a = emptyRubric();
-    const b = emptyRubric();
-    a.intent = true;
-    expect(b.intent).toBe(false);
-  });
-});
-
-describe('STAGES', () => {
-  it('lists the four interview phases plus the confirm gate', () => {
-    expect(STAGES).toEqual(['discovery', 'clarify', 'decompose', 'design', 'confirm']);
+  it('is at schema version 2 (the launched-session record)', () => {
+    expect(SESSION_STATE_VERSION).toBe(2);
   });
 });

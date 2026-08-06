@@ -1,5 +1,22 @@
 # MCP Grounding — external-source-of-record grounding for Suthradhara
 
+> ⚠️ **SUPERSEDED IN PART — describes the pre-d3y mechanism; being re-specced.**
+> Suthradhara no longer runs a server-side interview engine. It now **launches an
+> interactive Claude Code session** (epic d3y — see
+> [suthradhara.md](./suthradhara.md)). The *goal* below is intact — a Suthradhara
+> session still reaches the MCP servers defined in `mcp.servers` (connected via
+> `--mcp-config`, `secretEnv` injected) so it can pull a Jira/Linear/Confluence
+> ticket during discovery. **What changed is callability:** the launched session is
+> a full Claude Code session, and each MCP tool call is approved by the operator
+> through **Claude Code's own native permission prompts** — there is **no** Shreni
+> `--allowedTools` whitelist, **no** interactive `[y / always / N]` grant-on-demand
+> loop, **no** `capture.ts` stream-json denial parsing, **no** per-turn
+> distilled-state re-spawn, and **no** server-side confirm gate. Every section below
+> that describes those Suthradhara-side mechanisms as live is stale and flagged
+> inline; the **executor** half of this doc (Silpi/Viharapala/Parikshaka static
+> config, `mcp.servers`/`mcpConfigFiles`, `--strict-mcp-config`) is unchanged and
+> still accurate. A full re-spec is tracked separately.
+
 **MCP grounding** lets the operator ground a [Suthradhara](./suthradhara.md) design
 session in an **external MCP server** — Jira, Linear, Confluence, GitHub, or any
 other Model Context Protocol server. The operator opens with *"let's work on
@@ -40,6 +57,13 @@ not code.
 
 ## The connection / callability split
 
+> **Superseded (pre-d3y).** The connection half still holds — the launched session
+> connects `mcp.servers` via `--mcp-config`. The callability half below (Shreni's
+> `--allowedTools` positive whitelist as the gate) is **gone** for Suthradhara: the
+> launched Claude Code session governs each MCP tool call through its **own native
+> permission prompt**, approved live by the operator. Read the rest of this section
+> as historical.
+
 Everything about this feature follows from one fact about how the `claude` CLI handles
 MCP: **connecting to a server and *calling* its tools are two independent acts, and
 Shreni controls only the second.**
@@ -61,6 +85,12 @@ called an external system we didn't intend."
 
 ### Discovery is lazy grant-from-denial — not config parsing
 
+> **Superseded (pre-d3y).** This whole grant-from-denial path is **gone**. There is
+> no `capture.ts` stream-json turn to parse a denial from (the headless per-turn
+> engine was deleted), and no allowlist to be absent from. In the launched session
+> the model simply calls the MCP tool and Claude Code prompts the operator to allow
+> or deny it natively.
+
 Shreni does **not** parse `.claude/.mcp.json` or `~/.claude.json` to enumerate tools.
 Doing so would reimplement the CLI's multi-scope config resolution, couple Shreni to
 the undocumented shape of `~/.claude.json`, and *still* only yield a list of tools —
@@ -77,6 +107,13 @@ reimplement someone else's resolution logic.
 ---
 
 ## Interactive grant-on-demand — `[y / always / N]`
+
+> **Superseded (pre-d3y) — this entire section describes deleted machinery.**
+> There is no Shreni `[y / always / N]` prompt, no session/`always` allowlist merge,
+> and no turn re-spawn. The launched Claude Code session's **own** permission prompt
+> is what the operator answers per tool call; a persistent "always allow" is Claude
+> Code's native decision, not a Shreni write to `kshetra.yaml`. Kept for historical
+> context only.
 
 The operator never has to pre-configure which MCP tools a session may call. The model
 asks by trying; Suthradhara asks the operator; on assent the grant is added and the
@@ -112,6 +149,11 @@ special resume machinery.
 
 ### Read by default, write only on explicit opt-in
 
+> **Superseded (pre-d3y).** There is no Shreni **server-side confirm gate** anymore
+> (`confirm.ts` was deleted) and no per-tool Shreni grant. In the launched session
+> the operator approves each MCP call — read or write — through Claude Code's native
+> permission prompt; a write to the external system is gated the same way, live.
+
 A grant is **read-only unless the operator explicitly opts into write.** The
 `[y/always/N]` prompt **names the tool**, so `get_issue` and `transition_issue` are
 distinct grants — granting a read never implies the write. A tool that mutates the
@@ -123,6 +165,13 @@ confirm gate; writing back to Jira does.
 ---
 
 ## Supervised vs. autonomous — the asymmetry the mechanism enforces
+
+> **Partly superseded (pre-d3y).** The asymmetry still holds — supervised
+> Suthradhara vs. headless executors — but the **Suthradhara column is stale**: its
+> grant path is now Claude Code's **native interactive permission prompt**, not a
+> Shreni `[y/always/N]` allowlist gate, and there is no server-side confirm gate.
+> The **executor** column (static config, `--strict-mcp-config`, per-server grant,
+> bypass mode) is unchanged and accurate.
 
 This is the spine of the design, and the reason MCP grounding is *not* "turn on MCP for
 all agents." Shreni's two kinds of agent sit on opposite sides of the grant line.
@@ -175,6 +224,13 @@ executors transitioning it headlessly, extended to a new capability.
 ---
 
 ## Config schema — define once, grant per role
+
+> **Partly superseded (pre-d3y).** `mcp.servers` (define once) is unchanged and
+> still how a Suthradhara session reaches MCP — the launched session connects them
+> via `buildPlanningSession` (`session.ts`), not the deleted `buildClaudeSpawn`. But
+> the per-role **`agents.suthradhara.mcp` grant no longer gates Suthradhara**: there
+> is no allowlist compiler on that path, so callability is Claude Code's native
+> permission prompt. Per-role grants still gate the **executors**.
 
 Two additions to `kshetra.yaml`, both general:
 
@@ -277,6 +333,13 @@ agents:
 
 ## The write surface & boundary
 
+> **Superseded (pre-d3y) for Suthradhara.** There is no Shreni `--allowedTools`
+> whitelist, no allowlist compiler, and no in-memory session-grant merge on the
+> Suthradhara path anymore — the launched session's MCP calls are bounded by Claude
+> Code's native permission prompts, answered live by the operator. The
+> exact-id/no-wildcard discipline below still applies to **executor** MCP grants,
+> compiled from static config.
+
 MCP grounding adds no new *kind* of boundary — it extends the existing `--allowedTools`
 whitelist to `mcp__server__tool` ids.
 
@@ -296,6 +359,12 @@ whitelist to `mcp__server__tool` ids.
 ---
 
 ## Security
+
+> **Partly superseded (pre-d3y).** The "confirm gate is the anti-injection backstop"
+> claim below is stale — that gate is deleted. In the launched-session model the
+> backstop is the **operator's live approval** of each MCP call (and each write)
+> through Claude Code's native permission prompt. The secrets/`secretEnv` and
+> executor-reach points remain accurate.
 
 Suthradhara's controls carry over (shared token, scoped `cwd`, the harness allowlist as
 the authority); MCP adds three net-new concerns:
@@ -322,6 +391,11 @@ the authority); MCP adds three net-new concerns:
 
 ## Module map
 
+> **Superseded (pre-d3y) for the Suthradhara-side rows.** `capture.ts` (extended),
+> the allowlist compiler, the grant-on-demand loop, and the `evolve` session-state
+> tagging are all **deleted** with the interview engine. Only `mcp.servers` config +
+> the executor-side MCP spawn wiring (`src/kshetra/mcp-connect.ts`) remain live.
+
 Extends Suthradhara's `src/suthradhara/` + the Kshetra config schema.
 
 | Module | Responsibility |
@@ -336,6 +410,10 @@ Extends Suthradhara's `src/suthradhara/` + the Kshetra config schema.
 ---
 
 ## Testing
+
+> **Superseded (pre-d3y) for the Suthradhara-side tests.** Denial surfacing,
+> grant-on-demand, and write-gating-through-the-confirm-gate test deleted machinery
+> and no longer exist. The executor allowlist / supervised-split guards remain.
 
 Tests ship with each module (Vitest), with emphasis on the boundary:
 
@@ -360,8 +438,9 @@ Tests ship with each module (Vitest), with emphasis on the boundary:
 ## Relationships
 
 - **Host agent** ([suthradhara.md](./suthradhara.md)) — MCP grounding extends
-  Suthradhara's codebase-aware grounding past the repo boundary, reusing its turn loop,
-  confirm gate, and allowlist discipline wholesale.
+  Suthradhara's codebase-aware grounding past the repo boundary. *(Pre-d3y: it reused
+  the turn loop, confirm gate, and allowlist discipline — all deleted; a launched
+  session now reaches MCP servers under Claude Code's native permission prompts.)*
 - **Sthapathi** ([ARCHITECTURE.md](../../ARCHITECTURE.md)) — the headless executor loop
   that stays on static-config-only, read-only MCP; the supervised/autonomous asymmetry is
   what keeps runtime grant-on-demand out of the poll loop.
