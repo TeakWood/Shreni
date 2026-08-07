@@ -115,22 +115,32 @@ ready?" and not to jump to Stage 3 with unmet items.
 
 ## Codebase-aware grounding
 
-To interview and decompose well, Suthradhara reads the active Kshetra's repo. The
-launched session is a **full Claude Code session** — `Read`, `Grep`, `Glob`, `Bash`,
-`bd`, and `git` are all available — and the operator, at the keyboard, approves Claude
-Code's own permission prompts for each call. Grounding is what separates a useful
-decomposition from a generic one: before proposing "add an auth middleware,"
-Suthradhara greps the existing request pipeline, reads the router, and checks whether a
-session abstraction already exists — then shapes the beads around what it finds.
+"Grounding" means the session looks at your **actual** project before it proposes any
+tasks, so the plan fits the code you really have instead of a generic template. It is
+about the *quality* of the decomposition — **not** a restriction on where Claude may
+look.
 
-Grounding uses live `Read`/`Grep`/`Glob`, not RAG — a RAG index would sharpen
-decomposition but is not required to ship.
+Concretely: the launched session is a normal, full Claude Code session (`Read`, `Grep`,
+`Glob`, `Bash`, `bd`, `git` are all available, and you approve each call at the
+keyboard). It runs with its working directory set to the Kshetra's worktree, so its
+searches *default* to that repo — but nothing fences it off from the rest of the
+machine; it is just a normal session pointed at your project and steered by the
+planning prompt. There is no sandbox and no allow-list boundary.
 
-Grounding also reaches **past the repo boundary**: the operator can ground a session
-in an external source of record (a Jira/Linear/Confluence ticket) over MCP — *"let's
-work on PROJ-123"* — with authorization governed by Claude Code's interactive
-permission prompts (there is no separate grant machinery; the operator is present).
-See [MCP grounding](./mcp-grounding.md).
+Why it matters: asked to "add auth middleware," a grounded session first greps the
+request pipeline, reads the router, and checks whether a session abstraction already
+exists — then writes the beads around what it finds, rather than proposing a middleware
+the project's shape doesn't call for. That is the difference between a decomposition
+that fits and one that reads like boilerplate.
+
+Grounding can also reach **beyond the repo**: you can point the session at an external
+ticket (a Jira/Linear/Confluence issue) over MCP — *"let's work on PROJ-123"* — and it
+folds that into the interview. Authorization is just Claude Code's normal permission
+prompt; there is no separate grant machinery, because you are present. See
+[MCP grounding](./mcp-grounding.md).
+
+(Grounding uses live `Read`/`Grep`/`Glob`, not a RAG index — a RAG index would sharpen
+decomposition but is not required to ship.)
 
 ---
 
