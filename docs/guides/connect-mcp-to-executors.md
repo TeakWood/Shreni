@@ -13,9 +13,10 @@ Confluence, GitHub, a local stdio tool, …).
 > architecture doc to understand the boundary you are configuring.
 
 > **Scope.** This guide covers the **executors only**. Connecting an MCP server to
-> the interactive **Suthradhara** intake agent is a different path (interactive
-> grant-on-demand, `[y / always / N]`) — see the architecture doc's
-> *Interactive grant-on-demand* section. Everything below is about the autonomous
+> the interactive **Suthradhara** intake agent is a different path: a launched
+> Claude Code session reaches the servers defined in `mcp.servers`, and callability
+> is governed by **Claude Code's native MCP permission prompts** — the operator, at
+> the keyboard, approves each tool call. Everything below is about the autonomous
 > agents that run headlessly in the poll loop.
 
 ---

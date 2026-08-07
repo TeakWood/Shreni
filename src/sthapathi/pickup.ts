@@ -5,7 +5,12 @@ import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
 import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
 import { recordProgress, recordStall } from '../kshetra/state.js';
-import { SUTHRADHARA_SESSION_TYPE } from '../suthradhara/sessionbead.js';
+// The bead type the legacy Suthradhara commit engine used for its per-session
+// audit bead. That engine is gone (epic d3y — launched planning sessions file
+// directly and write no audit bead), but historical `suthradhara-session` beads
+// may still exist in a Kshetra's DB, so Sthapathi keeps filtering them out of
+// its pickup queue rather than trying to "work" one.
+const SUTHRADHARA_SESSION_TYPE = 'suthradhara-session';
 
 export class PreFlightError extends Error {
   constructor(

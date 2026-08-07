@@ -137,7 +137,8 @@ export interface SessionSummary {
   id: string;
   kshetraId: string;
   updatedAt: string;
-  stage: SessionState['stage'];
+  status: SessionState['status'];
+  claudeSessionId?: string;
 }
 
 export function listSessions(kshetraId?: string): SessionSummary[] {
@@ -167,7 +168,8 @@ export function listSessions(kshetraId?: string): SessionSummary[] {
       id: state.id,
       kshetraId: state.kshetraId,
       updatedAt: state.updatedAt,
-      stage: state.stage,
+      status: state.status,
+      claudeSessionId: state.claudeSessionId,
     });
   }
   summaries.sort((a, b) => (a.id < b.id ? 1 : -1));

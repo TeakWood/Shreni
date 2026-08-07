@@ -17,17 +17,6 @@ if (sub === '__worker') {
   require('./worker');
 } else if (sub === '__phalaka-server') {
   require('./phalaka-server'); // reads PHALAKA_PORT from the environment
-} else if (sub === '__suthradhara-runner') {
-  // suthradhara-runner reads the kshetra id from process.argv[2] and the
-  // session id from process.argv[3]; normalize argv so they land there
-  // regardless of the node-vs-binary launch offset.
-  process.argv = [
-    process.argv[0],
-    process.argv[1] ?? '',
-    subArgs[0] ?? '',
-    subArgs[1] ?? '',
-  ];
-  require('./suthradhara-runner');
 } else {
   dispatch(args, COMMANDS).then((code) => {
     // Only exit explicitly on failure; success paths return 0 and let the

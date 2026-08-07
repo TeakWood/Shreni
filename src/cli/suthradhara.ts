@@ -1,3 +1,4 @@
+import { createInterface } from 'readline';
 import { loadRegistry } from '../kshetra/registry';
 import { resolveKshetra } from './status';
 import {
@@ -5,8 +6,12 @@ import {
   stopSession,
   statusSession,
   resumeSession,
+  teardownWorktrees,
+  type LaunchResult,
+  type StartOpts,
 } from '../suthradhara/lifecycle';
 import { listSessions } from '../suthradhara/persistence';
+import { readHandoff, type Handoff } from '../suthradhara/handoff';
 import type { KshetraConfig } from '../kshetra/config';
 
 // Resolve the target Kshetra for a Suthradhara subcommand. Precedence:
@@ -109,12 +114,8 @@ export async function runSuthradhara(sub: string | undefined, opts: RunOpts): Pr
     const result = await startSession(kshetra);
     if (result.status === 'already_running') {
       console.log(`suthradhara[${result.kshetraId}]: already running (pid ${result.pid})`);
-    } else if (result.wait) {
-      await runForegroundRepl(result.kshetraId, result.sessionId, 'started', result.wait);
     } else {
-      console.log(`suthradhara[${result.kshetraId}]: started (pid ${result.pid})`);
-      console.log(`Session: ${result.sessionId}`);
-      console.log(`Resume with: shreni suthradhara resume ${result.sessionId}`);
+      await runPlanningLoop(kshetra, result);
     }
   } else if (sub === 'stop') {
     const result = await stopSession(kshetra);
@@ -157,36 +158,126 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
     console.log(
       `suthradhara[${result.kshetraId}]: already running (pid ${result.pid}); resume is a no-op`,
     );
-  } else if (result.wait) {
-    await runForegroundRepl(result.kshetraId, result.sessionId, 'resumed', result.wait);
   } else {
-    console.log(`suthradhara[${result.kshetraId}]: resumed (pid ${result.pid})`);
-    console.log(`Session: ${result.sessionId}`);
+    await runPlanningLoop(kshetra, result);
   }
 }
 
-// Drive an attached foreground interview: print a banner, hand the terminal to
-// the child REPL, and block until it exits. SIGINT is swallowed for the wait's
-// duration so Ctrl-C reaches the child (which runs its own clean shutdown and
-// teardown) instead of killing this parent first and leaving the PID/worktree
-// dangling.
-async function runForegroundRepl(
-  kshetraId: string,
-  sessionId: string,
-  verb: 'started' | 'resumed',
-  wait: () => Promise<number>,
-): Promise<void> {
-  console.log(`suthradhara[${kshetraId}]: ${verb} interview (session ${sessionId})`);
-  console.log('Type your message and press Enter. End the session with /exit or Ctrl-D.');
-  const swallow = (): void => {};
-  process.on('SIGINT', swallow);
-  try {
-    await wait();
-  } finally {
-    process.off('SIGINT', swallow);
+// The launcher-owned control loop (epic d3y). Each iteration is ONE short-lived,
+// single-purpose Claude Code planning session: we block on it, then — on exit —
+// read its handoff, print the summary + merge prompt, and offer extend / new /
+// end. The operator is never left in a free-roaming session: completion always
+// returns here, to the bounded menu.
+//
+// "extend" relaunches a FRESH claude session in the SAME worktree seeded with
+// the just-written doc; "new story" reaps the worktree and starts fresh; "end"
+// tears the worktree down and returns. SIGINT is swallowed while a child runs so
+// Ctrl-C reaches the interactive session, not this parent.
+export interface PlanningLoopDeps {
+  // Read one line from the operator (the menu answer). Injected so tests drive
+  // the loop without a TTY.
+  ask?: (prompt: string) => Promise<string>;
+  // Passed through to startSession — the spawn/uuid seams a test uses to avoid
+  // launching real claude.
+  startOpts?: Pick<StartOpts, 'spawn' | 'uuid'>;
+  log?: (msg: string) => void;
+}
+
+export type MenuChoice = 'extend' | 'new' | 'end';
+
+// Map a raw menu answer to a choice, or null if unrecognised (the loop re-asks).
+export function parseMenuChoice(raw: string): MenuChoice | null {
+  const s = raw.trim().toLowerCase();
+  if (s === '1' || s === 'extend' || s === 'e') return 'extend';
+  if (s === '2' || s === 'new' || s === 'new story' || s === 'n') return 'new';
+  if (s === '3' || s === 'end' || s === 'quit' || s === 'q') return 'end';
+  return null;
+}
+
+// Render the post-session summary + merge instructions. Degrades gracefully when
+// the handoff is missing (a session that exited before completing the push).
+export function renderSummary(kshetra: KshetraConfig, handoff: Handoff | null): string[] {
+  const lines: string[] = ['', '─ planning unit complete ─'];
+  if (handoff) {
+    lines.push(
+      `  epic:   ${handoff.epicId}`,
+      `  doc:    ${handoff.docPath}`,
+      `  branch: ${handoff.branch}`,
+      `  ${handoff.summary}`,
+      '',
+      'Merge this branch when you are ready (it was pushed, not merged):',
+      `  gh pr create --base ${kshetra.repo.mainBranch} --head ${handoff.branch}   # or your merge flow`,
+    );
+  } else {
+    lines.push(
+      '  (no handoff record found — the session may have exited before completing the push.)',
+      '  Check `bd list` and the worktree branch to see what landed.',
+    );
   }
-  console.log(`\nsuthradhara[${kshetraId}]: session ended.`);
-  console.log(`Resume with: shreni suthradhara resume ${sessionId}`);
+  return lines;
+}
+
+async function runPlanningLoop(
+  kshetra: KshetraConfig,
+  first: LaunchResult,
+  deps: PlanningLoopDeps = {},
+): Promise<void> {
+  const log = deps.log ?? ((m: string) => console.log(m));
+  const ask = deps.ask ?? defaultAsk;
+  let current = first;
+
+  for (;;) {
+    log(`suthradhara[${kshetra.id}]: planning session live (${current.sessionId}).`);
+    log('Interview, approve the plan, and end the session (Ctrl-D / /exit) to return here.');
+
+    const swallow = (): void => {};
+    process.on('SIGINT', swallow);
+    try {
+      await current.wait();
+    } finally {
+      process.off('SIGINT', swallow);
+    }
+
+    const handoff = readHandoff(current.worktreePath);
+    for (const line of renderSummary(kshetra, handoff)) log(line);
+
+    let choice: MenuChoice | null = null;
+    while (choice === null) {
+      const answer = await ask('\nWhat next?  [1] extend this topic   [2] new story   [3] end\n> ');
+      choice = parseMenuChoice(answer);
+      if (choice === null) log('Please answer 1, 2, or 3.');
+    }
+
+    if (choice === 'end') {
+      await teardownWorktrees(kshetra);
+      log(`suthradhara[${kshetra.id}]: planning ended.`);
+      return;
+    }
+
+    const startOpts: StartOpts =
+      choice === 'extend'
+        ? { ...deps.startOpts, reuseWorktree: current.worktreePath, extendDocRelPath: handoff?.docPath }
+        : { ...deps.startOpts };
+    if (choice === 'new') await teardownWorktrees(kshetra);
+
+    const next = await startSession(kshetra, startOpts);
+    if (next.status === 'already_running') {
+      log(`suthradhara[${kshetra.id}]: another session is already running (pid ${next.pid}); stopping the loop.`);
+      return;
+    }
+    current = next;
+  }
+}
+
+// Read one line from stdin for the menu. Isolated so tests inject their own.
+function defaultAsk(prompt: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise<string>((resolve) => {
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
 }
 
 function runList(opts: RunOpts, kshetras: KshetraConfig[]): void {
@@ -199,6 +290,9 @@ function runList(opts: RunOpts, kshetras: KshetraConfig[]): void {
     return;
   }
   for (const s of sessions) {
-    console.log(`${s.id}  kshetra=${s.kshetraId}  stage=${s.stage}  updated=${s.updatedAt}`);
+    console.log(`${s.id}  kshetra=${s.kshetraId}  status=${s.status}  updated=${s.updatedAt}`);
   }
 }
+
+// Exported for tests: drive the loop directly with injected deps.
+export { runPlanningLoop };

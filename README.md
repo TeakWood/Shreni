@@ -363,8 +363,7 @@ the watermark, and drops the label. If a comment needs a human decision
 new human review), the bead is flagged for a human rather than looped forever. The
 loop is **on by default** — set `repo.prFollowup: false` or `SHRENI_PR_FOLLOWUP=off`
 to disable it. Follow-up state is visible on `shreni status` (the active bead shows
-its round) and the Phalaka banner (a `PR follow-up` chip). Full design:
-[`Shreni-ARD-PR-Followup.md`](../Shreni-cloud/docs/ard/Shreni-ARD-PR-Followup.md).
+its round) and the Phalaka banner (a `PR follow-up` chip).
 
 Set it at init or in `kshetra.yaml`, and override per run with an env var:
 

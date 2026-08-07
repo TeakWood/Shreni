@@ -1,215 +1,197 @@
-// The stage-aware system prompt (ARD §4, §4.1, §7) — the `--append-system-prompt`
-// string session.ts hands to the claude CLI each turn. It is pure and rebuilt
-// per turn because it splices in live state: the current stage, the rubric's
-// current check marks, the requirement set so far, and the active Kshetra. That
-// live injection is what makes the model steer questioning toward the current
-// stage's job and refuse to jump ahead of the rubric. Suthradhara retains the
-// conversation across turns, but still re-grounds the prompt each turn.
+// The planning system-prompt (epic d3y) — the `--append-system-prompt` string
+// lifecycle.ts hands the interactive `claude` session on launch. Unlike the old
+// per-turn distilled prompt, this is composed ONCE at launch: Claude Code holds
+// the conversation itself, so there is no live state to splice in. What it
+// carries is the five-stage rubric, the role boundary, the design rules, the
+// proposal shape, and — new in the launched-session model — the two-gate
+// COMPLETION PROTOCOL the session executes itself (file beads, write the doc,
+// sync beads, push the doc branch, write the handoff), grounded in this
+// Kshetra's real remotes and paths.
 
 import type { KshetraConfig } from '../kshetra/config';
-import type { SessionState } from './state';
-import { STAGES } from './state';
-import { STAGE_META, stageIndex } from './stages';
-import { renderRubric } from './rubric';
-import { DELTA_FENCE } from './distill';
+import { handoffRelPath } from './handoff';
 
-// The read-only boundary and the "you file nothing" contract, stated to the
-// model so it never claims to have created a bead or written a file — in xa0.2
-// it can't (the allowlist denies it), and the proposal is copy-paste only.
+// Where per-feature design docs live, relative to the repo root. A distinct
+// subtree from `.shreni/` runtime state and from source. Kept here (a constant)
+// so the prompt can name the exact path the session writes to.
+export const DESIGN_DIR = '.shreni/design';
+
+// The five interview stages (ARD §4) rendered into the prompt as guidance. In
+// the launched-session model there is no machine gate advancing these — the
+// session self-governs against the rubric — so this is a checklist the model
+// walks, not a state machine.
+const STAGES: { name: string; hat: string; purpose: string; exit: string }[] = [
+  {
+    name: 'discovery',
+    hat: 'Product',
+    purpose:
+      'Capture the raw idea: intent, the user and their problem, the "why now", rough success criteria. Detect whether this is a NEW feature or a CHANGE to an existing one.',
+    exit: "The problem and desired outcome are stated in the operator's own words and reflected back.",
+  },
+  {
+    name: 'clarify',
+    hat: 'Product → Technical',
+    purpose:
+      'Active interview: resolve ambiguity, enumerate edge cases, non-functional requirements, explicit in/out of scope, priorities, and constraints.',
+    exit: 'The readiness rubric is satisfied; open questions are answered or explicitly deferred.',
+  },
+  {
+    name: 'decompose',
+    hat: 'Technical',
+    purpose:
+      'Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized for one Silpi ↔ Viharapala pass, ordered by dependency.',
+    exit: 'Every child has a title, description, acceptance criteria, priority; dependencies are drawn; nothing is left as "and then figure out X".',
+  },
+  {
+    name: 'design',
+    hat: 'Technical',
+    purpose:
+      'Synthesise the decisions into a design/arch note: chosen approach, key components and their touch-points in the existing code, alternatives considered, risks.',
+    exit: 'The note explains why the decomposition looks the way it does, referencing real files.',
+  },
+  {
+    name: 'confirm',
+    hat: '—',
+    purpose:
+      'Present the full bundle (design note + epic + children + dependency edges) for the operator to approve, edit, or cancel — then execute the completion protocol.',
+    exit: 'The operator approves; the session files the bundle, writes the doc, syncs beads, and pushes the doc branch.',
+  },
+];
+
+// The readiness rubric (ARD §4.1) — the items that must be satisfied (or
+// explicitly deferred as an open question) before proposing a decomposition.
+const RUBRIC_ITEMS: string[] = [
+  'intent — the problem and desired outcome, in the operator\'s words',
+  'usersStories — who hits this and what they are trying to do',
+  'successCriteria — how we will know it worked',
+  'scopeBoundary — what is explicitly in and out of scope',
+  'nonFunctional — performance / security / compatibility constraints that apply',
+  'dependenciesUnknowns — prerequisites and the open unknowns',
+];
+
 const ROLE_BOUNDARY = `You are Suthradhara, the requirements & design intake agent for the Shreni system.
-You interview one operator to turn a feature idea into a well-scoped, dependency-ordered plan.
-You may Read/Grep/Glob the repo and run read-only bd/git commands to ground your questions in
-the ACTUAL codebase. You do NOT file beads yourself: you PROPOSE a decomposition, and only after
-the operator sends an explicit confirm does the server file the epic, its children, and the
-dependency edges on your behalf. Until that confirm, nothing is written — an edit reopens the
-interview, a cancel discards the proposal. Never claim to have filed anything before the
-operator has confirmed; the write is the server's to make, not yours.`;
+You interview one operator to turn a feature idea into a well-scoped, dependency-ordered plan,
+and then — once the operator approves — you FILE that plan yourself. You run in an isolated
+worktree checkout of the Kshetra's repo (your cwd). You may Read/Grep/Glob and run bd/git to
+ground every question in the ACTUAL codebase. Nothing is filed until the operator approves the
+bundle: until that approval an edit reopens the interview and a cancel discards the proposal.
+Never claim to have filed a bead, written the doc, or pushed a branch before you have actually
+run the commands.`;
 
-// The design rules from §4.1 that make the agent worth having — stated as hard
-// instructions, backed deterministically by the rubric gate in stages.ts.
 const DESIGN_RULES = `Rules you must follow:
 - Ground every question and proposal in the real repo — grep and read before you assert what exists.
-- Do NOT jump to a decomposition proposal while any rubric item is unchecked. The value of this
-  agent is refusing to file a half-formed epic.
-- When the operator asks "are we ready?", show the current rubric state (below) and name exactly
-  what is still missing.
-- An item the operator wants to defer is recorded as an open question (deferred (Qn)) in the
-  proposal, NOT treated as a blocker — deferral lets the interview converge without false precision.
+- Do NOT jump to a decomposition proposal while any rubric item is unmet. The value of this agent
+  is refusing to file a half-formed epic; walk the stages in order and revisit earlier ones freely.
+- When the operator asks "are we ready?", show the rubric and name exactly what is still missing.
+- An item the operator wants to defer is recorded as an open question in the proposal and the design
+  note, NOT treated as a blocker — deferral lets the interview converge without false precision.
 - In discovery, detect whether this is a NEW feature or a CHANGE to an existing one. If it is a
-  change, emit \`locateFeature\` (below) with the feature's name so the server finds its existing
-  design doc; you then evolve that doc IN PLACE — never write a parallel doc for a feature that
-  already has one.`;
+  change, look under ${DESIGN_DIR}/ for the feature's existing design doc and EVOLVE it in place —
+  never write a parallel doc for a feature that already has one.`;
 
-function renderStages(current: SessionState['stage']): string {
-  const currentIdx = stageIndex(current);
-  const lines = STAGES.map((stage, i) => {
-    const meta = STAGE_META[stage];
-    const marker = i === currentIdx ? '▶' : i < currentIdx ? '·' : ' ';
-    const tag = i === currentIdx ? ' (YOU ARE HERE)' : '';
-    return `  ${marker} ${i + 1}. ${stage}${tag} [${meta.hat}] — ${meta.purpose}\n      exit: ${meta.exit}`;
-  });
-  return lines.join('\n');
+function renderStages(): string {
+  return STAGES.map(
+    (s, i) =>
+      `  ${i + 1}. ${s.name} [${s.hat}] — ${s.purpose}\n      exit: ${s.exit}`,
+  ).join('\n');
 }
 
-function renderRequirements(state: SessionState): string {
-  if (state.requirements.length === 0) {
-    return 'Requirements captured so far: (none yet)';
-  }
-  const bullets = state.requirements.map(r => `  - ${r}`).join('\n');
-  return `Requirements captured so far:\n${bullets}`;
+function renderRubric(): string {
+  return ['Readiness rubric (satisfy or explicitly defer each before decomposing):', ...RUBRIC_ITEMS.map(r => `  - ${r}`)].join('\n');
 }
 
-// The evolve-in-place block (ARD §8.1, G9). Rendered only when the session is
-// evolving an existing feature's doc: it loads the existing design INTO the
-// interview so clarification is framed as a change to it, and states the hard
-// rule that the SAME file is rewritten (a diff), never a parallel doc. When >1
-// doc matched, it instead surfaces the pending "which to evolve?" choice so the
-// model does not assume a target. Empty string for a plain new-feature interview.
-function renderEvolveContext(state: SessionState): string {
-  const ev = state.evolving;
-  if (!ev) return '';
-
-  if (ev.candidates && ev.candidates.length > 0 && !ev.targetRelPath) {
-    return [
-      'EVOLVING AN EXISTING FEATURE — DOC CHOICE PENDING (§8.1):',
-      'More than one existing design doc could cover this feature. The operator is being asked',
-      'which one to evolve. Do NOT propose a decomposition or a doc target until they choose:',
-      ...ev.candidates.map((c, i) => `  ${i + 1}. ${c}`),
-      'When they pick one, you will evolve THAT doc in place — never create a parallel doc.',
-    ].join('\n');
-  }
-
-  if (ev.targetRelPath) {
-    const body = (ev.targetContent ?? '').trim();
-    return [
-      `EVOLVING AN EXISTING FEATURE — UPDATE IN PLACE (§8.1, G9):`,
-      `This is a CHANGE to an existing feature. Its design doc already exists at:`,
-      `  ${ev.targetRelPath}`,
-      'Treat that doc as the source of truth. Frame every question and the proposal as a change',
-      'to it: what is added, what is modified, what is now OBSOLETE (strike or revise superseded',
-      'parts — never leave them contradicting the new design). The commit will rewrite the SAME',
-      'file as a diff and file new/changed beads that link this SAME doc path — do NOT create a',
-      'second doc. The current contents are below; reconcile against them, do not restate them.',
-      '',
-      '--- BEGIN EXISTING DESIGN DOC ---',
-      body === '' ? '(the existing doc is empty)' : body,
-      '--- END EXISTING DESIGN DOC ---',
-    ].join('\n');
-  }
-
-  return '';
-}
-
-// The external-source-of-record block (pmb.7, §3). Rendered only when the session
-// was grounded in a ticket pulled over MCP: it reminds the model the ticket is
-// already distilled (fetched once — do not re-pull it each turn) and that the ref
-// will be stamped onto every filed bead. Empty for a plain repo-grounded interview.
-function renderSourceContext(state: SessionState): string {
-  const src = state.source;
-  if (!src) return '';
-  return [
-    `GROUNDED IN AN EXTERNAL SOURCE OF RECORD (§3): ${src.ref}`,
-    'You pulled this ticket earlier in the interview; its settled requirements are already in the',
-    'distilled state above. Do NOT re-fetch it each turn — work from the distilled requirements.',
-    'On confirm the server stamps this ref onto every filed bead as its external reference, and a',
-    'later consult of the SAME ticket evolves the design in place rather than filing a duplicate.',
-  ].join('\n');
-}
-
-// The decomposition proposal shape (§6.1, §7 step 1) the model renders once the
-// rubric is satisfied and it reaches the decompose/design stages. Presented for
-// review; the server holds it and files it only on an explicit confirm.
 const PROPOSAL_SHAPE = `When (and only when) the rubric is satisfied and you reach the decompose/design stages, present a
-DECOMPOSITION PROPOSAL for the operator to review — do not assume it is filed until they confirm:
+DECOMPOSITION PROPOSAL for the operator to review — do not file anything until they approve:
   1. Design note — the chosen approach, key components and their touch-points in real files,
      alternatives considered, risks, and any open questions (including deferred rubric items). This
-     is the DESIGN DOC the server writes on confirm; emit its FULL body in the delta's \`doc\` field
-     (below) on the same turn as the proposal — as deep as the design warrants (a short doc for a
-     small feature, a full technical design for a substantial one), never a stub. Show the operator
-     the note (or, when evolving, a diff) in your prose reply; the \`doc\` field carries the whole file.
-  2. Epic — a parent bead (title, type epic or feature).
+     is the DESIGN DOC you will write on approval, as deep as the feature warrants (a short note for
+     a small feature, a full technical design for a substantial one), never a stub.
+  2. Epic — a parent bead (title, type epic or feature, priority 0-4).
   3. Children — one bead per unit of work, each with title, type (task/feature/bug), priority (0-4),
-     and acceptance criteria, sized for a single implement→review pass.
+     and acceptance criteria, sized for a single Silpi ↔ Viharapala pass.
   4. Dependency edges — the ordering between children (which child is blocked by which).
-Then ask the operator to Confirm / Edit / Cancel. On Confirm the server writes the design doc, files
-the epic, children, and edges — stamping the doc path into each bead — then Edit reopens the interview
-so you can revise and re-present; Cancel discards the proposal.`;
+Then ask the operator to Approve / Edit / Cancel. Edit reopens the interview; Cancel discards.`;
 
-// The per-turn state delta protocol (ARD §9.2, Q10). Each turn is a FRESH,
-// stateless invocation — there is no provider-native conversation memory. The
-// server's memory of the interview is the DISTILLED STATE shown above (stage,
-// rubric, requirements, open questions), NOT a replay of the chat. For that to
-// work, every turn must hand the server the NEW settled facts as structured
-// data, which it folds into the state before the next turn. That is this block.
-// It is stated last so the model always knows how to close a turn, and it is
-// deterministic to parse (a distinctive fenced tag, JSON body, additive only).
-function deltaProtocol(): string {
-  return `HOW TO CLOSE EVERY TURN — emit a state delta (this is how the server remembers the interview):
-Your natural-language reply to the operator comes first. Then, at the very end, append a single
-fenced block tagged \`${DELTA_FENCE}\` containing a JSON object with ONLY the NEW facts this turn
-settled. The distilled state above is a MONOTONIC LEDGER: never re-emit a requirement already
-listed, never re-check a rubric item already [x], never re-open a settled decision. If the turn
-settled nothing, emit \`{}\`. The operator never sees this block — it is stripped before display.
+// The load-bearing addition: the exact steps the session runs ITSELF once the
+// operator approves, grounded in this Kshetra's remotes/paths. Two gates: (1)
+// plan approved → file beads + write doc + sync beads; (2) doc approved → push
+// the doc branch. Then write the handoff and stop.
+function completionProtocol(kshetra: KshetraConfig): string {
+  const beadsRemote = kshetra.beads.remote;
+  const main = kshetra.repo.mainBranch;
+  return `COMPLETION PROTOCOL — you execute this yourself; do it in exactly two gates.
 
-Schema (every field optional):
-\`\`\`${DELTA_FENCE}
-{
-  "requirements": ["a newly-converged requirement bullet"],
-  "checkRubric": ["intent", "successCriteria"],
-  "deferRubric": [{ "key": "nonFunctional", "question": "what perf budget applies?" }],
-  "openQuestions": ["a free-standing unknown not tied to a rubric item"],
-  "locateFeature": "SSO login",
-  "source": "jira:PROJ-123",
-  "advanceStage": "clarify",
-  "proposal": { "epic": { "ref": "...", "title": "...", "type": "epic", "priority": 2 },
-                "children": [ { "ref": "...", "title": "...", "type": "task", "priority": 2,
-                                "acceptanceCriteria": "..." } ],
-                "deps": [ { "blocked": "childRef", "blocker": "childRef" } ] },
-  "doc": "# Feature\\n\\nThe full design-doc body (markdown). Written to the design-docs dir on confirm."
-}
-\`\`\`
-Rules: rubric keys are exactly intent | usersStories | successCriteria | scopeBoundary |
-nonFunctional | dependenciesUnknowns. Emit \`locateFeature\` ONCE, in discovery, when you judge
-this is a change to an EXISTING feature — the server locates its design doc and, if found, loads it
-so you evolve it in place. Emit \`source\` ONCE, in discovery, the FIRST time you pull an external
-ticket over MCP — its origin ref as \`<server>:<id>\` (e.g. jira:PROJ-123). The server distils it
-(so you needn't re-pull the ticket), stamps it onto every filed bead, and checks whether this ticket
-was already turned into beads — routing you to evolve the existing design in place instead of filing
-a duplicate. \`advanceStage\` is refused if it jumps past the readiness
-rubric — advance only when the stage's exit condition is met. Include \`proposal\` ONLY on the turn
-you present the DECOMPOSITION PROPOSAL (decompose/design stage, rubric satisfied); the server holds
-it for the operator's confirm and files nothing until then. Emit \`doc\` WITH that same \`proposal\` —
-its full markdown body; when evolving, emit the COMPLETE rewritten file (the server writes the whole
-doc, not a patch). A \`doc\` without a \`proposal\` is dropped.`;
+GATE ① — the operator APPROVES THE PLAN. Then, in order:
+  a. File the epic, then each child, with \`bd create\` (set --type, --priority, --description,
+     --acceptance). Capture the ids. Add the dependency edges with \`bd dep add <blocked> <blocker>\`.
+     bd auto-resolves its database from BEADS_DIR — do not pass a path.
+  b. Write the design note to \`${DESIGN_DIR}/<slug>.md\` in your cwd (the worktree), where <slug> is a
+     lowercase-hyphen slug of the feature. Store the epic id and this doc path — the handoff needs them.
+     If EVOLVING an existing feature, rewrite that SAME file rather than adding a new one.
+  c. Sync beads to their remote (${beadsRemote}):
+       bd export -o "$BEADS_DIR/issues.jsonl"
+       git -C "$BEADS_DIR" add issues.jsonl
+       git -C "$BEADS_DIR" commit -m "chore(beads): plan <feature>"
+       git -C "$BEADS_DIR" pull --rebase && git -C "$BEADS_DIR" push
+     Verify \`git -C "$BEADS_DIR" status\` shows up to date with origin before continuing.
+  Report what you filed (epic id, child ids, doc path) and tell the operator the doc is ready to review.
+
+GATE ② — the operator APPROVES THE DESIGN DOC / ARD. Then push it (NEVER merge to ${main}):
+     git switch -c suthradhara/<slug>          # your worktree starts detached; branch off it
+     git add ${DESIGN_DIR}/<slug>.md
+     git commit -m "docs(design): <feature>"
+     git push -u origin suthradhara/<slug>     # pushes to ${kshetra.repo.remote}
+  Capture the branch name and, if the push prints a PR/compare URL, that URL.
+
+FINALLY — write the handoff so the launcher can summarise and offer next steps, then STOP
+(the operator returns to the launcher menu; do not start unrelated work):
+     Write a JSON file to \`${handoffRelPath()}\` in your cwd with exactly these fields:
+       { "branch": "suthradhara/<slug>", "epicId": "<epic id>", "docPath": "${DESIGN_DIR}/<slug>.md",
+         "summary": "<one-line summary of what was planned and filed>" }
+  Then tell the operator the plan is complete and they can end this session (Ctrl-D / /exit) to
+  return to the launcher, which will prompt them to merge the branch and choose what to do next.`;
 }
 
-export function buildSystemPrompt(
-  state: SessionState,
+export interface PlanningPromptOpts {
+  // When the operator chose "extend this topic" in the launcher, the repo-relative
+  // path of the design doc the PRIOR session wrote — seeded so this session frames
+  // its work as an extension of that doc rather than a brand-new feature.
+  extendDocRelPath?: string;
+}
+
+// Compose the full planning system prompt for a Kshetra. Pure — no I/O, no live
+// state — so it is trivially testable and identical for every launch of the same
+// Kshetra (modulo the optional extend context).
+export function buildPlanningPrompt(
   kshetra: KshetraConfig,
+  opts: PlanningPromptOpts = {},
 ): string {
-  const meta = STAGE_META[state.stage];
+  const extendBlock = opts.extendDocRelPath
+    ? [
+        '',
+        `EXTENDING AN EXISTING PLAN (§8.1): a prior planning session in this worktree wrote`,
+        `  ${opts.extendDocRelPath}`,
+        'Treat that doc as the starting point. Read it first, frame this session as an extension of',
+        'that topic, and EVOLVE that same doc in place if the extension belongs in it — do not fork a',
+        'parallel design for the same feature.',
+      ]
+    : [];
+
   return [
     ROLE_BOUNDARY,
     '',
     `Active Kshetra: ${kshetra.id} (repo at ${kshetra.repo.path}).`,
     '',
-    `CURRENT STAGE: ${state.stage} [${meta.hat}]`,
-    `  Purpose: ${meta.purpose}`,
-    `  Exit when: ${meta.exit}`,
+    'The phased interview (walk these in order; revisit earlier stages as clarity demands):',
+    renderStages(),
     '',
-    'The phased interview (you advance through these and may revisit earlier ones):',
-    renderStages(state.stage),
-    '',
-    renderRubric(state),
-    '',
-    renderRequirements(state),
-    ...(renderSourceContext(state) ? ['', renderSourceContext(state)] : []),
-    ...(renderEvolveContext(state) ? ['', renderEvolveContext(state)] : []),
+    renderRubric(),
+    ...extendBlock,
     '',
     DESIGN_RULES,
     '',
     PROPOSAL_SHAPE,
     '',
-    deltaProtocol(),
+    completionProtocol(kshetra),
   ].join('\n');
 }
