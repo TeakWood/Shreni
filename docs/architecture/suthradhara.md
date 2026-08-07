@@ -16,10 +16,11 @@ design-docs path, both already read by the loop. Adding Suthradhara required a
 single filter line in Sthapathi's selection path (see [Queue isolation](#queue-isolation))
 and no change to the orchestration state machine.
 
-> **Source of record:** the full design rationale, alternatives, and open decisions
-> live in the ARD (`Shreni-ARD-Suthradhara.md`, in the Shreni-cloud repo). This
-> document describes the **as-built** agent in the OSS core (`src/suthradhara/`).
-> Section markers below (§4, §8.1, …) refer to that ARD.
+> **Source of record:** this document describes the **as-built** agent in the OSS
+> core (`src/suthradhara/`); the launched-session design note is
+> [`docs/design/suthradhara-launched-planning-session.md`](../design/suthradhara-launched-planning-session.md).
+> The full design rationale, alternatives, and open decisions live in the
+> Suthradhara ARD; section markers below (§4, §8.1, …) refer to it.
 
 ---
 

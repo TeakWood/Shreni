@@ -6,8 +6,7 @@ an intake session from the shared build tree, where those worktrees live, how th
 are torn down, and how to recover from a leaked one.
 
 > **Design vs. how-to.** The *why* — the collision analysis, the two-phase plan,
-> and the complexity accounting — lives in the ARD,
-> `docs/ard/Shreni-ARD-Worktree-Isolation.md` (in the **Shreni-cloud** repo). This
+> and the complexity accounting — lives in the Worktree-Isolation ARD. This
 > page is the **do-this-then-that** companion for the code in
 > `src/suthradhara/worktree.ts` and its callers (`src/suthradhara/lifecycle.ts`,
 > the control loop in `src/cli/suthradhara.ts`). This guide covers **Phase 1
@@ -164,7 +163,6 @@ Usually a stale worktree at the same path, or a missing origin ref.
 
 ## See also
 
-- ARD: `docs/ard/Shreni-ARD-Worktree-Isolation.md` (Shreni-cloud) — the full
-  rationale, Phase 2, and the complexity ledger.
+- The Worktree-Isolation ARD — the full rationale, Phase 2, and the complexity ledger.
 - `docs/architecture/suthradhara.md` — the intake agent's overall design.
 - `src/suthradhara/worktree.ts` — the lifecycle primitives.
