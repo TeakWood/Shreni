@@ -29,9 +29,7 @@ past the repo boundary: the same read-first shaping of the decomposition, now so
 from where the requirement actually lives.
 
 > **Source of record:** this document describes the **as-built** capability in the
-> OSS core (`src/suthradhara/` + the config schema). The full design rationale,
-> alternatives, and open decisions live in the MCP-Grounding ARD; section markers
-> (§3.1, §4.2, …) refer to it.
+> OSS core (`src/suthradhara/` + the config schema).
 
 > **Just want to configure it?** For a task-oriented, copy-pasteable walkthrough of
 > wiring MCP into the **executor** agents (Silpi/Viharapala/Parikshaka), see the

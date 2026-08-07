@@ -5,9 +5,7 @@ intake/planning agent). It explains the per-session git **worktree** that isolat
 an intake session from the shared build tree, where those worktrees live, how they
 are torn down, and how to recover from a leaked one.
 
-> **Design vs. how-to.** The *why* — the collision analysis, the two-phase plan,
-> and the complexity accounting — lives in the Worktree-Isolation ARD. This
-> page is the **do-this-then-that** companion for the code in
+> **How-to.** This page is the **do-this-then-that** companion for the code in
 > `src/suthradhara/worktree.ts` and its callers (`src/suthradhara/lifecycle.ts`,
 > the control loop in `src/cli/suthradhara.ts`). This guide covers **Phase 1
 > only** (the Suthradhara intake worktree); per-bead Sthapathi worktrees are the
@@ -21,7 +19,7 @@ Every mutating git operation in a Kshetra runs against a **single shared working
 tree** at `kshetra.repo.path`. Before Phase 1, a Suthradhara session ran there
 too — so an intake session reading, greping, and writing design docs shared a
 directory with whatever Silpi was editing mid-build. Two loops, one directory
-(ARD §1.1, collision #1).
+(collision #1).
 
 Phase 1 gives each intake session its **own detached checkout**. The interactive
 Claude Code session reads, greps, **and writes** *there*, isolated from the build
@@ -37,7 +35,7 @@ What now lives **inside the worktree** (the launched-session model):
   `suthradhara/<slug>` branch created off the detached worktree HEAD and **pushes
   the branch** to `repo.remote` — it never writes into the shared build tree and
   never merges to `main`. The doc reaches Silpi/Viharapala (whose cwd is
-  `repo.path`) only when the **operator merges that branch** (ARD §4.4).
+  `repo.path`) only when the **operator merges that branch**.
 
 What stays **shared** (not in the worktree):
 
@@ -52,7 +50,7 @@ What stays **shared** (not in the worktree):
 ~/.shreni/worktrees/<kshetra-id>/suthradhara-<session-id>
 ```
 
-The root is **outside** `repo.path` on purpose (ARD §3.1): a worktree directory
+The root is **outside** `repo.path` on purpose: a worktree directory
 must never be an untracked entry *inside* the tracked tree, which would re-create
 the very collision it solves. The path is derived by
 `sessionWorktreePath(kshetraId, sessionId)` in `src/suthradhara/worktree.ts`; the
@@ -109,7 +107,7 @@ The fix, and the invariant to preserve: **always pass an absolute
 grounding reads and the completion-protocol `bd create` / `bd dep add` / `bd export`
 the session runs itself — resolves to the one shared dolt DB regardless of cwd.
 Never rely on the `.beads` symlink resolving from a worktree — pass the absolute
-dir (ARD §4.4).
+dir.
 
 If you add a new `bd` call anywhere on the Suthradhara path, set `BEADS_DIR`
 explicitly. A read that "works from the repo root" will silently fail from a
@@ -163,6 +161,5 @@ Usually a stale worktree at the same path, or a missing origin ref.
 
 ## See also
 
-- The Worktree-Isolation ARD — the full rationale, Phase 2, and the complexity ledger.
 - `docs/architecture/suthradhara.md` — the intake agent's overall design.
 - `src/suthradhara/worktree.ts` — the lifecycle primitives.

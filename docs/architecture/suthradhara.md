@@ -19,8 +19,6 @@ and no change to the orchestration state machine.
 > **Source of record:** this document describes the **as-built** agent in the OSS
 > core (`src/suthradhara/`); the launched-session design note is
 > [`docs/design/suthradhara-launched-planning-session.md`](../design/suthradhara-launched-planning-session.md).
-> The full design rationale, alternatives, and open decisions live in the
-> Suthradhara ARD; section markers below (§4, §8.1, …) refer to it.
 
 ---
 
@@ -200,7 +198,7 @@ this Kshetra's real remotes and paths (`repo.remote`, `beads.remote`,
   `bd export -o "$BEADS_DIR/issues.jsonl"` → `git -C "$BEADS_DIR" add/commit` →
   `pull --rebase && push`, verifying the beads repo is up to date with origin. Report
   the epic id, child ids, and doc path, and tell the operator the doc is ready to review.
-- **Gate ② — design-doc/ARD approved.** Create a `suthradhara/<slug>` branch off the
+- **Gate ② — design doc approved.** Create a `suthradhara/<slug>` branch off the
   worktree's detached HEAD, commit the doc, and **push the branch** to `repo.remote`.
   The session **never merges to `main`** — the operator merges the branch on their own
   time. Then write the JSON handoff and stop.
@@ -341,7 +339,7 @@ commit engine created such beads as its per-session spine; that engine is gone, 
 Kshetra's DB may still hold historical `suthradhara-session` beads, so the filter stays —
 Sthapathi must never try to "work" one. This is a single line in the *selection* path,
 unit-tested (`pickNext` never returns a `suthradhara-session` bead, even a `ready` one),
-**not** a state-machine change (ARD §9.1 / §13.1).
+**not** a state-machine change.
 
 ---
 

@@ -42,7 +42,7 @@ returns control to a bounded menu.
 3. **Gate ① — plan approved**: the session creates the epic + child beads
    (`bd`), writes the design doc to `.shreni/design/<slug>.md` in the worktree,
    and **syncs beads** (`bd export -o` → commit → push to `beads.remote`).
-4. **Gate ② — design-doc/ARD approved**: the session commits the doc and
+4. **Gate ② — design doc approved**: the session commits the doc and
    **pushes the branch** to `repo.remote` (it does NOT merge to `main`), then
    writes a JSON **handoff record** and exits.
 
@@ -84,7 +84,7 @@ launcher still shows the menu with a degraded summary.
 | Handoff contract | new `src/suthradhara/handoff.ts` + runner/launcher wiring |
 | Launcher control loop + menu | `src/cli/suthradhara.ts` |
 | Delete dead engine | `turnloop`, `distill`, `confirm`, `commit`, `decomposition`, `evolve`, `capture`, `rubric`, `grant`, `allowlist`, `interview`, `sessionbead` (+tests) |
-| Docs | `docs/architecture/suthradhara.md`, `docs/guides/suthradhara-worktree-isolation.md`, ARD |
+| Docs | `docs/architecture/suthradhara.md`, `docs/guides/suthradhara-worktree-isolation.md` |
 
 Config already carries everything the git/beads flow needs: `repo.remote`,
 `repo.mainBranch`, `repo.branchPattern`, `beads.path`, `beads.remote`
