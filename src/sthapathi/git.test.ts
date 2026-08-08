@@ -109,6 +109,36 @@ describe('git() helper', () => {
     expect(status.modified).toEqual([]);
   });
 
+  it('discardPath() reverts a tracked file and is a no-op on untracked/absent paths', async () => {
+    const g = git(repoDir);
+    writeFileSync(join(repoDir, 'README.md'), 'uncommitted change');
+    await g.discardPath('README.md');
+    const { readFileSync } = await import('fs');
+    expect(readFileSync(join(repoDir, 'README.md'), 'utf8')).toBe('# test');
+    // best-effort: an untracked / absent path does not throw
+    writeFileSync(join(repoDir, 'untracked.txt'), 'x');
+    await expect(g.discardPath('untracked.txt')).resolves.toBeUndefined();
+    await expect(g.discardPath('does-not-exist.txt')).resolves.toBeUndefined();
+  });
+
+  it('isTracked() distinguishes tracked, untracked, and absent paths', async () => {
+    const g = git(repoDir);
+    expect(await g.isTracked('README.md')).toBe(true);
+    writeFileSync(join(repoDir, 'untracked.txt'), 'x');
+    expect(await g.isTracked('untracked.txt')).toBe(false);
+    expect(await g.isTracked('nope.txt')).toBe(false);
+  });
+
+  it('rmCached() untracks a file without deleting it from the working tree', async () => {
+    const g = git(repoDir);
+    await g.rmCached('README.md');
+    const { existsSync } = await import('fs');
+    expect(existsSync(join(repoDir, 'README.md'))).toBe(true); // still on disk
+    expect(await g.isTracked('README.md')).toBe(false); // no longer in the index
+    const status = await g.status();
+    expect(status.staged).toContain('README.md'); // staged deletion pending commit
+  });
+
   it('clean() removes untracked files but keeps ignored ones', async () => {
     const g = git(repoDir);
     writeFileSync(join(repoDir, '.gitignore'), 'ignored.txt\n');

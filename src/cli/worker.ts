@@ -4,6 +4,7 @@ import { selectNext, prepareTask } from '../sthapathi/pickup';
 import { runSilpiViharapalaLoop } from '../sthapathi/dispatch';
 import { handleCycleError, AgentAbortedError } from '../sthapathi/errors';
 import { recoverKshetra, scheduleResume } from '../sthapathi/recover';
+import { untrackCommittedRepoMap } from '../sthapathi/repo-map-migration';
 import { runWatchdogOnce } from '../sthapathi/watchdog';
 import { branchName } from '../sthapathi/branch';
 import { touchHeartbeat } from '../sthapathi/activity-log';
@@ -159,6 +160,13 @@ async function startup(): Promise<void> {
     console.log(`[shreni worker:${kshetraId}] cleared stale stuck pause after recovery`);
   }
   console.log(`[shreni worker:${kshetraId}] recovery complete (${resumable.length} to resume)`);
+  // Self-heal a legacy repo that committed .shreni/repo-map.md before it was
+  // gitignored: untrack it so its post-merge regen stops dirtying the tree and
+  // wedging preflight. recoverKshetra has just left us on a clean main — the
+  // precondition — and this must land before any bead work rebranches off main.
+  if (await untrackCommittedRepoMap(kshetra!)) {
+    console.log(`[shreni worker:${kshetraId}] untracked committed .shreni/repo-map.md (now gitignored)`);
+  }
   for (const task of resumable) {
     console.log(`[shreni worker:${kshetraId}] resuming WIP bead ${task.id} (bypassing health gate)`);
     await scheduleResume(kshetra!, task, runTaskSafely);

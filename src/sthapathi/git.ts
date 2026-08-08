@@ -130,6 +130,24 @@ export function git(kshetraOrPath: KshetraConfig | string) {
       }
     },
 
+    // Whether <path> is tracked by git (present in the index). `ls-files
+    // --error-unmatch` exits non-zero for an untracked/absent path, which `run`
+    // surfaces as a throw — so a false here means "not tracked", not an error.
+    async isTracked(path: string): Promise<boolean> {
+      try {
+        await run(['ls-files', '--error-unmatch', path], repoPath);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    // Stop tracking <path> WITHOUT deleting it from the working tree (--cached).
+    // Stages a deletion that must be committed; the on-disk file is left intact.
+    async rmCached(path: string): Promise<void> {
+      await run(['rm', '--cached', path], repoPath);
+    },
+
     // Remove untracked files and directories (respects .gitignore — ignored
     // files like node_modules are left alone). Used by RECOVER to discard
     // interrupted, uncommitted agent work.
