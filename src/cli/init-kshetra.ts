@@ -239,10 +239,13 @@ export function createBeadsSymlink(repoPath: string, beadsPath: string): void {
 
 // Entries init keeps out of the repo. `.beads` is a machine-local symlink;
 // `.shreni/kshetra.yaml` holds ABSOLUTE machine-specific repo/beads paths so it
-// must not be committed — but it is ignored by exact path, NOT as `.shreni/`, so
-// the tracked conventions docs (.shreni/style-guide.md, .shreni/arch.md) stay
+// must not be committed; `.shreni/repo-map.md` is a deterministic cache Shreni
+// regenerates on every merge (src/kshetra/repo-map.ts) — committing it only
+// churns the tree and, worse, its post-merge regen leaves it dirty and wedges
+// preFlightCheck. All are ignored by exact path, NOT as `.shreni/`, so the
+// tracked conventions docs (.shreni/style-guide.md, .shreni/arch.md) stay
 // committable.
-const GITIGNORE_MARKERS = ['.beads', `${SHRENI_DIR}/kshetra.yaml`];
+const GITIGNORE_MARKERS = ['.beads', `${SHRENI_DIR}/kshetra.yaml`, `${SHRENI_DIR}/repo-map.md`];
 
 export function addToGitignore(repoPath: string): void {
   const gitignorePath = join(repoPath, '.gitignore');

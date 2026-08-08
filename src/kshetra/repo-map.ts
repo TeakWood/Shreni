@@ -16,8 +16,11 @@ import { extractSymbolsTreeSitter, type TsLang } from './tree-sitter/index.js';
 
 // Where the generated map is cached, relative to repo root. `.shreni/` is the
 // per-Kshetra home (kshetra.yaml lives here too), so the map ships with the repo
-// and every round reads the same on-disk snapshot.
-const MAP_RELATIVE_PATH = '.shreni/repo-map.md';
+// and every round reads the same on-disk snapshot. It is a deterministic,
+// regenerated-on-merge cache — NOT source — so it is gitignored (init-kshetra's
+// GITIGNORE_MARKERS) and its working-tree churn is discarded by preFlightCheck;
+// both key on this exact path, hence the export.
+export const REPO_MAP_RELATIVE_PATH = '.shreni/repo-map.md';
 
 // Prompt-budget guards (acceptance criterion: never blow the budget on large
 // repos). Rendering stops once MAX_BYTES is reached; a truncation note tells the
@@ -340,7 +343,7 @@ export async function generateRepoMap(kshetra: KshetraConfig): Promise<string> {
 
     const map = renderMap(entries, kshetra.name);
 
-    const dest = join(root, MAP_RELATIVE_PATH);
+    const dest = join(root, REPO_MAP_RELATIVE_PATH);
     await mkdir(dirname(dest), { recursive: true });
     const tmp = `${dest}.${process.pid}.tmp`;
     await writeFile(tmp, map, 'utf8');
@@ -358,7 +361,7 @@ export async function generateRepoMap(kshetra: KshetraConfig): Promise<string> {
 // throws — returns '' so Silpi's truthiness guard omits the section.
 export async function loadRepoMap(kshetra: KshetraConfig): Promise<string> {
   try {
-    return await readFile(join(kshetra.repo.path, MAP_RELATIVE_PATH), 'utf8');
+    return await readFile(join(kshetra.repo.path, REPO_MAP_RELATIVE_PATH), 'utf8');
   } catch {
     return generateRepoMap(kshetra);
   }

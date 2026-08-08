@@ -40,6 +40,7 @@ vi.mock('./parikshaka-dispatch.js', () => ({ dispatchParikshakaAsync: vi.fn() })
 vi.mock('../kshetra/repo-map.js', () => ({
   regenerateRepoMapAsync: vi.fn(),
   loadRepoMap: vi.fn(async () => ''),
+  REPO_MAP_RELATIVE_PATH: '.shreni/repo-map.md',
 }));
 
 import { selectNext, prepareTask, toSlug } from './pickup.js';

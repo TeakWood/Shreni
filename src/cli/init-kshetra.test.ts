@@ -352,7 +352,7 @@ describe('addToGitignore', () => {
     addToGitignore('/repos/myapp');
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       join('/repos/myapp', '.gitignore'),
-      '.beads\n.shreni/kshetra.yaml\n',
+      '.beads\n.shreni/kshetra.yaml\n.shreni/repo-map.md\n',
       'utf8',
     );
   });
@@ -371,14 +371,14 @@ describe('addToGitignore', () => {
     addToGitignore('/repos/myapp');
     expect(mockAppendFileSync).toHaveBeenCalledWith(
       join('/repos/myapp', '.gitignore'),
-      '.shreni/kshetra.yaml\n',
+      '.shreni/kshetra.yaml\n.shreni/repo-map.md\n',
       'utf8',
     );
   });
 
-  it('skips entirely when both markers are already present', () => {
+  it('skips entirely when all markers are already present', () => {
     mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('node_modules\n.beads\n.shreni/kshetra.yaml\n');
+    mockReadFileSync.mockReturnValue('node_modules\n.beads\n.shreni/kshetra.yaml\n.shreni/repo-map.md\n');
     addToGitignore('/repos/myapp');
     expect(mockAppendFileSync).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
@@ -390,7 +390,7 @@ describe('addToGitignore', () => {
     addToGitignore('/repos/myapp');
     expect(mockAppendFileSync).toHaveBeenCalledWith(
       join('/repos/myapp', '.gitignore'),
-      '\n.beads\n.shreni/kshetra.yaml\n',
+      '\n.beads\n.shreni/kshetra.yaml\n.shreni/repo-map.md\n',
       'utf8',
     );
   });

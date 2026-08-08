@@ -4,6 +4,7 @@ import type { Task } from './types.js';
 import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
 import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
+import { REPO_MAP_RELATIVE_PATH } from '../kshetra/repo-map.js';
 import { recordProgress, recordStall } from '../kshetra/state.js';
 // The bead type the legacy Suthradhara commit engine used for its per-session
 // audit bead. That engine is gone (epic d3y — launched planning sessions file
@@ -95,6 +96,18 @@ export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promis
   const main = kshetra.repo.mainBranch;
 
   await g.checkout(main);
+
+  // The repo map (.shreni/repo-map.md) is a deterministic, regenerated-on-merge
+  // cache, not source. squashMergeAndClose regenerates it fire-and-forget AFTER
+  // the merge commit, so it lands in the working tree uncommitted; if the repo
+  // tracks it (a map committed before it was gitignored), that lone change trips
+  // the cleanliness gate below and wedges the worker on EVERY poll — preflight
+  // returns null forever and no bead ever starts. It is a derived artifact, never
+  // real drift, and a git op (checkout/merge) would also refuse a dirty tracked
+  // file, so discard its working-tree churn here before the gate. Untracked
+  // (gitignored) maps aren't reported by status anyway — this is the belt for
+  // repos that still track it. See src/kshetra/repo-map.ts.
+  await g.discardPath(REPO_MAP_RELATIVE_PATH);
 
   const status = await g.status();
   const dirty = [...status.modified, ...status.staged];

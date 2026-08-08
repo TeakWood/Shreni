@@ -116,6 +116,20 @@ export function git(kshetraOrPath: KshetraConfig | string) {
       await run(['reset', '--hard', ref], repoPath);
     },
 
+    // Discard the working-tree (and staged) change to a single path, restoring it
+    // to HEAD. Best-effort and non-fatal: if <path> is clean, untracked, or not
+    // tracked at all, `git checkout --` errors ("did not match", "pathspec")
+    // and we swallow it — the caller only wants "make this path not dirty", and
+    // an already-clean/untracked path already satisfies that. Used to drop the
+    // regenerated repo-map cache before the preflight cleanliness gate.
+    async discardPath(path: string): Promise<void> {
+      try {
+        await run(['checkout', '--', path], repoPath);
+      } catch {
+        /* path clean / untracked / absent — nothing to discard */
+      }
+    },
+
     // Remove untracked files and directories (respects .gitignore — ignored
     // files like node_modules are left alone). Used by RECOVER to discard
     // interrupted, uncommitted agent work.

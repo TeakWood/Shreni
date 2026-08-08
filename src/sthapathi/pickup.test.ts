@@ -19,6 +19,7 @@ const mockCheckout = vi.fn<() => Promise<void>>();
 const mockPull = vi.fn<() => Promise<void>>();
 const mockFetch = vi.fn<() => Promise<void>>();
 const mockResetHard = vi.fn<() => Promise<void>>();
+const mockDiscardPath = vi.fn<(p: string) => Promise<void>>();
 
 vi.mock('./git.js', () => ({
   git: vi.fn(() => ({
@@ -28,6 +29,7 @@ vi.mock('./git.js', () => ({
     pull: mockPull,
     fetch: mockFetch,
     resetHard: mockResetHard,
+    discardPath: mockDiscardPath,
   })),
   GitError: class GitError extends Error { constructor(public readonly code: string, message: string) { super(message); } },
 }));
@@ -77,6 +79,7 @@ beforeEach(() => {
   mockClaim.mockResolvedValue('');
   mockSyncBeads.mockResolvedValue(undefined);
   mockStatus.mockResolvedValue({ modified: [], staged: [], untracked: [] });
+  mockDiscardPath.mockResolvedValue(undefined);
   mockBranchExists.mockResolvedValue(false);
   mockCheckout.mockResolvedValue(undefined);
   mockPull.mockResolvedValue(undefined);
@@ -268,6 +271,33 @@ describe('preFlightCheck', () => {
   it('untracked files do not block preflight', async () => {
     mockStatus.mockResolvedValue({ modified: [], staged: [], untracked: ['new-file.ts'] });
     await expect(preFlightCheck(TASK, KSHETRA)).resolves.not.toThrow();
+  });
+
+  it('discards the regenerated repo-map before the cleanliness gate', async () => {
+    await preFlightCheck(TASK, KSHETRA);
+    expect(mockDiscardPath).toHaveBeenCalledWith('.shreni/repo-map.md');
+  });
+
+  it('does not wedge when the ONLY dirty path is the regenerated repo-map', async () => {
+    // The wedge scenario: squashMergeAndClose regenerated .shreni/repo-map.md
+    // fire-and-forget, leaving it modified in a repo that tracks it. discardPath
+    // reverts it, so by the time status is read the tree is clean again.
+    mockDiscardPath.mockImplementation(async () => {
+      mockStatus.mockResolvedValue({ modified: [], staged: [], untracked: [] });
+    });
+    mockStatus.mockResolvedValue({ modified: ['.shreni/repo-map.md'], staged: [], untracked: [] });
+    await expect(preFlightCheck(TASK, KSHETRA)).resolves.not.toThrow();
+    expect(mockDiscardPath).toHaveBeenCalledWith('.shreni/repo-map.md');
+  });
+
+  it('still wedges on real drift alongside the repo-map', async () => {
+    // discardPath only touches the map; a genuine source edit must still trip
+    // the gate so real drift is never silently swallowed.
+    mockDiscardPath.mockImplementation(async () => {
+      mockStatus.mockResolvedValue({ modified: ['src/app.ts'], staged: [], untracked: [] });
+    });
+    mockStatus.mockResolvedValue({ modified: ['.shreni/repo-map.md', 'src/app.ts'], staged: [], untracked: [] });
+    await expect(preFlightCheck(TASK, KSHETRA)).rejects.toThrow('dirty working tree');
   });
 });
 
