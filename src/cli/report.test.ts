@@ -68,6 +68,15 @@ describe('renderReport — empty log', () => {
     expect(out).toContain('No runs recorded yet.');
     expect(out).not.toContain('Total tasks');
   });
+
+  it('does not hide in-flight review activity behind "no runs" (8xp)', () => {
+    // A task mid-review: a viharapala_done round is logged but no task_done yet, so
+    // totalTasks is 0 but totalRounds is not — the full report must render.
+    const m = computeMetrics({ events: [review('b1', 'REJECT', 1)] });
+    const out = renderReport(K, m);
+    expect(out).not.toContain('No runs recorded yet.');
+    expect(out).toContain('Reject rate');
+  });
 });
 
 describe('renderReport — populated', () => {

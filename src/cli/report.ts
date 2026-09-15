@@ -114,9 +114,15 @@ export function renderReport(kshetraId: string, m: Metrics): string {
   lines.push(`Run metrics: ${kshetraId}`);
   lines.push('─'.repeat(50));
 
-  // An untouched Kshetra: nothing claimed, no usage, no alerts. Say so plainly
-  // rather than printing a wall of zeros.
-  if (m.totalTasks === 0 && m.perBead.length === 0 && m.escalations === 0 && m.stuckEvents === 0) {
+  // An untouched Kshetra: nothing claimed, no rounds in flight, no usage, no
+  // alerts. Say so plainly rather than printing a wall of zeros. `totalRounds`
+  // guards the mid-review case — a task with viharapala_done but no task_done yet
+  // has totalTasks 0 but a non-zero reject rate/round count that must not be
+  // hidden behind "no runs".
+  if (
+    m.totalTasks === 0 && m.totalRounds === 0 && m.perBead.length === 0 &&
+    m.escalations === 0 && m.stuckEvents === 0
+  ) {
     lines.push('No runs recorded yet.');
     lines.push('Metrics appear once this Kshetra completes work — check back after a run,');
     lines.push('or `shreni status` to see what it is doing now.');

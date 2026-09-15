@@ -112,6 +112,15 @@ describe('computeMetrics — escalation + stuck', () => {
     expect(m.escalationRate).toBe(0);
     expect(m.stuckRate).toBe(0);
   });
+
+  it('folds pr_followup_exhausted into escalations (both hand a run to a human) (8xp)', () => {
+    const m = computeMetrics({
+      events: [taskDone('b1', true, 1), taskDone('b2', true, 1)],
+      notifications: [notif('pr_followup_escalated'), notif('pr_followup_exhausted')],
+    });
+    expect(m.escalations).toBe(2);
+    expect(m.escalationRate).toBe(1); // 2 / 2 tasks
+  });
 });
 
 describe('computeMetrics — tokens & cost per bead', () => {
@@ -146,5 +155,17 @@ describe('computeMetrics — tokens & cost per bead', () => {
     expect(m.perBead[0].runs).toBe(2);
     expect(m.unpricedRuns).toBe(1);
     expect(m.totalCostUsd).toBe(3);
+  });
+
+  it('orders perBead naturally, not lexicographically (8xp)', () => {
+    const m = computeMetrics({
+      usage: [
+        usage('myapp-10', { costUsd: 0.01 }),
+        usage('myapp-2', { costUsd: 0.02 }),
+        usage('myapp-1', { costUsd: 0.03 }),
+      ],
+    });
+    // Lexicographic would give myapp-1, myapp-10, myapp-2; natural gives 1, 2, 10.
+    expect(m.perBead.map(b => b.beadId)).toEqual(['myapp-1', 'myapp-2', 'myapp-10']);
   });
 });

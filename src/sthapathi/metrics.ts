@@ -21,7 +21,13 @@ import type { UsageEntry } from '../ext/types.js';
 // The notification `event` strings the aggregator keys off. Kept as constants so
 // the coupling to the producers (pr-followup-run.ts, watchdog.ts) is explicit
 // and greppable rather than a bare string literal buried in a filter.
-export const ESCALATION_EVENT = 'pr_followup_escalated';
+// Both a PR follow-up that escalates and one that exhausts its rounds are handed
+// to a human (pr-followup-run.ts notifies for both, ARD §4.2), so the escalation
+// metric counts both — escalationRate measures "runs that needed a human", not
+// just the escalated subset.
+export const ESCALATION_EVENTS = ['pr_followup_escalated', 'pr_followup_exhausted'] as const;
+// Kept for back-compat with existing importers (the primary escalation event).
+export const ESCALATION_EVENT = ESCALATION_EVENTS[0];
 export const STUCK_EVENT = 'stuck';
 
 // Per-bead token and cost roll-up. `totalTokens` sums the four lanes;
@@ -126,7 +132,7 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
   let escalations = 0;
   let stuckEvents = 0;
   for (const n of notifications) {
-    if (n.event === ESCALATION_EVENT) escalations++;
+    if ((ESCALATION_EVENTS as readonly string[]).includes(n.event)) escalations++;
     else if (n.event === STUCK_EVENT) stuckEvents++;
   }
 
@@ -154,7 +160,9 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
 
   const perBead = [...byBead.values()]
     .map(b => ({ ...b, costUsd: roundCost(b.costUsd) }))
-    .sort((a, b) => (a.beadId < b.beadId ? -1 : a.beadId > b.beadId ? 1 : 0));
+    // Natural/numeric order so myapp-2 sorts before myapp-10 (not lexicographic,
+    // which would put myapp-10 first). Deterministic across runs.
+    .sort((a, b) => a.beadId.localeCompare(b.beadId, 'en', { numeric: true }));
 
   const totalTokens = perBead.reduce((s, b) => s + b.totalTokens, 0);
   const totalCostUsd = roundCost(perBead.reduce((s, b) => s + b.costUsd, 0));
