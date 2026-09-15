@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
-import type { Task, SilpiOutput } from './types.js';
+import type { Task, SilpiOutput, ViharapalaOutput } from './types.js';
 
 // ── module mocks (hoisted) ───────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ vi.mock('./parikshaka-dispatch.js', () => ({ dispatchParikshakaAsync: vi.fn() })
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
-const { resolveMergePolicy, openPrAndDefer, reconcilePullRequests, parseAwaitingMerge, AWAITING_MERGE_LABEL } =
+const { resolveMergePolicy, openPrAndDefer, buildPrBody, reconcilePullRequests, parseAwaitingMerge, AWAITING_MERGE_LABEL } =
   await import('./merge.js');
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -82,6 +82,17 @@ const OUTPUT: SilpiOutput = {
   testsPassed: true,
   insights: [],
 };
+
+const FEEDBACK: ViharapalaOutput = {
+  verdict: 'APPROVE',
+  overallScore: 92,
+  mustFix: [],
+  suggestions: [],
+  issues: [],
+  insights: [],
+};
+
+const TASK_DETAILS = 'proj-42 · Fix auth\n\nACCEPTANCE CRITERIA\nLogin rejects a bad password.';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -120,7 +131,7 @@ describe('openPrAndDefer', () => {
   });
 
   it('pushes the bead branch and opens a PR against main', async () => {
-    await openPrAndDefer(TASK, KSHETRA, OUTPUT);
+    await openPrAndDefer(TASK, KSHETRA, OUTPUT, FEEDBACK, TASK_DETAILS);
     expect(mockPush).toHaveBeenCalledWith('origin', 'bead-proj-42/fix-auth');
     const prArgs = mockPrCreate.mock.calls[0]![0] as { base: string; head: string; title: string };
     expect(prArgs.base).toBe('main');
@@ -128,17 +139,53 @@ describe('openPrAndDefer', () => {
     expect(prArgs.title).toContain('proj-42');
   });
 
+  it('renders the acceptance criteria + reviewer verdict into the PR body', async () => {
+    await openPrAndDefer(TASK, KSHETRA, OUTPUT, FEEDBACK, TASK_DETAILS);
+    const prArgs = mockPrCreate.mock.calls[0]![0] as { body: string };
+    expect(prArgs.body).toContain('## Acceptance criteria');
+    expect(prArgs.body).toContain('Login rejects a bad password.');
+    expect(prArgs.body).toContain('## Reviewer verdict');
+    expect(prArgs.body).toContain('Verdict: **APPROVE**');
+    expect(prArgs.body).toContain('Score: 92/100');
+  });
+
   it('labels the bead awaiting-merge and does NOT close it or delete the branch', async () => {
-    await openPrAndDefer(TASK, KSHETRA, OUTPUT);
+    await openPrAndDefer(TASK, KSHETRA, OUTPUT, FEEDBACK, TASK_DETAILS);
     expect(mockAddLabel).toHaveBeenCalledWith('proj-42', AWAITING_MERGE_LABEL);
     expect(mockClose).not.toHaveBeenCalled();
     expect(mockDeleteBranch).not.toHaveBeenCalled();
   });
 
   it('records the PR url as a bead note and syncs', async () => {
-    await openPrAndDefer(TASK, KSHETRA, OUTPUT);
+    await openPrAndDefer(TASK, KSHETRA, OUTPUT, FEEDBACK, TASK_DETAILS);
     expect(mockAddNote).toHaveBeenCalledWith('proj-42', expect.stringContaining('pull/1'));
     expect(mockSyncBeads).toHaveBeenCalled();
+  });
+});
+
+describe('buildPrBody', () => {
+  it('keeps the commit-message summary as the header, then appends both blocks', () => {
+    const body = buildPrBody(TASK, OUTPUT, FEEDBACK, TASK_DETAILS);
+    // Header comes from buildCommitMessage (title + id, summary, confidence).
+    expect(body.startsWith('Fix auth (proj-42)')).toBe(true);
+    expect(body).toContain('Confidence: 90%');
+    // Order: acceptance criteria block precedes the reviewer verdict block.
+    expect(body.indexOf('## Acceptance criteria')).toBeLessThan(body.indexOf('## Reviewer verdict'));
+  });
+
+  it('lists must-fix items when the reviewer flagged any', () => {
+    const body = buildPrBody(TASK, OUTPUT, { ...FEEDBACK, verdict: 'REJECT', mustFix: ['handle null user', 'add a test'] }, TASK_DETAILS);
+    expect(body).toContain('- Must-fix:');
+    expect(body).toContain('  - handle null user');
+    expect(body).toContain('  - add a test');
+  });
+
+  it('says "none" when there are no must-fix items', () => {
+    expect(buildPrBody(TASK, OUTPUT, FEEDBACK, TASK_DETAILS)).toContain('- Must-fix: none');
+  });
+
+  it('degrades gracefully when task details are empty', () => {
+    expect(buildPrBody(TASK, OUTPUT, FEEDBACK, '   ')).toContain('_(no task details captured)_');
   });
 });
 

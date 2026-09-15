@@ -1,5 +1,5 @@
 import type { KshetraConfig } from '../kshetra/config.js';
-import type { Task, SilpiOutput } from './types.js';
+import type { Task, SilpiOutput, ViharapalaOutput } from './types.js';
 import { bd, syncBeads } from './beads.js';
 import { git, GitError } from './git.js';
 import { gh } from './gh.js';
@@ -45,6 +45,37 @@ function buildCommitMessage(task: Task, output: SilpiOutput): string {
   if (output.questionsForReviewer.length) {
     lines.push('', 'Questions for reviewer:', ...output.questionsForReviewer.map(q => `- ${q}`));
   }
+  return lines.join('\n');
+}
+
+// PR body for mergePolicy 'pr' (4fu.1). Extends the squash-commit message with
+// the two review-context blocks a human merger needs at a glance: the bead's
+// acceptance criteria (context.taskDetails — the same task+criteria bundle
+// Viharapala reviewed against) and the reviewer's verdict (verdict, score,
+// must-fix items). The squash-merge path keeps using buildCommitMessage
+// unchanged — a git commit message has no room for this, but a PR body does, so
+// only the PR carries the extra context.
+export function buildPrBody(
+  task: Task,
+  output: SilpiOutput,
+  feedback: ViharapalaOutput,
+  taskDetails: string,
+): string {
+  const lines: string[] = [buildCommitMessage(task, output), ''];
+
+  lines.push('## Acceptance criteria', '');
+  lines.push(taskDetails.trim() || '_(no task details captured)_', '');
+
+  lines.push('## Reviewer verdict', '');
+  lines.push(`- Verdict: **${feedback.verdict}**`);
+  lines.push(`- Score: ${feedback.overallScore}/100`);
+  if (feedback.mustFix.length > 0) {
+    lines.push('- Must-fix:');
+    for (const item of feedback.mustFix) lines.push(`  - ${item}`);
+  } else {
+    lines.push('- Must-fix: none');
+  }
+
   return lines.join('\n');
 }
 
@@ -224,6 +255,8 @@ export async function openPrAndDefer(
   task: Task,
   kshetra: KshetraConfig,
   output: SilpiOutput,
+  feedback: ViharapalaOutput,
+  taskDetails: string,
 ): Promise<void> {
   const g = git(kshetra);
   const main = kshetra.repo.mainBranch;
@@ -237,7 +270,7 @@ export async function openPrAndDefer(
     base: main,
     head: branch,
     title: `${task.title} (${task.id})`,
-    body: buildCommitMessage(task, output),
+    body: buildPrBody(task, output, feedback, taskDetails),
   });
 
   await bdClient.addNote(task.id, `PR opened (awaiting merge): ${url}`);

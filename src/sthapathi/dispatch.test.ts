@@ -298,6 +298,19 @@ describe('runSilpiViharapalaLoop', () => {
     expect(result.note).toContain('PR opened');
   });
 
+  it('threads the reviewer verdict + task details into openPrAndDefer (4fu.1)', async () => {
+    mockResolveMergePolicy.mockReturnValue('pr');
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    // (task, kshetra, silpiOut, feedback, taskDetails)
+    expect(mockOpenPrAndDefer).toHaveBeenCalledWith(
+      TASK,
+      KSHETRA,
+      expect.anything(),
+      VIHARAPALA_APPROVE,
+      'task details output',
+    );
+  });
+
   it('records forward progress on claim and on approval (watchdog stall track)', async () => {
     await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
     // task_claimed + the approved task_done both stamp progress / reset the stall track

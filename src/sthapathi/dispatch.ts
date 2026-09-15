@@ -280,7 +280,7 @@ export async function runSilpiViharapalaLoop(
       // mergePolicy (3r2): 'pr' opens a PR and defers (bead stays open, closed on
       // merge by reconcilePullRequests); 'push' squash-merges to main + closes now.
       if (resolveMergePolicy(kshetra) === 'pr') {
-        await openPrAndDefer(task, kshetra, silpiOut);
+        await openPrAndDefer(task, kshetra, silpiOut, feedback, context.taskDetails);
         return { approved: true, note: `Approved round ${round} — PR opened, awaiting merge` };
       }
       // Squash-merge the bead branch into main, close the task, fire Parikshaka
