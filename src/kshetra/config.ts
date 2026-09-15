@@ -297,6 +297,22 @@ export type AgentRole = (typeof AGENT_ROLES)[number];
 export type AgentRoleConfig = z.infer<typeof AgentRoleConfigSchema>;
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 
+// Resolve the effective provider+model for one agent role (b0f.2): a role's own
+// override wins, else the flat agents.{provider,model} default. Each field falls
+// back independently — a role may override just the model and inherit the flat
+// provider. Callers feed the result as SelectModelRequest.default, so a
+// PolicySource can still compose on top (per-bead routing / denial).
+export function resolveAgentModel(
+  kshetra: KshetraConfig,
+  role: AgentRole,
+): { provider: AgentsConfig['provider']; model: string } {
+  const roleConfig = kshetra.agents[role];
+  return {
+    provider: roleConfig?.provider ?? kshetra.agents.provider,
+    model: roleConfig?.model ?? kshetra.agents.model,
+  };
+}
+
 export class KshetraConfigError extends Error {
   constructor(
     public readonly configPath: string,

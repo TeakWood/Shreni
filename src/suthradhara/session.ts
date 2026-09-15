@@ -1,4 +1,5 @@
 import type { KshetraConfig } from '../kshetra/config';
+import { resolveAgentModel } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
 import { resolveMcpConnection, McpConnectionError } from '../kshetra/mcp-connect';
@@ -81,7 +82,9 @@ export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
   }
   args.push('--setting-sources', 'project');
   args.push(...mcpConfigArgs);
-  args.push('--model', kshetra.agents.model);
+  // Suthradhara's session is claude-driven, so only the model override applies
+  // here (a per-role provider is honored on the runAgent path, b0f.2).
+  args.push('--model', resolveAgentModel(kshetra, 'suthradhara').model);
   // Positional kickoff prompt (fresh launch only). claude treats a trailing
   // positional in interactive mode as the first user message.
   if (!opts.resume && opts.kickoff) {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { loadKshetraConfig, KshetraConfigError } from './config.js';
+import { loadKshetraConfig, KshetraConfigError, resolveAgentModel } from './config.js';
 
 const VALID_YAML = `
 id: myapp
@@ -373,5 +373,50 @@ stack:
       expect((err as KshetraConfigError).configPath).toBe(path);
       expect((err as KshetraConfigError).message).toContain(path);
     }
+  });
+});
+
+describe('resolveAgentModel (b0f.2)', () => {
+  // Reuses the module-level `dir` (set up by the top beforeEach/afterEach).
+  function configWith(agentsYaml: string) {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `\n${agentsYaml}\n`);
+    return loadKshetraConfig(path);
+  }
+
+  it('returns the role override when present (both fields)', () => {
+    const config = configWith(`agents:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  viharapala:
+    provider: openai
+    model: gpt-5-codex`);
+    expect(resolveAgentModel(config, 'viharapala')).toEqual({ provider: 'openai', model: 'gpt-5-codex' });
+  });
+
+  it('falls back per-field: a model-only override keeps the flat provider', () => {
+    const config = configWith(`agents:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  silpi:
+    model: claude-opus-4-1`);
+    expect(resolveAgentModel(config, 'silpi')).toEqual({ provider: 'anthropic', model: 'claude-opus-4-1' });
+  });
+
+  it('falls back to the flat default when the role has no override', () => {
+    const config = configWith(`agents:
+  provider: anthropic
+  model: claude-sonnet-4-6`);
+    expect(resolveAgentModel(config, 'parikshaka')).toEqual({ provider: 'anthropic', model: 'claude-sonnet-4-6' });
+  });
+
+  it('falls back to the flat default when the role sub-config exists but omits provider/model', () => {
+    const config = configWith(`agents:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  silpi:
+    mcpConfigFiles:
+      - .mcp.json`);
+    expect(resolveAgentModel(config, 'silpi')).toEqual({ provider: 'anthropic', model: 'claude-sonnet-4-6' });
   });
 });

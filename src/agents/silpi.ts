@@ -1,6 +1,7 @@
 import type { AgentContext, SilpiOutput, ViharapalaOutput, PrReviewFeedback } from '../sthapathi/types.js';
 import type { PrReview } from '../sthapathi/gh.js';
 import type { KshetraConfig } from '../kshetra/config.js';
+import { resolveAgentModel } from '../kshetra/config.js';
 import {
   resolveBuildCommand,
   resolveTestCommand,
@@ -211,15 +212,16 @@ export async function runSilpi(
   // commentResponses. Trailing/optional so ordinary callers are unaffected.
   prFeedback?: PrReviewFeedback | null,
 ): Promise<SilpiOutput> {
+  const { provider, model } = resolveAgentModel(context.kshetra, 'silpi');
   const result = await runAgent({
-    provider: context.kshetra.agents.provider,
+    provider,
     systemPrompt: buildSilpiSystemPrompt(context, round, branch, feedback, prFeedback),
     userPrompt: `Implement task ${context.task.id}: ${context.task.title}. You are on branch ${branch}. Use your tools to implement, test, lint, and commit.`,
     cwd: context.kshetra.repo.path,
     agentName: 'silpi',
     kshetraId: context.kshetra.id,
     beadId: context.task.id,
-    model: context.kshetra.agents.model,
+    model,
     jsonSchema: SILPI_OUTPUT_SCHEMA,
     mcp: resolveExecutorMcp(context.kshetra, 'silpi'),
     signal,

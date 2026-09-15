@@ -1,4 +1,5 @@
 import type { KshetraConfig } from '../kshetra/config.js';
+import { resolveAgentModel } from '../kshetra/config.js';
 import type { Task, ParikshakaOutput } from '../sthapathi/types.js';
 import { ParseError } from '../sthapathi/errors.js';
 import { resolveExecutorMcp } from '../kshetra/mcp-connect.js';
@@ -80,15 +81,16 @@ Writing or editing any file is a role violation: it leaves the repo working tree
 }
 
 export async function runParikshaka(ctx: ParikshakaContext): Promise<ParikshakaOutput> {
+  const { provider, model } = resolveAgentModel(ctx.kshetra, 'parikshaka');
   const result = await runAgent({
-    provider: ctx.kshetra.agents.provider,
+    provider,
     systemPrompt: buildParikshakaSystemPrompt(ctx),
     userPrompt: `Analyse the merged diff and identify e2e / user-persona coverage gaps for task ${ctx.task.id}: ${ctx.task.title}. Report gaps only — do not write or modify any files.`,
     cwd: ctx.kshetra.repo.path,
     agentName: 'parikshaka',
     kshetraId: ctx.kshetra.id,
     beadId: ctx.task.id,
-    model: ctx.kshetra.agents.model,
+    model,
     jsonSchema: PARIKSHAKA_OUTPUT_SCHEMA,
     disallowedTools: PARIKSHAKA_DISALLOWED_TOOLS,
     mcp: resolveExecutorMcp(ctx.kshetra, 'parikshaka'),

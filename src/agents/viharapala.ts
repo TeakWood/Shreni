@@ -1,6 +1,7 @@
 import type { AgentContext, SilpiOutput, ViharapalaOutput } from '../sthapathi/types.js';
 import { ParseError } from '../sthapathi/errors.js';
 import { resolveExecutorMcp } from '../kshetra/mcp-connect.js';
+import { resolveAgentModel } from '../kshetra/config.js';
 import { runAgent } from './runner.js';
 // The build-gate command is resolved by the toolchain profile (one home for all
 // ecosystem defaults). Re-exported so callers/tests that reach for it via the
@@ -134,15 +135,16 @@ export async function runViharapala(
   branch = `bead-${context.task.id}/${context.task.slug}`,
   signal?: AbortSignal,
 ): Promise<ViharapalaOutput> {
+  const { provider, model } = resolveAgentModel(context.kshetra, 'viharapala');
   const result = await runAgent({
-    provider: context.kshetra.agents.provider,
+    provider,
     systemPrompt: buildViharapalaSystemPrompt(context, silpiOut, round, roundHistory, branch),
     userPrompt: `Review the implementation on branch ${branch} for task ${context.task.id}: ${context.task.title}.`,
     cwd: context.kshetra.repo.path,
     agentName: 'viharapala',
     kshetraId: context.kshetra.id,
     beadId: context.task.id,
-    model: context.kshetra.agents.model,
+    model,
     jsonSchema: VIHARAPALA_OUTPUT_SCHEMA,
     mcp: resolveExecutorMcp(context.kshetra, 'viharapala'),
     signal,
