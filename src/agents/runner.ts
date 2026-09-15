@@ -3,7 +3,8 @@ import { emit, touchHeartbeat, getCurrentRunId } from '../sthapathi/activity-log
 import { AgentAbortedError, RunNotPermittedError } from '../sthapathi/errors.js';
 import { getUsageMeter, getPolicySource } from '../ext/index.js';
 import { getAdapter } from './providers/index.js';
-import type { AgentRunnerOpts, AgentRunResult, AdapterEmit } from './providers/types.js';
+import { AgentRunError } from './providers/types.js';
+import type { AgentRunnerOpts, AgentRunResult, AdapterEmit, TokenUsage } from './providers/types.js';
 
 export type { AgentRunnerOpts, AgentRunResult };
 export type { Provider } from './providers/types.js';
@@ -81,10 +82,17 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const result = await runAttempt(runOpts);
-      reportUsage(runOpts, result);
+      reportUsage(runOpts, 'ok', result.usage, result.toolCallCount);
       return result;
     } catch (err) {
       lastErr = err as Error;
+      // Record the tokens a failed attempt spent, when the provider surfaced any
+      // (Shreni-beads-1tg). This fires for every failed attempt — including ones
+      // that are about to be retried — so discarded-retry spend is captured too.
+      // Aborts/spawn failures/no-result exits carry no usage and record nothing.
+      if (lastErr instanceof AgentRunError && lastErr.usage) {
+        reportUsage(runOpts, 'error', lastErr.usage, lastErr.toolCallCount);
+      }
       // A self-heal abort is terminal — never retry it (the run is being
       // cancelled on purpose so the worker can RECOVER).
       if (lastErr instanceof AgentAbortedError || runOpts.signal?.aborted) throw lastErr;
@@ -114,13 +122,17 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
 export const runClaudeAgent = runAgent;
 
 // Hand a finalized run's token usage to the UsageMeter, keyed to the same
-// attempt the activity stream is tagged with (kshetra/beadId/runId/agent). The
-// default meter is a no-op, so this is inert locally; an extension may record it.
-// Token fields are 0 when the provider surfaced no usage (e.g. gemini today).
-// Never let metering crash a completed run.
-function reportUsage(opts: AgentRunnerOpts, result: AgentRunResult): void {
+// attempt the activity stream is tagged with (kshetra/beadId/runId/agent).
+// `outcome` marks whether the run succeeded or failed — a failed run still spent
+// its tokens, so it is metered too (Shreni-beads-1tg). Token fields are 0 when
+// the provider surfaced no usage (e.g. gemini). Never let metering crash a run.
+function reportUsage(
+  opts: AgentRunnerOpts,
+  outcome: 'ok' | 'error',
+  usage: TokenUsage | undefined,
+  toolCallCount: number,
+): void {
   try {
-    const u = result.usage;
     getUsageMeter().record({
       kshetra: opts.kshetraId,
       beadId: opts.beadId,
@@ -128,11 +140,12 @@ function reportUsage(opts: AgentRunnerOpts, result: AgentRunResult): void {
       agent: opts.agentName,
       provider: opts.provider,
       model: opts.model,
-      inputTokens: u?.inputTokens ?? 0,
-      outputTokens: u?.outputTokens ?? 0,
-      cacheReadTokens: u?.cacheReadTokens ?? 0,
-      cacheCreationTokens: u?.cacheCreationTokens ?? 0,
-      toolCallCount: result.toolCallCount,
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
+      cacheReadTokens: usage?.cacheReadTokens ?? 0,
+      cacheCreationTokens: usage?.cacheCreationTokens ?? 0,
+      toolCallCount,
+      outcome,
     });
   } catch {
     // A metering failure must never fail an otherwise-successful agent run.

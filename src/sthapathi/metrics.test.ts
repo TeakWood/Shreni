@@ -3,6 +3,7 @@ import { computeMetrics, ESCALATION_EVENT, STUCK_EVENT } from './metrics.js';
 import type { LoggedEvent } from './activity-log.js';
 import type { Notification } from './notifications.js';
 import type { UsageEntry } from '../ext/types.js';
+import { USAGE_SCHEMA_VERSION } from '../ext/types.js';
 
 // --- fixture builders ---
 const K = 'myapp';
@@ -18,8 +19,8 @@ function review(beadId: string, verdict: 'APPROVE' | 'REJECT', round: number): L
 function usage(beadId: string, over: Partial<UsageEntry> = {}): UsageEntry {
   return {
     kshetra: K, beadId, runId: 'r', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
-    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 0,
-    ts: '2026-09-15T00:00:00.000Z', schemaVersion: 1, costUsd: 0, priced: true, ...over,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 0, outcome: 'ok',
+    ts: '2026-09-15T00:00:00.000Z', schemaVersion: USAGE_SCHEMA_VERSION, costUsd: 0, priced: true, ...over,
   };
 }
 function notif(event: string): Notification {

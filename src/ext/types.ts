@@ -43,12 +43,20 @@ export interface UsageRecord {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   toolCallCount: number;
+  // Whether the run that spent these tokens succeeded ('ok') or failed ('error').
+  // Failed/discarded-retry runs still burn real tokens, so they are metered too
+  // (Shreni-beads-1tg) — this field lets a consumer separate productive spend
+  // from spend lost to errors. Entries written before schemaVersion 2 have no
+  // `outcome`; read an absent value as 'ok' (v1 only ever recorded successes).
+  outcome: 'ok' | 'error';
 }
 
 // Bump when the persisted UsageEntry shape changes in a way a consumer must
 // branch on. Independent of the activity log's SCHEMA_VERSION — the two feeds
 // version separately.
-export const USAGE_SCHEMA_VERSION = 1;
+//   v1 → v2: added `outcome` ('ok' | 'error'); v1 entries recorded only
+//            successful runs, so an absent `outcome` reads as 'ok'.
+export const USAGE_SCHEMA_VERSION = 2;
 
 // THE CANONICAL USAGE ENTRY (epic g2k). One of these is appended to
 // ~/.shreni/kshetra/<id>/usage.jsonl per finalized agent run by the default
