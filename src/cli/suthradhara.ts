@@ -13,7 +13,9 @@ import {
 import { listSessions } from '../suthradhara/persistence';
 import { readHandoff, type Handoff } from '../suthradhara/handoff';
 import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-log';
-import type { KshetraConfig } from '../kshetra/config';
+import { getUsageMeter, type UsageMeter } from '../ext/index';
+import { readSessionUsage, type SessionUsage } from '../suthradhara/usage';
+import { resolveAgentModel, type KshetraConfig } from '../kshetra/config';
 
 // Resolve the target Kshetra for a Suthradhara subcommand. Precedence:
 //   1. @<id> as a bare positional token (at-mention)
@@ -185,6 +187,11 @@ export interface PlanningLoopDeps {
   // Lifecycle-event sink (fnd.2). Defaults to the real activity-log emit; tests
   // inject a spy to assert the emitted sequence without touching disk.
   emit?: (ev: ActivityEvent) => void;
+  // Token-usage recording seams (fnd.4). `meter` defaults to the shared
+  // getUsageMeter(); `readUsage` recovers a session's usage from its transcript.
+  // Injected so tests assert one record per session without a real transcript.
+  meter?: UsageMeter;
+  readUsage?: (cwd: string, claudeSessionId: string) => SessionUsage;
 }
 
 export type MenuChoice = 'extend' | 'new' | 'end';
@@ -230,6 +237,9 @@ async function runPlanningLoop(
   const log = deps.log ?? ((m: string) => console.log(m));
   const ask = deps.ask ?? defaultAsk;
   const emit = deps.emit ?? emitActivity;
+  const meter = deps.meter ?? getUsageMeter();
+  const readUsage = deps.readUsage ?? readSessionUsage;
+  const { provider, model } = resolveAgentModel(kshetra, 'suthradhara');
   let current = first;
   // The first session may be a resume (`suthradhara resume`); every relaunch the
   // loop drives (extend/new) is a fresh session, so this flips false after one.
@@ -275,6 +285,34 @@ async function runPlanningLoop(
       kshetra: kshetra.id, sessionId: current.sessionId,
       ...(handoff ? { epicId: handoff.epicId } : {}),
     });
+
+    // Recover token usage from the session transcript and meter it — exactly one
+    // record per session (fresh, extend, new-story alike), through the SAME seam
+    // the executors use. We record even when recovery returns zeros (missing/soft
+    // transcript): the session still happened, so it gets one accounted entry
+    // rather than silently vanishing from spend. beadId is the filed epic id, or
+    // the sessionId when nothing was filed; runId is the pinned claude session id.
+    // Guarded so a metering hiccup never crashes the planning loop.
+    try {
+      const usage = readUsage(current.worktreePath, current.claudeSessionId);
+      meter.record({
+        kshetra: kshetra.id,
+        beadId: handoff?.epicId ?? current.sessionId,
+        runId: current.claudeSessionId,
+        agent: 'suthradhara',
+        provider,
+        model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
+        toolCallCount: usage.toolCallCount,
+        outcome: 'ok',
+      });
+    } catch (err) {
+      log(`suthradhara[${kshetra.id}]: usage metering failed — ${(err as Error).message}`);
+    }
+
     for (const line of renderSummary(kshetra, handoff)) log(line);
 
     let choice: MenuChoice | null = null;

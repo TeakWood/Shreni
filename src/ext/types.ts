@@ -15,8 +15,10 @@
 import type { LoggedEvent } from '../sthapathi/activity-log.js';
 import type { Provider } from '../agents/providers/types.js';
 
-// The three agent roles a run can belong to.
-export type AgentRole = 'silpi' | 'viharapala' | 'parikshaka';
+// The agent roles a metered run can belong to. The three executors, plus the
+// interactive planner 'suthradhara' whose sessions are metered from their
+// transcript (epic fnd). Mirrors AGENT_ROLES in kshetra/config.ts.
+export type AgentRole = 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara';
 
 // An independent consumer of the lifecycle/activity event stream. The core holds
 // an ordered list of these and fans every event out to all of them. handle() may

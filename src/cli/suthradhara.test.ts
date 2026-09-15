@@ -39,13 +39,16 @@ const {
 } = await import('./suthradhara');
 const { writeHandoff } = await import('../suthradhara/handoff');
 
+const AGENTS = { provider: 'anthropic', model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 } as const;
 const KSHETRA_A = {
   id: 'alpha',
   repo: { path: '/projects/alpha', remote: '', mainBranch: 'main', branchPattern: '' },
+  agents: AGENTS,
 } as unknown as KshetraConfig;
 const KSHETRA_B = {
   id: 'beta',
   repo: { path: '/projects/beta', remote: '', mainBranch: 'main', branchPattern: '' },
+  agents: AGENTS,
 } as unknown as KshetraConfig;
 
 const ALPHA_SESSION = 'alpha-20260727T140312-a3f2';
@@ -284,5 +287,82 @@ describe('runPlanningLoop lifecycle events (fnd.2)', () => {
     const events: Array<{ type: string; resume?: boolean }> = [];
     await runPlanningLoop(KSHETRA_A, launched(WT), { ask: async () => '3', log: () => {}, emit: (e) => events.push(e) }, true);
     expect(events[0]).toMatchObject({ type: 'suthradhara_launched', resume: true });
+  });
+});
+
+describe('runPlanningLoop usage recording (fnd.4)', () => {
+  let WT: string;
+  beforeEach(() => { WT = mkdtempSync(join(tmpdir(), 'loop-usage-')); });
+  afterEach(() => { rmSync(WT, { recursive: true, force: true }); });
+
+  const launched = (worktreePath: string) => ({
+    status: 'launched' as const,
+    kshetraId: 'alpha', sessionId: ALPHA_SESSION, claudeSessionId: 'cid',
+    worktreePath, pid: 1, wait: vi.fn().mockResolvedValue(0),
+  });
+
+  const USAGE = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheCreationTokens: 20, toolCallCount: 3 };
+  const noEmit = { emit: () => {}, log: () => {} };
+
+  it('records exactly one usage entry per session with the correct keys', async () => {
+    writeHandoff(WT, { branch: 'suthradhara/sso', epicId: 'e-1', docPath: '.shreni/design/sso.md', summary: 's' });
+    const records: Array<Record<string, unknown>> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), {
+      ...noEmit, ask: async () => '3',
+      meter: { record: (r) => records.push(r) },
+      readUsage: () => ({ ...USAGE }),
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      kshetra: 'alpha', beadId: 'e-1', runId: 'cid', agent: 'suthradhara',
+      provider: 'anthropic', model: 'claude-sonnet-4-6',
+      inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheCreationTokens: 20,
+      toolCallCount: 3, outcome: 'ok',
+    });
+  });
+
+  it('falls back to sessionId as beadId when no handoff was filed', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), {
+      ...noEmit, ask: async () => '3',
+      meter: { record: (r) => records.push(r) },
+      readUsage: () => ({ ...USAGE }),
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0].beadId).toBe(ALPHA_SESSION);
+  });
+
+  it('records one entry per session across an extend -> end run', async () => {
+    writeHandoff(WT, { branch: 'suthradhara/sso', epicId: 'e-1', docPath: '.shreni/design/sso.md', summary: 's' });
+    mockStartSession.mockResolvedValueOnce(launched(WT));
+    const answers = ['1', '3'];
+    const records: Array<Record<string, unknown>> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), {
+      ...noEmit, ask: async () => answers.shift()!,
+      meter: { record: (r) => records.push(r) },
+      readUsage: () => ({ ...USAGE }),
+    });
+    expect(records).toHaveLength(2);
+  });
+
+  it('still records a zero-usage entry when transcript recovery yields zeros', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), {
+      ...noEmit, ask: async () => '3',
+      meter: { record: (r) => records.push(r) },
+      readUsage: () => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 0 }),
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ inputTokens: 0, toolCallCount: 0, agent: 'suthradhara' });
+  });
+
+  it('does not crash the loop when the meter throws', async () => {
+    const logs: string[] = [];
+    await expect(runPlanningLoop(KSHETRA_A, launched(WT), {
+      emit: () => {}, log: (m) => logs.push(m), ask: async () => '3',
+      meter: { record: () => { throw new Error('disk full'); } },
+      readUsage: () => ({ ...USAGE }),
+    })).resolves.toBeUndefined();
+    expect(logs.join('\n')).toContain('usage metering failed');
   });
 });
