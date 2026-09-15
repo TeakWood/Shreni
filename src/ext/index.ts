@@ -18,6 +18,10 @@ export { SinkRegistry } from './sink-registry.js';
 export { localFileSink, fileUsageMeter, noopMeter, staticPolicySource, allEnabledEntitlements } from './defaults.js';
 export { costFor, priceFor, BUILT_IN_PRICES, pricingOverridePath } from './pricing.js';
 export type { ModelPrice, CostResult } from './pricing.js';
+// Spend accounting (ho4.2): sum persisted usage into spend-so-far for a bead /
+// Kshetra. Consumed by the budget mayProceed policy (ho4.3).
+export { computeSpend, readUsageEntries, readSpendSoFar } from './spend.js';
+export type { SpendSoFar } from './spend.js';
 
 // Default sink list = [localFileSink]; default meter = file (persists a
 // UsageEntry per run to the Kshetra's usage.jsonl); default policy = static
