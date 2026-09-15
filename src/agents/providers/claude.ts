@@ -1,5 +1,5 @@
 import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser, TokenUsage } from './types.js';
-import { resolveBin, toolDetail } from './types.js';
+import { resolveBin, toolDetail, AgentRunError } from './types.js';
 
 // The `result` message's usage block. Anthropic reports cache tokens as separate
 // creation/read counters; input_tokens excludes the cached reads.
@@ -129,7 +129,13 @@ export const claudeAdapter: ProviderAdapter = {
       finalize(exitCode: number | null, stderrTail: string) {
         if (resultMsg) {
           if (resultMsg.is_error) {
-            throw new Error(`${opts.agentName}: agent returned error — ${resultMsg.result ?? '(no message)'}`);
+            // The errored result still carries a usage block — real tokens were
+            // spent, so surface them on the error for the dispatcher to record.
+            throw new AgentRunError(
+              `${opts.agentName}: agent returned error — ${resultMsg.result ?? '(no message)'}`,
+              resultMsg.usage,
+              toolCallCount,
+            );
           }
           return {
             structuredOutput: resultMsg.structured_output,
@@ -138,9 +144,12 @@ export const claudeAdapter: ProviderAdapter = {
             usage: resultMsg.usage,
           };
         }
-        throw new Error(
+        // No result message: the provider surfaced no usage, so none is attached.
+        throw new AgentRunError(
           `${opts.agentName}: process exited with code ${exitCode ?? '?'} without a result message` +
             (stderrTail ? ` — stderr: ${stderrTail}` : ''),
+          undefined,
+          toolCallCount,
         );
       },
     };

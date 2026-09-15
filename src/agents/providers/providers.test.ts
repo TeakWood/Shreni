@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getAdapter } from './index.js';
-import { extractLastJsonObject, toolDetail } from './types.js';
+import { extractLastJsonObject, toolDetail, AgentRunError } from './types.js';
 import { claudeAdapter } from './claude.js';
 import { geminiAdapter } from './gemini.js';
 import { codexAdapter } from './codex.js';
@@ -199,17 +199,38 @@ describe('claudeAdapter parser', () => {
     expect(tools).toEqual([{ tool: 'Bash', detail: 'pnpm test' }]);
   });
 
-  it('throws when the result message reports an error', () => {
+  it('throws AgentRunError carrying the errored run’s usage (Shreni-beads-1tg)', () => {
     const { emit } = recordingEmit();
     const parser = claudeAdapter.createParser(BASE_OPTS, emit);
-    parser.onLine(JSON.stringify({ type: 'result', is_error: true, result: 'boom' }));
-    expect(() => parser.finalize(1, '')).toThrow('agent returned error');
+    parser.onLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } }));
+    parser.onLine(JSON.stringify({
+      type: 'result', is_error: true, result: 'boom',
+      usage: { input_tokens: 70, output_tokens: 12, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }));
+    try {
+      parser.finalize(1, '');
+      expect.unreachable('finalize should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AgentRunError);
+      expect((err as Error).message).toContain('agent returned error');
+      expect((err as InstanceType<typeof AgentRunError>).usage).toEqual({
+        inputTokens: 70, outputTokens: 12, cacheReadTokens: 0, cacheCreationTokens: 0,
+      });
+      expect((err as InstanceType<typeof AgentRunError>).toolCallCount).toBe(1);
+    }
   });
 
-  it('throws when no result message arrives', () => {
+  it('throws AgentRunError with no usage when no result message arrives', () => {
     const { emit } = recordingEmit();
     const parser = claudeAdapter.createParser(BASE_OPTS, emit);
-    expect(() => parser.finalize(1, 'stderr tail')).toThrow('without a result message');
+    try {
+      parser.finalize(1, 'stderr tail');
+      expect.unreachable('finalize should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AgentRunError);
+      expect((err as Error).message).toContain('without a result message');
+      expect((err as InstanceType<typeof AgentRunError>).usage).toBeUndefined();
+    }
   });
 
   it('surfaces token usage from the result message', () => {

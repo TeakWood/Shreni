@@ -3,6 +3,7 @@ import type { KshetraConfig } from '../kshetra/config';
 import { computeMetrics } from '../sthapathi/metrics';
 import type { LoggedEvent } from '../sthapathi/activity-log';
 import type { UsageEntry } from '../ext/types';
+import { USAGE_SCHEMA_VERSION } from '../ext/types';
 
 // ── module mocks (feeds live under homedir; mock the readers so the renderer +
 //    resolution are exercised without touching the real ~/.shreni tree) ──────
@@ -35,8 +36,8 @@ function review(beadId: string, verdict: 'APPROVE' | 'REJECT', round: number): L
 function usage(beadId: string, over: Partial<UsageEntry> = {}): UsageEntry {
   return {
     kshetra: K, beadId, runId: 'r', agent: 'silpi', provider: 'anthropic', model: 'm',
-    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 0,
-    ts: '2026-09-15T00:00:00.000Z', schemaVersion: 1, costUsd: 0, priced: true, ...over,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 0, outcome: 'ok',
+    ts: '2026-09-15T00:00:00.000Z', schemaVersion: USAGE_SCHEMA_VERSION, costUsd: 0, priced: true, ...over,
   };
 }
 

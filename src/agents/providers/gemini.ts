@@ -1,5 +1,5 @@
 import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser } from './types.js';
-import { extractLastJsonObject, resolveBin } from './types.js';
+import { extractLastJsonObject, resolveBin, AgentRunError } from './types.js';
 
 // Google — the `gemini` CLI in non-interactive (headless) mode.
 //   gemini -m <model> -y -o json -p "<prompt>"
@@ -62,7 +62,8 @@ export const geminiAdapter: ProviderAdapter = {
         // can inspect the message (rate limit / overloaded / etc.).
         if (wrapper && wrapper.error) {
           const message = typeof wrapper.error.message === 'string' ? wrapper.error.message : 'unknown error';
-          throw new Error(`${opts.agentName}: gemini error — ${message}`);
+          // gemini surfaces no usage block (see note below), so none is attached.
+          throw new AgentRunError(`${opts.agentName}: gemini error — ${message}`);
         }
 
         // json mode wraps the answer under `response`; if absent, fall back to
@@ -73,7 +74,7 @@ export const geminiAdapter: ProviderAdapter = {
         const structuredOutput = extractLastJsonObject(responseText);
 
         if (structuredOutput == null && exitCode !== 0) {
-          throw new Error(
+          throw new AgentRunError(
             `${opts.agentName}: gemini exited with code ${exitCode ?? '?'} and no parseable JSON` +
               (stderrTail ? ` — stderr: ${stderrTail}` : ''),
           );

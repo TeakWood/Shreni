@@ -1,5 +1,5 @@
 import type { AgentRunnerOpts, AdapterEmit, ProviderAdapter, StreamParser, TokenUsage } from './types.js';
-import { extractLastJsonObject, resolveBin, toolDetail } from './types.js';
+import { extractLastJsonObject, resolveBin, toolDetail, AgentRunError } from './types.js';
 
 // The `turn.completed` event's usage block. codex reports cached input as a
 // single `cached_input_tokens` (a read-side cache); there is no creation counter.
@@ -127,17 +127,21 @@ export const codexAdapter: ProviderAdapter = {
 
       finalize(exitCode: number | null, stderrTail: string) {
         // Surface codex errors so the dispatcher's transient-retry logic can act
-        // on rate-limit / overloaded / 5xx messages.
+        // on rate-limit / overloaded / 5xx messages. `turn.completed` may have
+        // already reported usage before the error item — carry it on the error so
+        // the dispatcher records the tokens the failed turn spent.
         if (errorMessage) {
-          throw new Error(`${opts.agentName}: codex error — ${errorMessage}`);
+          throw new AgentRunError(`${opts.agentName}: codex error — ${errorMessage}`, usage, toolCallCount);
         }
 
         const structuredOutput = extractLastJsonObject(lastAssistantText ?? '');
 
         if (structuredOutput == null && exitCode !== 0) {
-          throw new Error(
+          throw new AgentRunError(
             `${opts.agentName}: codex exited with code ${exitCode ?? '?'} and no parseable JSON` +
               (stderrTail ? ` — stderr: ${stderrTail}` : ''),
+            usage,
+            toolCallCount,
           );
         }
 

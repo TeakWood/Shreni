@@ -49,6 +49,25 @@ export interface AgentRunResult {
   usage?: TokenUsage;
 }
 
+// Thrown by a parser's finalize() on an agent/transport error, carrying any
+// token usage the provider surfaced BEFORE it failed (e.g. claude's `result`
+// message with `is_error: true` still reports a usage block; codex reports usage
+// on `turn.completed` even when a later item errors). The dispatcher records this
+// usage against the failed attempt so real spend on errored/discarded runs is
+// not lost (Shreni-beads-1tg). `usage` is absent when the provider surfaced no
+// counts (no result message, spawn failure, gemini) — those runs are excluded
+// from metering because their token cost is genuinely unknown.
+export class AgentRunError extends Error {
+  constructor(
+    message: string,
+    public readonly usage?: TokenUsage,
+    public readonly toolCallCount = 0,
+  ) {
+    super(message);
+    this.name = 'AgentRunError';
+  }
+}
+
 // How a provider's CLI should be spawned. cwd/stdio are handled by the dispatcher.
 export interface SpawnSpec {
   bin: string;

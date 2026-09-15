@@ -25,6 +25,23 @@ vi.mock('../ext/index.js', () => ({
 
 const { runAgent } = await import('./runner');
 const { AgentAbortedError, RunNotPermittedError } = await import('../sthapathi/errors');
+const { AgentRunError } = await import('./providers/types');
+
+// Spawns `true` (exits 0) but the parser's finalize throws — models a run the
+// provider reported as errored. `usage` is the token block the provider surfaced
+// before failing (undefined when it surfaced none, e.g. a no-result exit).
+function failAdapter(usage: unknown, message = 'silpi: agent returned error — boom', toolCallCount = 2) {
+  return {
+    name: 'anthropic' as const,
+    buildSpawn: () => ({ bin: 'true', args: [] }),
+    createParser: () => ({
+      onLine: () => {},
+      finalize: () => {
+        throw new AgentRunError(message, usage as undefined, toolCallCount);
+      },
+    }),
+  };
+}
 
 function sleepAdapter(seconds: number) {
   return {
@@ -86,6 +103,7 @@ describe('runAgent usage metering', () => {
     expect(rec).toMatchObject({
       kshetra: 'myapp', beadId: 'bd-1', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
       inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheCreationTokens: 2, toolCallCount: 3,
+      outcome: 'ok',
     });
     expect(typeof rec.runId).toBe('string');
   });
@@ -96,7 +114,38 @@ describe('runAgent usage metering', () => {
     await runAgent(OPTS());
     expect(mockRecord.mock.calls[0][0]).toMatchObject({
       inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 1,
+      outcome: 'ok',
     });
+  });
+
+  it('meters a failed run’s tokens as outcome:error, then rejects (Shreni-beads-1tg)', async () => {
+    mockRecord.mockClear();
+    // A non-transient error message so the loop records once and breaks (no retry backoff).
+    mockGetAdapter.mockReturnValue(failAdapter({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 3, cacheCreationTokens: 1 }));
+    await expect(runAgent(OPTS())).rejects.toBeInstanceOf(AgentRunError);
+    expect(mockRecord).toHaveBeenCalledOnce();
+    expect(mockRecord.mock.calls[0][0]).toMatchObject({
+      kshetra: 'myapp', beadId: 'bd-1', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      inputTokens: 50, outputTokens: 10, cacheReadTokens: 3, cacheCreationTokens: 1, toolCallCount: 2,
+      outcome: 'error',
+    });
+  });
+
+  it('records nothing when a failed run surfaced no usage (no-result exit)', async () => {
+    mockRecord.mockClear();
+    mockGetAdapter.mockReturnValue(failAdapter(undefined));
+    await expect(runAgent(OPTS())).rejects.toBeInstanceOf(AgentRunError);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when a run is aborted', async () => {
+    mockRecord.mockClear();
+    mockGetAdapter.mockReturnValue(sleepAdapter(30));
+    const controller = new AbortController();
+    const p = runAgent(OPTS(controller.signal));
+    setTimeout(() => controller.abort(), 50);
+    await expect(p).rejects.toBeInstanceOf(AgentAbortedError);
+    expect(mockRecord).not.toHaveBeenCalled();
   });
 });
 

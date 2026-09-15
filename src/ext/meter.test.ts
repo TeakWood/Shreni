@@ -20,7 +20,7 @@ function record(over: Partial<UsageRecord> = {}): UsageRecord {
     kshetra: 'myapp', beadId: 'b-1', runId: 'r-1', agent: 'silpi',
     provider: 'anthropic', model: 'claude-sonnet-4-6',
     inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
-    toolCallCount: 3, ...over,
+    toolCallCount: 3, outcome: 'ok', ...over,
   };
 }
 
