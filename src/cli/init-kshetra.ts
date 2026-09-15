@@ -449,6 +449,37 @@ export async function promptGates(): Promise<GatesConfig> {
   };
 }
 
+// Interactive choice of repo.mergePolicy (wax). 'push' squash-merges approved
+// work straight to main; 'pr' opens a PR and defers the merge to the operator.
+// Consequential enough to choose consciously rather than inherit by omission, so
+// the interview asks (TTY-only, mirroring promptGateLevel). Default is 'push'.
+export async function promptMergePolicy(): Promise<'push' | 'pr'> {
+  const answer = (
+    await promptLine(
+      '\nMerge policy — push squash-merges to main on approval; pr opens a PR and defers the merge to you.\n' +
+      '  merge policy [push/pr] (default push): ',
+    )
+  ).trim().toLowerCase();
+  if (answer === 'push' || answer === 'pr') return answer;
+  if (answer) console.warn(`  ⚠ "${answer}" is not push|pr — keeping push.`);
+  return 'push';
+}
+
+// Resolve the effective mergePolicy for init (wax): an explicit --merge-policy
+// flag always wins and skips the prompt; otherwise ask on an interactive TTY; a
+// non-TTY / scripted / dry-run keeps today's behaviour (undefined = the silent
+// 'push' default that generateKshetraYaml omits from the yaml). `prompt` is
+// injectable for testing.
+export async function resolveMergePolicy(
+  flag: 'push' | 'pr' | undefined,
+  ctx: { isTTY: boolean; dryRun?: boolean },
+  prompt: () => Promise<'push' | 'pr'> = promptMergePolicy,
+): Promise<'push' | 'pr' | undefined> {
+  if (flag) return flag;
+  if (ctx.isTTY && !ctx.dryRun) return prompt();
+  return undefined;
+}
+
 async function promptLine(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -867,9 +898,16 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
       }
     }
   }
+  // repo.mergePolicy (wax): flag wins, else prompt on a TTY, else silent default.
+  const mergePolicy = await resolveMergePolicy(opts.mergePolicy, {
+    isTTY: Boolean(process.stdin.isTTY),
+    dryRun: opts.dryRun,
+  });
+
   if (opts.dryRun) {
     console.log('\n--dry-run — plan only, nothing written:');
     console.log(`  provider:    ${providerLabel}`);
+    console.log(`  mergePolicy: ${mergePolicy ?? 'push'}${mergePolicy ? '' : ' (default)'}`);
     console.log(`  repo:        ${repoPath}`);
     console.log(`  beads repo:  ${beadsPath}`);
     console.log(`  config:      ${configTarget}`);
@@ -960,7 +998,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           pack: pack ? `${pack.name}@${pack.version}` : undefined,
           conventions,
           agents,
-          mergePolicy: opts.mergePolicy,
+          mergePolicy,
           gates,
         });
         configPath = writeKshetraConfig(repoPath, yamlContent);

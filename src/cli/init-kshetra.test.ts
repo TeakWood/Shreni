@@ -69,6 +69,12 @@ vi.mock('./provider-preflight', () => ({
   commandExists: (bin: string) => mockCommandExists(bin),
 }));
 
+// readline: feed a canned answer to the interactive prompts (promptMergePolicy).
+const mockQuestion = vi.fn<(q: string, cb: (a: string) => void) => void>();
+vi.mock('readline', () => ({
+  createInterface: () => ({ question: mockQuestion, close: vi.fn() }),
+}));
+
 // ── imports after mocks ───────────────────────────────────────────────────────
 
 const {
@@ -95,6 +101,8 @@ const {
   registerWithSthapathi,
   resolveAgents,
   initKshetra,
+  promptMergePolicy,
+  resolveMergePolicy,
   SHRENI_SECTION,
 } = await import('./init-kshetra');
 
@@ -1286,5 +1294,63 @@ describe('initKshetra', () => {
     expect(mockSymlinkSync).not.toHaveBeenCalled();
     // Config re-written and re-registered (idempotent, single source of truth).
     expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', expect.stringContaining('kshetra.yaml'));
+  });
+});
+describe('promptMergePolicy (wax)', () => {
+  const answer = (a: string) => mockQuestion.mockImplementation((_q, cb) => cb(a));
+
+  it('returns pr when the operator types pr', async () => {
+    answer('pr');
+    expect(await promptMergePolicy()).toBe('pr');
+  });
+
+  it('returns push when the operator types push', async () => {
+    answer('push');
+    expect(await promptMergePolicy()).toBe('push');
+  });
+
+  it('defaults to push on an empty answer', async () => {
+    answer('');
+    expect(await promptMergePolicy()).toBe('push');
+  });
+
+  it('is case-insensitive', async () => {
+    answer('PR');
+    expect(await promptMergePolicy()).toBe('pr');
+  });
+
+  it('warns and keeps push on an unrecognised answer', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    answer('maybe');
+    expect(await promptMergePolicy()).toBe('push');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe('resolveMergePolicy (wax)', () => {
+  it('honours an explicit flag and never prompts', async () => {
+    const prompt = vi.fn(async () => 'pr' as const);
+    expect(await resolveMergePolicy('pr', { isTTY: true }, prompt)).toBe('pr');
+    expect(await resolveMergePolicy('push', { isTTY: true }, prompt)).toBe('push');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it('prompts on an interactive TTY when no flag is given', async () => {
+    const prompt = vi.fn(async () => 'pr' as const);
+    expect(await resolveMergePolicy(undefined, { isTTY: true }, prompt)).toBe('pr');
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns undefined (silent push default) on a non-TTY run, without prompting', async () => {
+    const prompt = vi.fn(async () => 'pr' as const);
+    expect(await resolveMergePolicy(undefined, { isTTY: false }, prompt)).toBeUndefined();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it('does not prompt during a dry-run even on a TTY', async () => {
+    const prompt = vi.fn(async () => 'pr' as const);
+    expect(await resolveMergePolicy(undefined, { isTTY: true, dryRun: true }, prompt)).toBeUndefined();
+    expect(prompt).not.toHaveBeenCalled();
   });
 });
