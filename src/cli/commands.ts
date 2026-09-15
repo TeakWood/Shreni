@@ -25,6 +25,7 @@ import { startPhalaka, stopPhalaka, statusPhalaka } from './phalaka';
 import { autoStartPhalaka, autoStopPhalaka } from './phalaka-autostart';
 import { runSuthradhara } from './suthradhara';
 import { runTail } from './tail';
+import { runReport } from './report';
 import { runInit } from './init';
 import { runTelemetry } from './telemetry';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -348,6 +349,18 @@ export const COMMANDS: Command[] = [
     usage: '[--kshetra <id>] [--all]',
     run(ctx) {
       runTail({ kshetraId: ctx.flag('--kshetra'), all: ctx.has('--all') });
+    },
+  },
+  {
+    name: 'report',
+    summary: 'Print a terminal table of run metrics (tasks, review quality, tokens, cost) for a kshetra',
+    usage: '[@<id> | --kshetra <id>]',
+    run(ctx) {
+      return runReport({
+        args: ctx.args,
+        flagKshetra: ctx.flag('--kshetra'),
+        cwd: process.cwd(),
+      });
     },
   },
   {
