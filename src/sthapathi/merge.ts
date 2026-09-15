@@ -10,6 +10,7 @@ import { notifyOperator } from './errors.js';
 import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
 import { regenerateRepoMapAsync } from '../kshetra/repo-map.js';
 import { getEntitlements } from '../ext/index.js';
+import { emit } from './activity-log.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 import {
   resolvePrFollowup,
@@ -218,6 +219,12 @@ export async function squashMergeAndClose(
   await g.commit(buildCommitMessage(task, output));
   await g.push('origin', main);
 
+  // Decision-grade (4a2.2): the approved work landed on main. Record the merge
+  // policy used and the squash commit SHA — the provenance of what was merged and
+  // how. Emitted while the claiming task's runId is still current, so the entry
+  // correlates to the run that produced the work.
+  emit({ type: 'merge_done', kshetra: kshetra.id, beadId: task.id, mergePolicy: 'push', sha: await g.headSha() });
+
   // Refresh the cached repo/symbol map (Shreni-beads-vcz) now that main has new
   // structure — fire-and-forget so it never blocks the loop; the next bead's
   // cold start reads the fresher map.
@@ -281,6 +288,20 @@ export async function openPrAndDefer(
 
   await bdClient.addNote(task.id, `PR opened (awaiting merge): ${url}`);
   await bdClient.addLabel(task.id, AWAITING_MERGE_LABEL);
+
+  // Decision-grade (4a2.2): under mergePolicy 'pr' the landing decision is "open
+  // PR #N and defer". Record it here — while the run's runId is still current —
+  // with the PR number parsed from the gh URL. (The subsequent human merge is
+  // reconciled later, outside the run, where the runId would be stale.)
+  const prNumber = Number(url.match(/\/(\d+)(?:[/?#].*)?$/)?.[1]);
+  emit({
+    type: 'merge_done',
+    kshetra: kshetra.id,
+    beadId: task.id,
+    mergePolicy: 'pr',
+    ...(Number.isInteger(prNumber) ? { pr: prNumber } : {}),
+  });
+
   await syncBeads(kshetra);
   // The bead branch is deliberately NOT deleted — the open PR needs it. It is
   // dropped when the PR merges (reconcilePullRequests). Parikshaka is likewise

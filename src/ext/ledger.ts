@@ -75,6 +75,10 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     case 'silpi_done':
     case 'viharapala_done':
     case 'task_done':
+    case 'run_started':
+    case 'policy_decision':
+    case 'gate_result':
+    case 'merge_done':
       return true;
     case 'round_start':
     case 'agent_text':
@@ -112,6 +116,16 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     case 'viharapala_done':
     case 'task_done':
       return 'agent';
+    // Operator-facing execution detail (4a2.2): model routing, the go/no-go
+    // decision, and gate outcomes. Useful to a human at the console, too
+    // internal/noisy to fold into an agent's bounded context.
+    case 'run_started':
+    case 'policy_decision':
+    case 'gate_result':
+      return 'operator';
+    // Pure provenance — what landed on main and how. An accountability record.
+    case 'merge_done':
+      return 'audit';
     // Non-decision kinds. They never reach ledger.jsonl (isDecisionGrade filters
     // them at the sink), but are classified so this switch stays exhaustive over
     // the whole LoggedEvent union. Audit-only, the most restrictive audience.

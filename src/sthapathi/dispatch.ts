@@ -224,6 +224,21 @@ export async function runSilpiViharapalaLoop(
       testsPassed: health.green,
     });
 
+    // Decision-grade (4a2.2): one gate_result per gate at the point the gate
+    // verdict is decided. A blocking failure is 'fail', a non-blocking warn-level
+    // failure is 'warn', a pass is 'pass'. The gate's raw output is NOT inlined —
+    // it is referenced by this event's runId into the run log.
+    for (const g of gates.results) {
+      emit({
+        type: 'gate_result',
+        kshetra: kshetra.id,
+        beadId: task.id,
+        round,
+        gate: g.gate,
+        verdict: g.passed ? 'pass' : g.level === 'block' ? 'fail' : 'warn',
+      });
+    }
+
     for (const insight of silpiOut.insights) {
       await bdClient.remember(insight);
     }

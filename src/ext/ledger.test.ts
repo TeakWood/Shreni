@@ -29,6 +29,13 @@ describe('isDecisionGrade', () => {
     expect(isDecisionGrade(ev({ type: 'task_done', beadId: 'b1' } as LoggedEvent))).toBe(true);
   });
 
+  it('accepts the new decision-grade kinds (4a2.2)', () => {
+    expect(isDecisionGrade(ev({ type: 'run_started', beadId: 'b1' } as LoggedEvent))).toBe(true);
+    expect(isDecisionGrade(ev({ type: 'policy_decision', beadId: 'b1' } as LoggedEvent))).toBe(true);
+    expect(isDecisionGrade(ev({ type: 'gate_result', beadId: 'b1' } as LoggedEvent))).toBe(true);
+    expect(isDecisionGrade(ev({ type: 'merge_done', beadId: 'b1' } as LoggedEvent))).toBe(true);
+  });
+
   it('rejects the high-volume run-log tier', () => {
     expect(isDecisionGrade(ev({ type: 'agent_text', beadId: 'b1' } as LoggedEvent))).toBe(false);
     expect(isDecisionGrade(ev({ type: 'agent_tool_call', beadId: 'b1' } as LoggedEvent))).toBe(false);
@@ -48,6 +55,13 @@ describe('audienceFor', () => {
     for (const kind of ['task_claimed', 'silpi_done', 'viharapala_done', 'task_done'] as const) {
       expect(audienceFor(kind)).toBe<LedgerAudience>('agent');
     }
+  });
+
+  it('classifies the new decision-grade kinds by audience (4a2.2)', () => {
+    for (const kind of ['run_started', 'policy_decision', 'gate_result'] as const) {
+      expect(audienceFor(kind)).toBe<LedgerAudience>('operator');
+    }
+    expect(audienceFor('merge_done')).toBe<LedgerAudience>('audit');
   });
 
   it('classifies non-decision kinds as audit-only (most restrictive)', () => {

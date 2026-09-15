@@ -1,10 +1,32 @@
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
 import { emit, touchHeartbeat, getCurrentRunId } from '../sthapathi/activity-log.js';
 import { AgentAbortedError, RunNotPermittedError } from '../sthapathi/errors.js';
 import { getUsageMeter, getPolicySource } from '../ext/index.js';
+import type { ModelSelection } from '../ext/index.js';
 import { getAdapter } from './providers/index.js';
 import { AgentRunError } from './providers/types.js';
 import type { AgentRunnerOpts, AgentRunResult, AdapterEmit, TokenUsage } from './providers/types.js';
+
+// Fingerprint the exact inputs a run was dispatched with, for the run_started
+// ledger entry (4a2.2). A stable SHA-256 over the resolved provider/model, the
+// agent, both prompts, and the tool/MCP surface — the "manifest" of what the
+// agent was asked to do. Same inputs → same hash, so two runs are comparable and
+// a run is reproducible; a prompt or model change moves the hash. Field order is
+// fixed (JSON.stringify of an object literal preserves insertion order) so the
+// digest is deterministic. Cheap: one hash of already-in-memory strings.
+function manifestHashFor(opts: AgentRunnerOpts, selection: ModelSelection): string {
+  const manifest = JSON.stringify({
+    provider: selection.provider,
+    model: selection.model,
+    agent: opts.agentName,
+    systemPrompt: opts.systemPrompt,
+    userPrompt: opts.userPrompt,
+    disallowedTools: opts.disallowedTools ?? [],
+    mcp: opts.mcp?.configPaths ?? [],
+  });
+  return createHash('sha256').update(manifest).digest('hex');
+}
 
 export type { AgentRunnerOpts, AgentRunResult };
 export type { Provider } from './providers/types.js';
@@ -65,6 +87,18 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
     agent: opts.agentName,
     default: { provider: opts.provider, model: opts.model },
   });
+  // Decision-grade (4a2.2): record the model-routing decision at the site it
+  // resolves. Under the default static policy this simply echoes kshetra.yaml,
+  // but an extension policy may route per bead — the ledger captures which.
+  emit({
+    type: 'policy_decision',
+    kshetra: opts.kshetraId,
+    beadId: opts.beadId,
+    agent: opts.agentName,
+    policy: 'selectModel',
+    provider: selection.provider,
+    model: selection.model,
+  });
   const decision = policy.mayProceed({
     kshetra: opts.kshetraId,
     beadId: opts.beadId,
@@ -72,7 +106,32 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
     provider: selection.provider,
     model: selection.model,
   });
+  // Record the go/no-go decision — including a denial, before it throws — so the
+  // ledger shows a blocked run and why it was blocked, not just its absence.
+  emit({
+    type: 'policy_decision',
+    kshetra: opts.kshetraId,
+    beadId: opts.beadId,
+    agent: opts.agentName,
+    policy: 'mayProceed',
+    allowed: decision.allowed,
+    ...(decision.allowed ? {} : { reason: decision.reason }),
+  });
   if (!decision.allowed) throw new RunNotPermittedError(opts.agentName, decision.reason);
+
+  // The run is permitted and about to begin. run_started fingerprints the exact
+  // inputs (prompts + provider/model/tools) so the run is reproducible and two
+  // runs are comparable; the per-token stream lands in activity.jsonl under the
+  // same runId. Emitted only after mayProceed allows — a denied run never starts.
+  emit({
+    type: 'run_started',
+    kshetra: opts.kshetraId,
+    beadId: opts.beadId,
+    agent: opts.agentName,
+    provider: selection.provider,
+    model: selection.model,
+    manifestHash: manifestHashFor(opts, selection),
+  });
 
   // The effective run uses the policy-selected provider/model (identical to
   // opts under the default policy). Retry/backoff/failover stay here.

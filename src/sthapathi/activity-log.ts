@@ -14,6 +14,28 @@ export type ActivityEvent =
   | { type: 'task_done';        kshetra: string; beadId: string; title: string; approved: boolean; rounds: number }
   | { type: 'beads_synced';     kshetra: string }
   | { type: 'error';            kshetra: string; beadId?: string; message: string }
+  // Decision-grade kinds the ledger needs (epic 4a2.2). Purely ADDITIVE — every
+  // existing consumer (tail, report, phalaka, metrics) switches on the type
+  // discriminant with a default/filter, so these do not affect them. They are
+  // emitted at the site where the decision actually happens (runner/dispatch/merge)
+  // and folded into ledger.jsonl by ledgerSink (4a2.3). Evidence is REFERENCED by
+  // the envelope's runId into activity.jsonl, never inlined here.
+  //
+  // run_started: a permitted agent run begins. `manifestHash` fingerprints the
+  // exact run inputs (prompts + provider/model/tools) so two runs are comparable
+  // and a run is reproducible; the per-token stream lives in activity.jsonl under
+  // the same runId.
+  | { type: 'run_started';      kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; manifestHash: string }
+  // policy_decision: one PolicySource call and its resolved answer. `policy` names
+  // which call — 'selectModel' carries the resolved provider/model; 'mayProceed'
+  // carries allow/deny + reason.
+  | { type: 'policy_decision';  kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; policy: 'selectModel' | 'mayProceed'; provider?: string; model?: string; allowed?: boolean; reason?: string }
+  // gate_result: one gate's verdict for a round. The gate's raw output is NOT
+  // inlined — it is referenced by the envelope's runId into the run log.
+  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' }
+  // merge_done: approved work landed (or a PR was opened to land it). `sha` is the
+  // squash commit for mergePolicy 'push'; `pr` is the PR number for 'pr'.
+  | { type: 'merge_done';       kshetra: string; beadId: string; mergePolicy: 'push' | 'pr'; sha?: string; pr?: number }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are

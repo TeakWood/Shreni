@@ -9,6 +9,7 @@ const mockMerge = vi.fn<(...args: string[]) => Promise<void>>();
 const mockCommit = vi.fn<(message: string, ...args: string[]) => Promise<void>>();
 const mockPush = vi.fn<(...args: string[]) => Promise<void>>();
 const mockDeleteBranch = vi.fn<(branch: string) => Promise<void>>();
+const mockHeadSha = vi.fn<(ref?: string) => Promise<string>>();
 const mockClose = vi.fn<() => Promise<string>>();
 const mockSyncBeads = vi.fn<() => Promise<void>>();
 
@@ -19,8 +20,14 @@ vi.mock('./git.js', () => ({
     commit: mockCommit,
     push: mockPush,
     deleteBranch: mockDeleteBranch,
+    headSha: mockHeadSha,
   })),
 }));
+
+// Keep the merge_done activity emit (4a2.2) hermetic — don't fan out to the real
+// sink registry (which would write to ~/.shreni) during this unit test.
+const mockEmit = vi.fn();
+vi.mock('./activity-log.js', () => ({ emit: mockEmit }));
 
 vi.mock('./beads.js', () => ({
   bd: vi.fn(() => ({ close: mockClose })),
@@ -84,6 +91,7 @@ beforeEach(() => {
   mockCommit.mockResolvedValue(undefined);
   mockPush.mockResolvedValue(undefined);
   mockDeleteBranch.mockResolvedValue(undefined);
+  mockHeadSha.mockResolvedValue('deadbeefcafe');
   mockClose.mockResolvedValue('');
   mockSyncBeads.mockResolvedValue(undefined);
   mockDispatchParikshakaAsync.mockImplementation(() => {});
@@ -106,6 +114,17 @@ describe('squashMergeAndClose', () => {
   it('merges the task branch with --squash', async () => {
     await squashMergeAndClose(TASK, KSHETRA, OUTPUT);
     expect(mockMerge).toHaveBeenCalledWith('--squash', 'bead-proj-42/fix-auth');
+  });
+
+  it('emits a merge_done ledger event with the push policy and squash SHA (4a2.2)', async () => {
+    await squashMergeAndClose(TASK, KSHETRA, OUTPUT);
+    expect(mockEmit).toHaveBeenCalledWith({
+      type: 'merge_done',
+      kshetra: 'myapp',
+      beadId: 'proj-42',
+      mergePolicy: 'push',
+      sha: 'deadbeefcafe',
+    });
   });
 
   it('commits after merging', async () => {
