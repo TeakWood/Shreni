@@ -161,6 +161,15 @@ async function doSyncBeads(kshetra: KshetraConfig): Promise<void> {
 
   const g = git(kshetra.beads.path);
 
+  // `add -A` stages every change in the beads repo working tree — issues.jsonl,
+  // and now the decision ledger (ledger.jsonl, epic 4a2). The ledgerSink (4a2.3)
+  // writes ledger.jsonl to this same directory (join(kshetra.beads.path,
+  // 'ledger.jsonl')), so it rides along in this ONE commit per sync — not one
+  // commit per appended entry. This is the ledger's only durability path: the
+  // beads repo is the sole git-tracked, pushed store, and ledger.jsonl must never
+  // be gitignored here (the bd-managed .gitignore ignores interactions.jsonl but
+  // not ledger.jsonl — see the 4a2.4 sync test). commit() is a no-op when the
+  // tree is clean, so a sync with no new entries produces no spurious commit.
   await g.add('-A');
   await g.commit(`shreni: sync ${new Date().toISOString()}`);
 
