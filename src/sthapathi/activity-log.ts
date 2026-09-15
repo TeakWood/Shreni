@@ -31,8 +31,11 @@ export type ActivityEvent =
   // carries allow/deny + reason.
   | { type: 'policy_decision';  kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; policy: 'selectModel' | 'mayProceed'; provider?: string; model?: string; allowed?: boolean; reason?: string }
   // gate_result: one gate's verdict for a round. The gate's raw output is NOT
-  // inlined — it is referenced by the envelope's runId into the run log.
-  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' }
+  // inlined — it is referenced by the envelope's runId into the run log. 'skip'
+  // is distinct from 'pass' (4a2.10): a gate with no configured command (coverage,
+  // lint) or an unmeasurable one (diffSize) DID NOT RUN — recording it as a
+  // genuine pass would mislead a reader of the git-tracked ledger years later.
+  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' | 'skip' }
   // merge_done: approved work landed (or a PR was opened to land it). `sha` is the
   // squash commit for mergePolicy 'push'; `pr` is the PR number for 'pr'.
   | { type: 'merge_done';       kshetra: string; beadId: string; mergePolicy: 'push' | 'pr'; sha?: string; pr?: number }

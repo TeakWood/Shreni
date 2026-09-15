@@ -13,7 +13,7 @@ import { createTaskBranch, branchName } from './branch.js';
 import { squashMergeAndClose, openPrAndDefer, resolveMergePolicy } from './merge.js';
 import { isHealthBead, measureHealth } from './health.js';
 import { runLintGate } from './lint.js';
-import { evaluateGates } from './gates.js';
+import { evaluateGates, type GateResult } from './gates.js';
 import { recordProgress, setHealthBaseline } from '../kshetra/state.js';
 import { loadRepoMap } from '../kshetra/repo-map.js';
 import { AgentAbortedError } from './errors.js';
@@ -37,6 +37,18 @@ async function readFileOptional(filePath: string): Promise<string> {
 
 async function loadUniversalSkills(): Promise<string> {
   return readFileOptional(join(homedir(), '.shreni', 'skills', 'SKILLS.md'));
+}
+
+// Map a gate outcome to its decision-ledger verdict (4a2.2 / 4a2.10). Pure and
+// exported so the skip↔pass distinction is unit-tested directly. A gate that DID
+// NOT RUN (no configured command, or an unmeasurable diff — GateResult.skipped)
+// is 'skip', never 'pass': a skipped gate has passed:true, but recording it as a
+// genuine pass would mislead a reader of the git-tracked ledger. Otherwise a
+// blocking failure is 'fail', a warn-level failure is 'warn', a real pass 'pass'.
+export function gateLedgerVerdict(g: GateResult): 'pass' | 'fail' | 'warn' | 'skip' {
+  if (g.skipped) return 'skip';
+  if (g.passed) return 'pass';
+  return g.level === 'block' ? 'fail' : 'warn';
 }
 
 export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Promise<AgentContext> {
@@ -225,9 +237,12 @@ export async function runSilpiViharapalaLoop(
     });
 
     // Decision-grade (4a2.2): one gate_result per gate at the point the gate
-    // verdict is decided. A blocking failure is 'fail', a non-blocking warn-level
-    // failure is 'warn', a pass is 'pass'. The gate's raw output is NOT inlined —
-    // it is referenced by this event's runId into the run log.
+    // verdict is decided. A gate that did not run (no configured command, or an
+    // unmeasurable diff) is 'skip' — NOT 'pass' (4a2.10): a skipped gate has
+    // passed:true, but recording it as a genuine pass would mislead a reader of
+    // the ledger. Otherwise: blocking failure → 'fail', warn-level failure →
+    // 'warn', a real pass → 'pass'. The gate's raw output is NOT inlined — it is
+    // referenced by this event's runId into the run log.
     for (const g of gates.results) {
       emit({
         type: 'gate_result',
@@ -235,7 +250,7 @@ export async function runSilpiViharapalaLoop(
         beadId: task.id,
         round,
         gate: g.gate,
-        verdict: g.passed ? 'pass' : g.level === 'block' ? 'fail' : 'warn',
+        verdict: gateLedgerVerdict(g),
       });
     }
 
