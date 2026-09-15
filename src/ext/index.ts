@@ -26,6 +26,14 @@ export type { SpendSoFar } from './spend.js';
 // active policy. Wired at worker startup after the extension loads.
 export { makeBudgetPolicy } from './budget-policy.js';
 export type { BudgetPolicyDeps } from './budget-policy.js';
+// The decision ledger (epic 4a2.1): envelope, decision-grade classifier,
+// audience vocabulary, and the single gated read path. Pure — the sink that
+// writes it (4a2.3) and the reader that renders it (4a2.6) build on these.
+export {
+  LEDGER_SCHEMA_VERSION, isDecisionGrade, audienceFor, readLedger,
+  parseLedgerLines, toLedgerEntry,
+} from './ledger.js';
+export type { LedgerEntry, LedgerAudience } from './ledger.js';
 
 // Default sink list = [localFileSink]; default meter = file (persists a
 // UsageEntry per run to the Kshetra's usage.jsonl); default policy = static
