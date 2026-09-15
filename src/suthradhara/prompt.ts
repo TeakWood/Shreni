@@ -85,9 +85,11 @@ const DESIGN_RULES = `Rules you must follow:
 - When the operator asks "are we ready?", show the rubric and name exactly what is still missing.
 - An item the operator wants to defer is recorded as an open question in the proposal and the design
   note, NOT treated as a blocker — deferral lets the interview converge without false precision.
-- In discovery, detect whether this is a NEW feature or a CHANGE to an existing one. If it is a
-  change, look under ${DESIGN_DIR}/ for the feature's existing design doc and EVOLVE it in place —
-  never write a parallel doc for a feature that already has one.`;
+- In discovery, detect whether this is a NEW feature or a CHANGE to an existing one. Design docs under
+  ${DESIGN_DIR}/ are dated, immutable ADRs (see docs/guides/adr-convention.md) — NEVER rewrite a prior
+  ADR's body. For a CHANGE, find the feature's most recent ADR under ${DESIGN_DIR}/ and write a NEW dated
+  ADR that supersedes it (recording the decision afresh and linking back), rather than evolving the old
+  file in place.`;
 
 function renderStages(): string {
   return STAGES.map(
@@ -125,9 +127,19 @@ GATE ① — the operator APPROVES THE PLAN. Then, in order:
   a. File the epic, then each child, with \`bd create\` (set --type, --priority, --description,
      --acceptance). Capture the ids. Add the dependency edges with \`bd dep add <blocked> <blocker>\`.
      bd auto-resolves its database from BEADS_DIR — do not pass a path.
-  b. Write the design note to \`${DESIGN_DIR}/<slug>.md\` in your cwd (the worktree), where <slug> is a
-     lowercase-hyphen slug of the feature. Store the epic id and this doc path — the handoff needs them.
-     If EVOLVING an existing feature, rewrite that SAME file rather than adding a new one.
+  b. Write the design note as a NEW dated ADR at \`${DESIGN_DIR}/<YYYY-MM-DD>-<slug>.md\` in your cwd,
+     where <YYYY-MM-DD> is today's date and <slug> is a lowercase-hyphen slug of the feature. Open it with
+     ADR frontmatter (docs/guides/adr-convention.md):
+       ---
+       title: <feature>
+       status: accepted
+       date: <YYYY-MM-DD>
+       superseded-by:
+       ---
+     Store the epic id and this dated doc path — the handoff needs them.
+     If this CHANGES a feature that already has an ADR, do NOT rewrite that ADR's body: instead set its
+     frontmatter to \`status: superseded\` and \`superseded-by: <this new dated filename>\` (the only
+     permitted edit to a prior ADR), so the decision chain stays traversable.
   c. Sync beads to their remote (${beadsRemote}):
        bd export -o "$BEADS_DIR/issues.jsonl"
        git -C "$BEADS_DIR" add issues.jsonl
@@ -138,7 +150,7 @@ GATE ① — the operator APPROVES THE PLAN. Then, in order:
 
 GATE ② — the operator APPROVES THE DESIGN DOC / ARD. Then push it (NEVER merge to ${main}):
      git switch -c suthradhara/<slug>          # your worktree starts detached; branch off it
-     git add ${DESIGN_DIR}/<slug>.md
+     git add ${DESIGN_DIR}/<YYYY-MM-DD>-<slug>.md   # + the superseded prior ADR, if you updated its pointer
      git commit -m "docs(design): <feature>"
      git push -u origin suthradhara/<slug>     # pushes to ${kshetra.repo.remote}
   Capture the branch name and, if the push prints a PR/compare URL, that URL.
@@ -146,7 +158,7 @@ GATE ② — the operator APPROVES THE DESIGN DOC / ARD. Then push it (NEVER mer
 FINALLY — write the handoff so the launcher can summarise and offer next steps, then STOP
 (the operator returns to the launcher menu; do not start unrelated work):
      Write a JSON file to \`${handoffRelPath()}\` in your cwd with exactly these fields:
-       { "branch": "suthradhara/<slug>", "epicId": "<epic id>", "docPath": "${DESIGN_DIR}/<slug>.md",
+       { "branch": "suthradhara/<slug>", "epicId": "<epic id>", "docPath": "${DESIGN_DIR}/<YYYY-MM-DD>-<slug>.md",
          "summary": "<one-line summary of what was planned and filed>" }
   Then tell the operator the plan is complete and they can end this session (Ctrl-D / /exit) to
   return to the launcher, which will prompt them to merge the branch and choose what to do next.`;
@@ -171,9 +183,10 @@ export function buildPlanningPrompt(
         '',
         `EXTENDING AN EXISTING PLAN (§8.1): a prior planning session in this worktree wrote`,
         `  ${opts.extendDocRelPath}`,
-        'Treat that doc as the starting point. Read it first, frame this session as an extension of',
-        'that topic, and EVOLVE that same doc in place if the extension belongs in it — do not fork a',
-        'parallel design for the same feature.',
+        'Treat that ADR as the starting point. Read it first and frame this session as an extension of',
+        'that topic. If the extension changes the decision, write a NEW dated ADR that supersedes it (per',
+        'docs/guides/adr-convention.md) — do not rewrite the prior ADR\'s body; only set its',
+        'status: superseded + superseded-by pointer to the new file.',
       ]
     : [];
 
