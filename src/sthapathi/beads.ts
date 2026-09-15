@@ -178,6 +178,14 @@ async function doSyncBeads(kshetra: KshetraConfig): Promise<void> {
   // conditions ("Already up to date", "no candidate for rebasing") are success;
   // anything else is logged and swallowed — the local sync commit persists and a
   // later cycle reconciles. (See the Sthapathi workflow design §4.7.)
+  //
+  // Concurrency note (4a2.11): ledgerSink appends to ledger.jsonl in this same
+  // working tree with no cross-lock against this pull/rebase. The commit above
+  // runs first, so an append that lands during the rebase is an uncommitted
+  // change that either defers to the next sync or (if it dirties the tree) aborts
+  // the rebase into the non-benign branch below, which retries next cycle. The
+  // residual sub-ms unlinked-inode loss window is an accepted risk documented at
+  // the write site (ext/ledger-sink.ts) — never affects issues.jsonl.
   try {
     await g.pull('--rebase', 'origin', 'main');
   } catch (err) {

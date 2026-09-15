@@ -38,6 +38,28 @@ tracking the file:
 The file appears in `git ls-files` after the first sync that follows a bd field
 change (bd creates `interactions.jsonl` on the first field change, not at init).
 
+## Concurrency: ledger writes during a sync (accepted risk)
+
+`ledgerSink` appends to `ledger.jsonl` in the beads working tree while `syncBeads`
+runs `git add -A` / commit / `git pull --rebase` on the same tree, with no
+cross-lock between them. This is a **deliberately accepted risk** (bead 4a2.11),
+not an oversight:
+
+- `syncBeads` commits **before** it pulls, so an append that lands during the
+  rebase is an uncommitted change that survives to the next sync (deferred, not
+  lost) in every case except a sub-millisecond OS-level unlinked-inode edge.
+- If the append dirties the tree mid-rebase, the rebase aborts with a non-benign
+  error, which `syncBeads` logs and retries next cycle — the entry stays in the
+  tree.
+- `parseLedgerLines` drops a torn/corrupt line on read.
+- The worst case is **one** deferred/lost ledger entry — never `issues.jsonl`
+  corruption — and the same event is also in the machine-local `activity.jsonl`.
+
+A cross-module async lock around the pull window was judged disproportionate to
+this narrow, self-healing window for a low-volume (O(rounds)) feed. The reasoning
+is recorded at the write site (`src/ext/ledger-sink.ts`) and the sync site
+(`src/sthapathi/beads.ts`).
+
 ### If a bd upgrade re-adds the ignore
 
 bd owns this `.gitignore`, so a future bd version could regenerate it and re-add

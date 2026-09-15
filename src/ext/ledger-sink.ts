@@ -46,6 +46,26 @@ export function makeLedgerSink(opts: LedgerSinkOpts): EventSink {
       if (!isDecisionGrade(ev)) return; // run-log tier stays local, out of git
       const entry = toLedgerEntry(ev);
       mkdirSync(dirname(ledgerPath), { recursive: true });
+      // ACCEPTED RISK (4a2.11): this append shares the beads working tree with
+      // syncBeads' `git add -A`/commit/pull --rebase (sthapathi/beads.ts), and
+      // there is no cross-lock — the sync's in-flight map only serializes syncs
+      // against each other, not against this write. An append that lands while a
+      // divergent-remote `git pull --rebase` is rewriting ledger.jsonl could, in
+      // an OS-level TOCTOU, hit the old unlinked inode and be lost, or dirty the
+      // tree and abort the rebase.
+      //
+      // Not locked, deliberately: a cross-module async mutex around the pull
+      // window (ext↔sthapathi) carries its own deadlock / hot-path-stall risk,
+      // disproportionate to the window it closes. The window is self-mitigating:
+      //   • syncBeads commits BEFORE it pulls, so an append during the pull is an
+      //     uncommitted change that survives to the next sync — deferred, not lost
+      //     — in every case except the sub-ms unlinked-inode edge.
+      //   • a dirty-tree rebase abort is a NON-benign error → syncBeads logs and
+      //     returns, retrying next cycle (the entry is still in the tree).
+      //   • parseLedgerLines drops a torn/corrupt line on read.
+      //   • worst case is ONE deferred/lost ledger entry — never issues.jsonl
+      //     corruption — and the same event is also in the local activity.jsonl.
+      // Decision-grade events are O(rounds), so the window is rarely even entered.
       appendFileSync(ledgerPath, JSON.stringify(entry) + '\n', 'utf8');
     },
   };
