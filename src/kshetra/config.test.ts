@@ -270,6 +270,63 @@ agents:
     expect(config.mcp).toBeUndefined();
   });
 
+  it('accepts optional per-role provider/model overrides (b0f)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+agents:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  viharapala:
+    provider: openai
+    model: gpt-5-codex
+  silpi:
+    model: claude-opus-4-1
+`);
+    const config = loadKshetraConfig(path);
+    // A role may override both provider and model...
+    expect(config.agents.viharapala?.provider).toBe('openai');
+    expect(config.agents.viharapala?.model).toBe('gpt-5-codex');
+    // ...or just the model, inheriting the flat provider.
+    expect(config.agents.silpi?.provider).toBeUndefined();
+    expect(config.agents.silpi?.model).toBe('claude-opus-4-1');
+    // The flat default is untouched and remains the fallback (resolution is b0f.2).
+    expect(config.agents.provider).toBe('anthropic');
+    expect(config.agents.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('leaves per-role provider/model undefined when a role omits them', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+agents:
+  silpi:
+    mcpConfigFiles:
+      - .mcp.json
+`);
+    const config = loadKshetraConfig(path);
+    expect(config.agents.silpi?.provider).toBeUndefined();
+    expect(config.agents.silpi?.model).toBeUndefined();
+  });
+
+  it('rejects an invalid per-role provider', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+agents:
+  silpi:
+    provider: mistral
+`);
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+  });
+
+  it('rejects an empty per-role model override', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+agents:
+  silpi:
+    model: ""
+`);
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+  });
+
   it('throws KshetraConfigError when file does not exist', () => {
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(KshetraConfigError);
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(/Cannot read file/);

@@ -155,7 +155,20 @@ const McpGrantsSchema = z.record(z.string(), z.array(z.string()));
 // secret the config file references must already be present in the environment
 // Shreni runs under. Claude-only — a no-op for non-claude adapters. Executor
 // scope only; Suthradhara does not read this field.
+// The supported agent providers. Mirrors the Provider union in
+// src/agents/providers/types.ts; shared here so the flat agents block and the
+// per-role overrides validate against the same set.
+const ProviderSchema = z.enum(['anthropic', 'gemini', 'openai']);
+
+// `provider` / `model` (b0f) let a single role run on its own provider+model
+// instead of the flat agents.{provider,model}. Both optional: a role that omits
+// them inherits the flat default (resolution lives in b0f.2). An invalid provider
+// is rejected by zod here; `model` is a free-form string (the id an adapter
+// understands) but must be non-empty when present, so a stray "" can't shadow the
+// default with a meaningless override.
 const AgentRoleConfigSchema = z.object({
+  provider: ProviderSchema.optional(),
+  model: z.string().min(1).optional(),
   mcp: McpGrantsSchema.optional(),
   mcpConfigFiles: z.array(z.string()).optional(),
 });
@@ -165,7 +178,7 @@ const AgentRoleConfigSchema = z.object({
 const AGENT_ROLES = ['suthradhara', 'silpi', 'viharapala', 'parikshaka'] as const;
 
 const AgentsConfigSchema = z.object({
-  provider: z.enum(['anthropic', 'gemini', 'openai']).default('anthropic'),
+  provider: ProviderSchema.default('anthropic'),
   model: z.string().default(DEFAULT_AGENT_MODEL),
   maxRoundsPerBead: z.number().int().min(1).default(3),
   suthradhara: AgentRoleConfigSchema.optional(),
@@ -279,6 +292,10 @@ export type McpConfig = z.infer<typeof McpConfigSchema>;
 // `mcp__<server>__<tool>` callability ids.
 export type McpGrants = z.infer<typeof McpGrantsSchema>;
 export type AgentRole = (typeof AGENT_ROLES)[number];
+// A per-role agent sub-config (b0f): optional provider/model overrides plus MCP
+// wiring. b0f.2 resolves a role's override against the flat agents default.
+export type AgentRoleConfig = z.infer<typeof AgentRoleConfigSchema>;
+export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 
 export class KshetraConfigError extends Error {
   constructor(
