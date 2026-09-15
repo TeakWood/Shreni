@@ -38,7 +38,7 @@ interface BeadHeader {
   criteria: string;
 }
 
-function parseBeadHeader(showJson: string, beadId: string): BeadHeader | null {
+function parseBeadHeader(showJson: string): BeadHeader | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(showJson);
@@ -46,19 +46,25 @@ function parseBeadHeader(showJson: string, beadId: string): BeadHeader | null {
     return null;
   }
   if (!Array.isArray(parsed)) return null;
+  // bd resolves short ids and echoes the CANONICAL id in the payload
+  // (`4a2.6` → `Shreni-beads-4a2.6`), so the raw typed arg must NEVER be the join
+  // key (4a2.8). bd lists the requested bead first, then its dependencies — take
+  // the first bead-like object and read its own id as canonical, then key the
+  // header match, acceptance-criteria parse, and ledger filter off THAT.
   const bead = parsed.find(
     (b): b is Record<string, unknown> =>
-      typeof b === 'object' && b !== null && (b as { id?: string }).id === beadId,
+      typeof b === 'object' && b !== null && typeof (b as { id?: unknown }).id === 'string',
   );
   if (!bead) return null;
+  const canonicalId = bead.id as string;
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
   return {
-    id: beadId,
+    id: canonicalId,
     title: str(bead.title),
     status: str(bead.status) || 'unknown',
     type: str(bead.issue_type) || str(bead.type) || 'task',
     priority: typeof bead.priority === 'number' ? bead.priority : null,
-    criteria: parseAcceptanceCriteria(showJson, beadId),
+    criteria: parseAcceptanceCriteria(showJson, canonicalId),
   };
 }
 
@@ -199,9 +205,11 @@ export async function runShow(opts: ShowOpts): Promise<void> {
   } catch (err) {
     throw new Error(`Bead not found in ${kshetra.id}: ${beadId} (${(err as Error).message})`);
   }
-  const header = parseBeadHeader(showJson, beadId);
+  const header = parseBeadHeader(showJson);
   if (!header) throw new Error(`Bead not found in ${kshetra.id}: ${beadId}`);
 
-  const entries = loadBeadTimeline(kshetra, beadId);
+  // Join the ledger on the CANONICAL id from the payload, not the raw arg — the
+  // ledger stores canonical ids, so a short-id filter would drop every entry.
+  const entries = loadBeadTimeline(kshetra, header.id);
   console.log(renderShow(header, entries));
 }

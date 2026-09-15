@@ -118,6 +118,34 @@ describe('runShow', () => {
     expect(printed).toContain('no ledger entries');
   });
 
+  it('resolves a SHORT id: joins on the canonical id from the bd payload (4a2.8)', async () => {
+    // User types the short id; bd resolves it and echoes the CANONICAL id.
+    mockShow.mockResolvedValue(JSON.stringify([
+      { id: 'Shreni-beads-4a2.6', title: 'shreni show', status: 'closed', issue_type: 'task', priority: 2 },
+      { id: 'Shreni-beads-4a2.3', title: 'dep' },
+    ]));
+    // The ledger stores entries under the CANONICAL id.
+    writeFileSync(
+      join(dir, 'ledger.jsonl'),
+      [
+        { ts: '2026-09-16T00:00:01.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: 'Shreni-beads-4a2.6', kind: 'task_claimed', payload: { title: 'shreni show' } },
+        { ts: '2026-09-16T00:00:02.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: 'Shreni-beads-4a2.6', kind: 'task_done', payload: { approved: true, rounds: 1 } },
+      ].map(e => JSON.stringify(e)).join('\n') + '\n',
+    );
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runShow({ args: ['4a2.6', '@myapp'], flagKshetra: undefined, cwd: '/nowhere', kshetras: [kshetra] });
+    const printed = log.mock.calls.map(c => c[0]).join('\n');
+    log.mockRestore();
+
+    // Header shows the canonical id, not the typed short id, and is NOT reported missing.
+    expect(printed).toContain('Bead Shreni-beads-4a2.6 — shreni show');
+    // The ledger joined on the canonical id — entries are present, not "no ledger entries".
+    expect(printed).toContain('Timeline (2 ledger entries)');
+    expect(printed).toContain('CLAIMED');
+    expect(printed).toContain('DONE');
+  });
+
   it('fails with a clear message for an unknown bead id', async () => {
     mockShow.mockRejectedValue(new Error('issue not found: nope'));
     await expect(
