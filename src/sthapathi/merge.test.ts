@@ -135,6 +135,27 @@ describe('squashMergeAndClose', () => {
     expect(order.indexOf('merge')).toBeLessThan(order.indexOf('commit'));
   });
 
+  it('does not reject when headSha fails after push — post-merge steps still run (4a2.9)', async () => {
+    // The merge is already pushed; a transient rev-parse hiccup must not strand the bead.
+    mockHeadSha.mockRejectedValue(new Error('fatal: rev-parse HEAD failed'));
+    await expect(squashMergeAndClose(TASK, KSHETRA, OUTPUT)).resolves.toBeUndefined();
+    // bd close, Parikshaka dispatch, sync, and branch cleanup all still ran.
+    expect(mockClose).toHaveBeenCalled();
+    expect(mockDispatchParikshakaAsync).toHaveBeenCalled();
+    expect(mockSyncBeads).toHaveBeenCalled();
+    expect(mockDeleteBranch).toHaveBeenCalledWith('bead-proj-42/fix-auth', { force: true });
+    // merge_done still recorded the merge, degraded to no SHA.
+    const mergeDone = mockEmit.mock.calls.map(c => c[0]).find((e: { type: string }) => e.type === 'merge_done');
+    expect(mergeDone).toEqual({ type: 'merge_done', kshetra: 'myapp', beadId: 'proj-42', mergePolicy: 'push' });
+  });
+
+  it('does not reject when the merge_done emit itself throws (4a2.9)', async () => {
+    mockEmit.mockImplementation(() => { throw new Error('sink registry exploded'); });
+    await expect(squashMergeAndClose(TASK, KSHETRA, OUTPUT)).resolves.toBeUndefined();
+    expect(mockClose).toHaveBeenCalled();
+    expect(mockDeleteBranch).toHaveBeenCalled();
+  });
+
   it('commit message includes task title and id', async () => {
     await squashMergeAndClose(TASK, KSHETRA, OUTPUT);
     const msg = (mockCommit.mock.calls[0] as unknown as [string])[0];

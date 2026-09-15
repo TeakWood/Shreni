@@ -223,7 +223,24 @@ export async function squashMergeAndClose(
   // policy used and the squash commit SHA — the provenance of what was merged and
   // how. Emitted while the claiming task's runId is still current, so the entry
   // correlates to the run that produced the work.
-  emit({ type: 'merge_done', kshetra: kshetra.id, beadId: task.id, mergePolicy: 'push', sha: await g.headSha() });
+  //
+  // GUARDED (4a2.9): the merge is already committed + pushed by this point, so a
+  // ledger-fold failure must never reject squashMergeAndClose — that would skip
+  // bd close, Parikshaka dispatch, clearBeadAttempts, syncBeads, and the branch
+  // cleanup below, leaving the bead open with its branch undeleted while the code
+  // is already on main. Both the headSha() subprocess AND the emit are wrapped;
+  // a headSha failure degrades the entry to no SHA rather than failing the merge.
+  try {
+    let sha: string | undefined;
+    try {
+      sha = await g.headSha();
+    } catch {
+      // record the merge happened even if we couldn't read the SHA
+    }
+    emit({ type: 'merge_done', kshetra: kshetra.id, beadId: task.id, mergePolicy: 'push', ...(sha ? { sha } : {}) });
+  } catch {
+    // A merge_done ledger-fold failure must never fail an already-pushed merge.
+  }
 
   // Refresh the cached repo/symbol map (Shreni-beads-vcz) now that main has new
   // structure — fire-and-forget so it never blocks the loop; the next bead's
