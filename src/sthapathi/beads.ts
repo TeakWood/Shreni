@@ -36,6 +36,28 @@ async function exec(
   }
 }
 
+// Extract a bead's acceptance criteria from a `bd show <id> --json` payload
+// (the string returned by bd().show()). That payload is a JSON array whose first
+// element is the requested bead and whose remaining elements are its
+// dependencies; each carries an `acceptance_criteria` field. Returns the trimmed
+// criteria text for `id`, or '' when the payload is unparseable, `id` is absent,
+// or the bead has no criteria recorded — callers render their own placeholder.
+export function parseAcceptanceCriteria(taskDetailsJson: string, id: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(taskDetailsJson);
+  } catch {
+    return '';
+  }
+  if (!Array.isArray(parsed)) return '';
+  const bead = parsed.find(
+    (b): b is { id?: string; acceptance_criteria?: string } =>
+      typeof b === 'object' && b !== null && (b as { id?: string }).id === id,
+  );
+  const criteria = bead?.acceptance_criteria;
+  return typeof criteria === 'string' ? criteria.trim() : '';
+}
+
 // Internal-only bd CLI wrapper. Never called by agents directly.
 export function bd(kshetra: KshetraConfig) {
   const env: NodeJS.ProcessEnv = { ...process.env, BEADS_DIR: kshetra.beads.path };

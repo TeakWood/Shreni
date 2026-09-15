@@ -1,6 +1,6 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task, SilpiOutput, ViharapalaOutput } from './types.js';
-import { bd, syncBeads } from './beads.js';
+import { bd, syncBeads, parseAcceptanceCriteria } from './beads.js';
 import { git, GitError } from './git.js';
 import { gh } from './gh.js';
 import { branchName } from './branch.js';
@@ -50,11 +50,16 @@ function buildCommitMessage(task: Task, output: SilpiOutput): string {
 
 // PR body for mergePolicy 'pr' (4fu.1). Extends the squash-commit message with
 // the two review-context blocks a human merger needs at a glance: the bead's
-// acceptance criteria (context.taskDetails — the same task+criteria bundle
-// Viharapala reviewed against) and the reviewer's verdict (verdict, score,
-// must-fix items). The squash-merge path keeps using buildCommitMessage
-// unchanged — a git commit message has no room for this, but a PR body does, so
-// only the PR carries the extra context.
+// acceptance criteria and the reviewer's verdict (verdict, score, must-fix
+// items). The squash-merge path keeps using buildCommitMessage unchanged — a git
+// commit message has no room for this, but a PR body does, so only the PR
+// carries the extra context.
+//
+// taskDetails is the raw `bd show <id> --json` payload (the same bundle
+// Viharapala reviewed against). We render ONLY the acceptance_criteria field
+// parsed out of it — dumping the whole JSON blob would be mislabeled (it carries
+// the full bead + every dependency) and, being pretty-printed JSON, would mangle
+// the PR's markdown (bqn).
 export function buildPrBody(
   task: Task,
   output: SilpiOutput,
@@ -63,8 +68,9 @@ export function buildPrBody(
 ): string {
   const lines: string[] = [buildCommitMessage(task, output), ''];
 
+  const criteria = parseAcceptanceCriteria(taskDetails, task.id);
   lines.push('## Acceptance criteria', '');
-  lines.push(taskDetails.trim() || '_(no task details captured)_', '');
+  lines.push(criteria || '_(no acceptance criteria recorded)_', '');
 
   lines.push('## Reviewer verdict', '');
   lines.push(`- Verdict: **${feedback.verdict}**`);

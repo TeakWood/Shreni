@@ -26,7 +26,9 @@ const mockFlag = vi.fn<() => Promise<string>>();
 const mockList = vi.fn<() => Promise<string>>();
 const mockShow = vi.fn<() => Promise<string>>();
 const mockSyncBeads = vi.fn<() => Promise<void>>();
-vi.mock('./beads.js', () => ({
+vi.mock('./beads.js', async (importOriginal) => ({
+  // parseAcceptanceCriteria is a pure parser — use the real implementation.
+  ...(await importOriginal<typeof import('./beads.js')>()),
   bd: vi.fn(() => ({
     addNote: mockAddNote,
     addLabel: mockAddLabel,
@@ -92,7 +94,31 @@ const FEEDBACK: ViharapalaOutput = {
   insights: [],
 };
 
-const TASK_DETAILS = 'proj-42 · Fix auth\n\nACCEPTANCE CRITERIA\nLogin rejects a bad password.';
+// Realistic `bd show <id> --json` payload: a JSON array whose first element is
+// the bead and whose remaining elements are its dependencies, each carrying its
+// own description / acceptance_criteria / close_reason etc. buildPrBody must
+// surface ONLY proj-42's acceptance_criteria and leak none of the rest (bqn).
+const TASK_DETAILS = JSON.stringify([
+  {
+    id: 'proj-42',
+    title: 'Fix auth',
+    description: 'Auth lets bad passwords through; harden the login check.',
+    acceptance_criteria: 'Login rejects a bad password.',
+    status: 'in_progress',
+    priority: 2,
+    close_reason: '',
+    parent: 'proj-40',
+  },
+  {
+    id: 'proj-40',
+    title: 'Auth epic',
+    description: 'Umbrella epic for auth hardening — SHOULD NOT appear in the PR body.',
+    acceptance_criteria: 'All auth beads closed — SHOULD NOT appear in the PR body.',
+    status: 'open',
+    priority: 1,
+    dependency_type: 'parent-child',
+  },
+], null, 2);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -147,6 +173,11 @@ describe('openPrAndDefer', () => {
     expect(prArgs.body).toContain('## Reviewer verdict');
     expect(prArgs.body).toContain('Verdict: **APPROVE**');
     expect(prArgs.body).toContain('Score: 92/100');
+    // Only the criteria surface — the raw --json blob (descriptions, the parent
+    // dependency, close_reason) must not leak into the body (bqn).
+    expect(prArgs.body).not.toContain('SHOULD NOT appear');
+    expect(prArgs.body).not.toContain('"acceptance_criteria"');
+    expect(prArgs.body).not.toContain('harden the login check');
   });
 
   it('labels the bead awaiting-merge and does NOT close it or delete the branch', async () => {
@@ -173,6 +204,15 @@ describe('buildPrBody', () => {
     expect(body.indexOf('## Acceptance criteria')).toBeLessThan(body.indexOf('## Reviewer verdict'));
   });
 
+  it('renders only the bead\'s acceptance_criteria, not the raw --json payload', () => {
+    const body = buildPrBody(TASK, OUTPUT, FEEDBACK, TASK_DETAILS);
+    expect(body).toContain('Login rejects a bad password.');
+    // No JSON structure and nothing from the parent dependency leaks through.
+    expect(body).not.toContain('SHOULD NOT appear');
+    expect(body).not.toContain('"id":');
+    expect(body).not.toContain('[');
+  });
+
   it('lists must-fix items when the reviewer flagged any', () => {
     const body = buildPrBody(TASK, OUTPUT, { ...FEEDBACK, verdict: 'REJECT', mustFix: ['handle null user', 'add a test'] }, TASK_DETAILS);
     expect(body).toContain('- Must-fix:');
@@ -184,8 +224,13 @@ describe('buildPrBody', () => {
     expect(buildPrBody(TASK, OUTPUT, FEEDBACK, TASK_DETAILS)).toContain('- Must-fix: none');
   });
 
-  it('degrades gracefully when task details are empty', () => {
-    expect(buildPrBody(TASK, OUTPUT, FEEDBACK, '   ')).toContain('_(no task details captured)_');
+  it('degrades gracefully when the payload is unparseable', () => {
+    expect(buildPrBody(TASK, OUTPUT, FEEDBACK, '   ')).toContain('_(no acceptance criteria recorded)_');
+  });
+
+  it('degrades gracefully when the bead records no acceptance criteria', () => {
+    const noCriteria = JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]);
+    expect(buildPrBody(TASK, OUTPUT, FEEDBACK, noCriteria)).toContain('_(no acceptance criteria recorded)_');
   });
 });
 
