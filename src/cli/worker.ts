@@ -15,7 +15,8 @@ import { reconcilePullRequests } from '../sthapathi/merge';
 import { selectFollowup } from '../sthapathi/pr-followup';
 import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
 import { loadExtension } from '../ext/loader';
-import { extensionCore, getPolicySource, makeBudgetPolicy } from '../ext/index';
+import { extensionCore, getPolicySource, makeBudgetPolicy, makeLedgerSink } from '../ext/index';
+import { join } from 'path';
 import { findRoleCredentialGaps } from './provider-preflight';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
@@ -164,6 +165,14 @@ async function startup(): Promise<void> {
   // first event. Fail-open: a missing/throwing extension degrades to the local
   // defaults with one log line (extension-points.md §"Loading an extension").
   await loadExtension({ log: msg => console.log(`[shreni worker:${kshetraId}] ${msg}`) });
+  // Register the decision ledger sink (4a2.3) beside localFileSink and any sink
+  // the extension just added. It writes decision-grade events to ledger.jsonl in
+  // the beads repo — the only git-tracked, pushed store; syncBeads (4a2.4) commits
+  // it. A failing ledger write is isolated by the SinkRegistry, so it never stops
+  // localFileSink or crashes the worker.
+  extensionCore.addEventSink(
+    makeLedgerSink({ kshetraId: kshetra!.id, ledgerPath: join(kshetra!.beads.path, 'ledger.jsonl') }),
+  );
   // Enforce kshetra.yaml budget caps (ho4.3) on top of whatever policy is now
   // active — the static default, or an extension's own policy loaded just above.
   // Composed last so the caps always apply; the inner policy keeps its model

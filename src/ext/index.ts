@@ -34,6 +34,11 @@ export {
   parseLedgerLines, toLedgerEntry,
 } from './ledger.js';
 export type { LedgerEntry, LedgerAudience } from './ledger.js';
+// The ledgerSink (4a2.3): the second EventSink that writes decision-grade events
+// to ledger.jsonl in the beads repo. Registered at worker startup beside
+// localFileSink via extensionCore.addEventSink.
+export { makeLedgerSink } from './ledger-sink.js';
+export type { LedgerSinkOpts } from './ledger-sink.js';
 
 // Default sink list = [localFileSink]; default meter = file (persists a
 // UsageEntry per run to the Kshetra's usage.jsonl); default policy = static
