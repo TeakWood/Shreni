@@ -224,3 +224,65 @@ describe('runPlanningLoop transitions', () => {
     expect(logs.join('\n')).toContain('Please answer 1, 2, or 3');
   });
 });
+
+describe('runPlanningLoop lifecycle events (fnd.2)', () => {
+  let WT: string;
+  beforeEach(() => { WT = mkdtempSync(join(tmpdir(), 'loop-ev-')); });
+  afterEach(() => { rmSync(WT, { recursive: true, force: true }); });
+
+  const launched = (worktreePath: string) => ({
+    status: 'launched' as const,
+    kshetraId: 'alpha',
+    sessionId: ALPHA_SESSION,
+    claudeSessionId: 'cid',
+    worktreePath,
+    pid: 1,
+    wait: vi.fn().mockResolvedValue(0),
+  });
+
+  it('emits launched -> plan_filed -> doc_pushed -> session_ended -> menu_choice for a filed session', async () => {
+    writeHandoff(WT, { branch: 'suthradhara/sso', epicId: 'e-1', docPath: '.shreni/design/sso.md', summary: 's' });
+    const events: Array<{ type: string; [k: string]: unknown }> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), { ask: async () => '3', log: () => {}, emit: (e) => events.push(e) });
+
+    expect(events.map(e => e.type)).toEqual([
+      'suthradhara_launched', 'suthradhara_plan_filed', 'suthradhara_doc_pushed',
+      'suthradhara_session_ended', 'suthradhara_menu_choice',
+    ]);
+    expect(events[0]).toMatchObject({ sessionId: ALPHA_SESSION, claudeSessionId: 'cid', resume: false });
+    expect(events[1]).toMatchObject({ epicId: 'e-1', docPath: '.shreni/design/sso.md', summary: 's' });
+    expect(events[2]).toMatchObject({ branch: 'suthradhara/sso' });
+    expect(events[3]).toMatchObject({ epicId: 'e-1' });
+    expect(events[4]).toMatchObject({ choice: 'end' });
+  });
+
+  it('omits plan_filed/doc_pushed when the session filed no handoff', async () => {
+    const events: Array<{ type: string; epicId?: string }> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), { ask: async () => '3', log: () => {}, emit: (e) => events.push(e) });
+    expect(events.map(e => e.type)).toEqual([
+      'suthradhara_launched', 'suthradhara_session_ended', 'suthradhara_menu_choice',
+    ]);
+    // session_ended carries no epicId when nothing was filed.
+    expect(events[1].epicId).toBeUndefined();
+  });
+
+  it('emits one launched + session_ended per session across extend -> end', async () => {
+    writeHandoff(WT, { branch: 'suthradhara/sso', epicId: 'e-1', docPath: '.shreni/design/sso.md', summary: 's' });
+    mockStartSession.mockResolvedValueOnce(launched(WT));
+    const answers = ['1', '3'];
+    const events: Array<{ type: string; resume?: boolean; choice?: string }> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), { ask: async () => answers.shift()!, log: () => {}, emit: (e) => events.push(e) });
+
+    expect(events.filter(e => e.type === 'suthradhara_launched')).toHaveLength(2);
+    expect(events.filter(e => e.type === 'suthradhara_session_ended')).toHaveLength(2);
+    expect(events.filter(e => e.type === 'suthradhara_menu_choice').map(e => e.choice)).toEqual(['extend', 'end']);
+    // Loop relaunches are fresh, never resumes.
+    expect(events.filter(e => e.type === 'suthradhara_launched').every(e => e.resume === false)).toBe(true);
+  });
+
+  it('marks the first session as a resume when firstResume is set', async () => {
+    const events: Array<{ type: string; resume?: boolean }> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), { ask: async () => '3', log: () => {}, emit: (e) => events.push(e) }, true);
+    expect(events[0]).toMatchObject({ type: 'suthradhara_launched', resume: true });
+  });
+});

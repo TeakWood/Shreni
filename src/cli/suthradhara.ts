@@ -12,6 +12,7 @@ import {
 } from '../suthradhara/lifecycle';
 import { listSessions } from '../suthradhara/persistence';
 import { readHandoff, type Handoff } from '../suthradhara/handoff';
+import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-log';
 import type { KshetraConfig } from '../kshetra/config';
 
 // Resolve the target Kshetra for a Suthradhara subcommand. Precedence:
@@ -159,7 +160,7 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
       `suthradhara[${result.kshetraId}]: already running (pid ${result.pid}); resume is a no-op`,
     );
   } else {
-    await runPlanningLoop(kshetra, result);
+    await runPlanningLoop(kshetra, result, {}, /* firstResume */ true);
   }
 }
 
@@ -181,6 +182,9 @@ export interface PlanningLoopDeps {
   // launching real claude.
   startOpts?: Pick<StartOpts, 'spawn' | 'uuid'>;
   log?: (msg: string) => void;
+  // Lifecycle-event sink (fnd.2). Defaults to the real activity-log emit; tests
+  // inject a spy to assert the emitted sequence without touching disk.
+  emit?: (ev: ActivityEvent) => void;
 }
 
 export type MenuChoice = 'extend' | 'new' | 'end';
@@ -221,12 +225,24 @@ async function runPlanningLoop(
   kshetra: KshetraConfig,
   first: LaunchResult,
   deps: PlanningLoopDeps = {},
+  firstResume = false,
 ): Promise<void> {
   const log = deps.log ?? ((m: string) => console.log(m));
   const ask = deps.ask ?? defaultAsk;
+  const emit = deps.emit ?? emitActivity;
   let current = first;
+  // The first session may be a resume (`suthradhara resume`); every relaunch the
+  // loop drives (extend/new) is a fresh session, so this flips false after one.
+  let launchWasResume = firstResume;
 
   for (;;) {
+    emit({
+      type: 'suthradhara_launched',
+      kshetra: kshetra.id,
+      sessionId: current.sessionId,
+      claudeSessionId: current.claudeSessionId,
+      resume: launchWasResume,
+    });
     log(`suthradhara[${kshetra.id}]: planning session live (${current.sessionId}).`);
     log('Interview, approve the plan, and end the session (Ctrl-D / /exit) to return here.');
 
@@ -239,6 +255,26 @@ async function runPlanningLoop(
     }
 
     const handoff = readHandoff(current.worktreePath);
+    // Gate ① (plan filed) + Gate ② (doc pushed) only fire when the session
+    // completed the handoff; a session that exited early emits neither.
+    if (handoff) {
+      emit({
+        type: 'suthradhara_plan_filed',
+        kshetra: kshetra.id, sessionId: current.sessionId,
+        epicId: handoff.epicId, docPath: handoff.docPath, summary: handoff.summary,
+      });
+      emit({
+        type: 'suthradhara_doc_pushed',
+        kshetra: kshetra.id, sessionId: current.sessionId,
+        branch: handoff.branch, docPath: handoff.docPath,
+      });
+    }
+    // The planning unit has ended (the child exited) regardless of what filed.
+    emit({
+      type: 'suthradhara_session_ended',
+      kshetra: kshetra.id, sessionId: current.sessionId,
+      ...(handoff ? { epicId: handoff.epicId } : {}),
+    });
     for (const line of renderSummary(kshetra, handoff)) log(line);
 
     let choice: MenuChoice | null = null;
@@ -247,6 +283,7 @@ async function runPlanningLoop(
       choice = parseMenuChoice(answer);
       if (choice === null) log('Please answer 1, 2, or 3.');
     }
+    emit({ type: 'suthradhara_menu_choice', kshetra: kshetra.id, sessionId: current.sessionId, choice });
 
     if (choice === 'end') {
       await teardownWorktrees(kshetra);
@@ -266,6 +303,7 @@ async function runPlanningLoop(
       return;
     }
     current = next;
+    launchWasResume = false; // loop-driven relaunches are always fresh sessions
   }
 }
 
