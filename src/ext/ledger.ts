@@ -79,6 +79,7 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     case 'policy_decision':
     case 'gate_result':
     case 'merge_done':
+    case 'run_usage':
       return true;
     case 'round_start':
     case 'agent_text':
@@ -122,6 +123,7 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     case 'run_started':
     case 'policy_decision':
     case 'gate_result':
+    case 'run_usage':
       return 'operator';
     // Pure provenance — what landed on main and how. An accountability record.
     case 'merge_done':

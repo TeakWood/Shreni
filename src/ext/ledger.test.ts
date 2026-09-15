@@ -34,6 +34,7 @@ describe('isDecisionGrade', () => {
     expect(isDecisionGrade(ev({ type: 'policy_decision', beadId: 'b1' } as LoggedEvent))).toBe(true);
     expect(isDecisionGrade(ev({ type: 'gate_result', beadId: 'b1' } as LoggedEvent))).toBe(true);
     expect(isDecisionGrade(ev({ type: 'merge_done', beadId: 'b1' } as LoggedEvent))).toBe(true);
+    expect(isDecisionGrade(ev({ type: 'run_usage', beadId: 'b1' } as LoggedEvent))).toBe(true);
   });
 
   it('rejects the high-volume run-log tier', () => {
@@ -58,7 +59,7 @@ describe('audienceFor', () => {
   });
 
   it('classifies the new decision-grade kinds by audience (4a2.2)', () => {
-    for (const kind of ['run_started', 'policy_decision', 'gate_result'] as const) {
+    for (const kind of ['run_started', 'policy_decision', 'gate_result', 'run_usage'] as const) {
       expect(audienceFor(kind)).toBe<LedgerAudience>('operator');
     }
     expect(audienceFor('merge_done')).toBe<LedgerAudience>('audit');

@@ -12,6 +12,9 @@ vi.mock('./providers/index.js', () => ({ getAdapter: mockGetAdapter }));
 // getCurrentRunId) loads from this same module. getPolicySource is swappable via
 // policyRef so tests can exercise model override + a mayProceed denial.
 const mockRecord = vi.fn();
+// Captures every event runAgent emits (via the stubbed sink registry) so tests
+// can assert the run_usage ledger summary (4a2.5) alongside the meter record.
+const mockEmitted: Array<{ type: string; [k: string]: unknown }> = [];
 const staticPolicy = {
   selectModel: (req: { default: unknown }) => req.default,
   mayProceed: () => ({ allowed: true as const }),
@@ -19,8 +22,12 @@ const staticPolicy = {
 const policyRef: { current: unknown } = { current: staticPolicy };
 vi.mock('../ext/index.js', () => ({
   getUsageMeter: () => ({ record: mockRecord }),
-  getSinkRegistry: () => ({ handle: () => {} }),
+  getSinkRegistry: () => ({ handle: (ev: { type: string }) => { mockEmitted.push(ev as { type: string }); } }),
   getPolicySource: () => policyRef.current,
+  costFor: (u: { inputTokens: number; outputTokens: number }) => ({
+    costUsd: (u.inputTokens + u.outputTokens) * 0.001,
+    priced: true,
+  }),
 }));
 
 const { runAgent } = await import('./runner');
@@ -106,6 +113,39 @@ describe('runAgent usage metering', () => {
       outcome: 'ok',
     });
     expect(typeof rec.runId).toBe('string');
+  });
+
+  it('folds a run_usage summary into the ledger on success, without the full record (4a2.5)', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(okAdapter({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheCreationTokens: 2 }));
+    await runAgent(OPTS());
+    const usageEvents = mockEmitted.filter(e => e.type === 'run_usage');
+    expect(usageEvents).toHaveLength(1);
+    expect(usageEvents[0]).toMatchObject({
+      kshetra: 'myapp', beadId: 'bd-1', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      inputTokens: 100, outputTokens: 20, costUsd: 0.12, priced: true, outcome: 'ok',
+    });
+    // The cache/tool breakdown stays in usage.jsonl — not duplicated into the ledger.
+    expect(usageEvents[0]).not.toHaveProperty('cacheReadTokens');
+    expect(usageEvents[0]).not.toHaveProperty('toolCallCount');
+  });
+
+  it('still folds a run_usage entry (zeroed) when the provider surfaced no usage (4a2.5)', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(okAdapter(undefined, 1));
+    await runAgent(OPTS());
+    const usageEvents = mockEmitted.filter(e => e.type === 'run_usage');
+    expect(usageEvents).toHaveLength(1);
+    expect(usageEvents[0]).toMatchObject({ inputTokens: 0, outputTokens: 0, costUsd: 0, outcome: 'ok' });
+  });
+
+  it('folds a run_usage entry with outcome:error for a failed run (4a2.5)', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(failAdapter({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 3, cacheCreationTokens: 1 }));
+    await expect(runAgent(OPTS())).rejects.toBeInstanceOf(AgentRunError);
+    const usageEvents = mockEmitted.filter(e => e.type === 'run_usage');
+    expect(usageEvents).toHaveLength(1);
+    expect(usageEvents[0]).toMatchObject({ inputTokens: 50, outputTokens: 10, outcome: 'error' });
   });
 
   it('records zero token counts when the provider surfaced no usage', async () => {

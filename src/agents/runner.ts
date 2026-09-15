@@ -2,8 +2,8 @@ import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { emit, touchHeartbeat, getCurrentRunId } from '../sthapathi/activity-log.js';
 import { AgentAbortedError, RunNotPermittedError } from '../sthapathi/errors.js';
-import { getUsageMeter, getPolicySource } from '../ext/index.js';
-import type { ModelSelection } from '../ext/index.js';
+import { getUsageMeter, getPolicySource, costFor } from '../ext/index.js';
+import type { ModelSelection, UsageRecord } from '../ext/index.js';
 import { getAdapter } from './providers/index.js';
 import { AgentRunError } from './providers/types.js';
 import type { AgentRunnerOpts, AgentRunResult, AdapterEmit, TokenUsage } from './providers/types.js';
@@ -191,23 +191,55 @@ function reportUsage(
   usage: TokenUsage | undefined,
   toolCallCount: number,
 ): void {
+  const record: UsageRecord = {
+    kshetra: opts.kshetraId,
+    beadId: opts.beadId,
+    runId: getCurrentRunId(opts.kshetraId),
+    agent: opts.agentName,
+    provider: opts.provider,
+    model: opts.model,
+    inputTokens: usage?.inputTokens ?? 0,
+    outputTokens: usage?.outputTokens ?? 0,
+    cacheReadTokens: usage?.cacheReadTokens ?? 0,
+    cacheCreationTokens: usage?.cacheCreationTokens ?? 0,
+    toolCallCount,
+    outcome,
+  };
   try {
-    getUsageMeter().record({
+    // usage.jsonl (epic g2k): the full per-run record with the price snapshot.
+    // Unchanged by 4a2.5 — the meter still computes cost and appends exactly as
+    // before. This is the durable, granular source the ledger entry points AT.
+    getUsageMeter().record(record);
+  } catch {
+    // A metering failure must never fail an otherwise-successful agent run.
+  }
+  // Fold the same record into the decision ledger as a run_usage SUMMARY (4a2.5):
+  // agent/provider/model, the headline token totals, cost, and outcome — NOT the
+  // full record. The cache/tool breakdown stays in usage.jsonl, referenced by the
+  // envelope's runId. costFor is the same pure price-table lookup the meter uses,
+  // so the ledger's cost matches usage.jsonl exactly. A run with no provider usage
+  // (gemini) still emits, with zeroed totals, rather than being dropped. One
+  // run_usage per metered finalization, mirroring usage.jsonl 1:1 (a transient-
+  // retried run meters each discarded attempt, 1tg, so it emits one per attempt).
+  // Guarded like the meter call: a fold failure must never fail an otherwise-
+  // successful run (emit() is already sink-isolated; costFor is wrapped too).
+  try {
+    const { costUsd, priced } = costFor(record);
+    emit({
+      type: 'run_usage',
       kshetra: opts.kshetraId,
       beadId: opts.beadId,
-      runId: getCurrentRunId(opts.kshetraId),
       agent: opts.agentName,
       provider: opts.provider,
       model: opts.model,
-      inputTokens: usage?.inputTokens ?? 0,
-      outputTokens: usage?.outputTokens ?? 0,
-      cacheReadTokens: usage?.cacheReadTokens ?? 0,
-      cacheCreationTokens: usage?.cacheCreationTokens ?? 0,
-      toolCallCount,
+      inputTokens: record.inputTokens,
+      outputTokens: record.outputTokens,
+      costUsd,
+      priced,
       outcome,
     });
   } catch {
-    // A metering failure must never fail an otherwise-successful agent run.
+    // A ledger-fold failure must never fail an otherwise-successful agent run.
   }
 }
 

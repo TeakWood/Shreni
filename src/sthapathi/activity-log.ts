@@ -36,6 +36,13 @@ export type ActivityEvent =
   // merge_done: approved work landed (or a PR was opened to land it). `sha` is the
   // squash commit for mergePolicy 'push'; `pr` is the PR number for 'pr'.
   | { type: 'merge_done';       kshetra: string; beadId: string; mergePolicy: 'push' | 'pr'; sha?: string; pr?: number }
+  // run_usage: a per-run token/cost SUMMARY folded from the UsageEntry the meter
+  // writes to usage.jsonl (epic 4a2.5). Carries the headline totals + cost, not
+  // the full record — the cache/tool breakdown stays in usage.jsonl, referenced
+  // by the envelope's runId. `priced` false means costUsd is an "unknown"
+  // placeholder, not a real $0. One per metered run finalization (ok and error),
+  // mirroring usage.jsonl 1:1.
+  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error' }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are
