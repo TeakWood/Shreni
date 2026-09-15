@@ -271,6 +271,10 @@ export const COMMANDS: Command[] = [
         case 'nothing_to_migrate':
           throw new Error(`No config found to migrate at ${kshetraPath}`);
       }
+      // 4a2.7: report the beads-repo interactions.jsonl un-ignore outcome.
+      if (result.interactions === 'changed') {
+        console.log('Beads repo now tracks interactions.jsonl (removed the gitignore entry).');
+      }
     },
   },
   {

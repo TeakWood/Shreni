@@ -4,6 +4,7 @@ import { homedir } from 'os';
 import * as yaml from 'js-yaml';
 import { loadKshetraConfig, KshetraConfigError } from '../kshetra/config.js';
 import { registerKshetra } from '../kshetra/registry.js';
+import { untrackInteractions, type UntrackResult } from './beads-gitignore.js';
 
 export type MigrateStatus = 'migrated' | 'already_canonical' | 'nothing_to_migrate';
 
@@ -11,6 +12,24 @@ export interface MigrateResult {
   status: MigrateStatus;
   id?: string;
   configPath: string;
+  // Outcome of the beads-repo interactions.jsonl un-ignore (4a2.7). Undefined
+  // when there was no config to resolve a beads path from (nothing_to_migrate),
+  // or when the config could not be loaded.
+  interactions?: UntrackResult;
+}
+
+// Resolve the Kshetra's beads path from a canonical config and stop its repo from
+// gitignoring interactions.jsonl (4a2.7). Idempotent and best-effort: a config
+// that won't load, or a missing .gitignore, simply yields no change rather than
+// failing the migration.
+function fixBeadsGitignore(configPath: string): UntrackResult | undefined {
+  let beadsPath: string;
+  try {
+    beadsPath = loadKshetraConfig(configPath).beads.path;
+  } catch {
+    return undefined; // config not loadable — nothing we can safely act on
+  }
+  return untrackInteractions(beadsPath);
 }
 
 // Absolutize a config path field. Expands a leading `~` to the home directory
@@ -40,7 +59,11 @@ export function runMigrate(kshetraPath: string): MigrateResult {
   // is exactly one source of truth.
   if (canonicalExists) {
     if (rootExists) rmSync(rootPath);
-    return { status: rootExists ? 'migrated' : 'already_canonical', configPath: canonicalPath };
+    // Apply the beads .gitignore fix on every migrate of an already-canonical
+    // Kshetra too — this is the recovery path if a bd upgrade ever re-adds the
+    // interactions.jsonl ignore line. Idempotent, so re-running is safe.
+    const interactions = fixBeadsGitignore(canonicalPath);
+    return { status: rootExists ? 'migrated' : 'already_canonical', configPath: canonicalPath, interactions };
   }
 
   if (!rootExists) {
@@ -87,5 +110,9 @@ export function runMigrate(kshetraPath: string): MigrateResult {
   // Only remove the legacy file once the canonical one is written and valid.
   rmSync(rootPath);
 
-  return { status: 'migrated', id: config.id, configPath: canonicalPath };
+  // Stop the beads repo gitignoring interactions.jsonl (4a2.7) as part of the
+  // same migration. config is already loaded, so use its beads path directly.
+  const interactions = untrackInteractions(config.beads.path);
+
+  return { status: 'migrated', id: config.id, configPath: canonicalPath, interactions };
 }

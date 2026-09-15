@@ -57,6 +57,29 @@ describe('runMigrate', () => {
     expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', canonical);
   });
 
+  it('stops the beads repo gitignoring interactions.jsonl (4a2.7)', () => {
+    // A real beads repo dir with the bd-written .gitignore.
+    const beadsDir = join(dir, 'beads');
+    mkdirSync(beadsDir, { recursive: true });
+    writeFileSync(join(beadsDir, '.gitignore'), '# Interactions log (runtime, not versioned)\ninteractions.jsonl\ndolt/\n', 'utf8');
+    writeFileSync(
+      join(dir, 'kshetra.yaml'),
+      legacyConfig({ beads: { path: beadsDir, remote: 'git@github.com:TeakWood/myapp-beads.git' } }),
+      'utf8',
+    );
+
+    const result = runMigrate(dir);
+    expect(result.interactions).toBe('changed');
+    const gi = readFileSync(join(beadsDir, '.gitignore'), 'utf8');
+    expect(gi.split('\n').some(l => l.trim() === 'interactions.jsonl')).toBe(false);
+    expect(gi).toContain('dolt/'); // other entries intact
+
+    // Idempotent: migrating again (now already_canonical) reports no further change.
+    const second = runMigrate(dir);
+    expect(second.status).toBe('already_canonical');
+    expect(second.interactions).toBe('already');
+  });
+
   it('is idempotent — a second run is a no-op once canonical exists', () => {
     writeFileSync(join(dir, 'kshetra.yaml'), legacyConfig(), 'utf8');
     runMigrate(dir);

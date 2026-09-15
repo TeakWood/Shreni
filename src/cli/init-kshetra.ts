@@ -20,6 +20,7 @@ import {
   PROVIDER_REGISTRY,
 } from '../agents/providers/registry';
 import { checkProviderInstalled, promptProvider, commandExists } from './provider-preflight';
+import { untrackInteractions } from './beads-gitignore';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
 
 const execAsync = promisify(execFile);
@@ -958,6 +959,22 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           await cloneBeadsRepo(beadsRemote, beadsPath);
         }
         await initBeadsDb(beadsPath);
+        // Track interactions.jsonl from day one (4a2.7): bd's fresh .gitignore
+        // ignores it, but it is real bd field-change provenance that nothing else
+        // carries into git. Remove that ignore BEFORE pushBeadsRepo so the change
+        // rides in the init commit. Idempotent; a no-op if bd's layout ever drops
+        // the line. Note: Step 5's .gitignore edit is a DIFFERENT file (the
+        // PROJECT repo's .gitignore, for `.shreni`); this is the beads repo's.
+        // Best-effort: this is a durability convenience, so a .gitignore hiccup
+        // must never wedge an otherwise-complete Kshetra init. `shreni migrate`
+        // re-applies it later if needed.
+        try {
+          if (untrackInteractions(beadsPath) === 'changed') {
+            console.log('  beads repo now tracks interactions.jsonl (was gitignored)');
+          }
+        } catch (err) {
+          console.warn(`  could not un-ignore interactions.jsonl (run \`shreni migrate\` later): ${(err as Error).message}`);
+        }
         await hardenBeadsRepo(beadsPath);
         await pushBeadsRepo(beadsPath);
       },
