@@ -43,6 +43,14 @@ export function notificationsPath(kshetraId: string): string {
   return join(kshetraDir(kshetraId), 'notifications.jsonl');
 }
 
+// Per-run token/cost accounting feed (epic g2k). One UsageEntry per finalized
+// agent run, appended by the default UsageMeter (src/ext/defaults.ts). Sits
+// beside activity.jsonl in the same Kshetra dir; the metrics aggregator (g2k.2)
+// and spend accounting (F5) read it.
+export function usagePath(kshetraId: string): string {
+  return join(kshetraDir(kshetraId), 'usage.jsonl');
+}
+
 // Pre-Feature-2 location, kept so `tail` can read older logs.
 export function legacyLogPath(kshetraId: string): string {
   return join(homedir(), '.shreni', 'logs', `${kshetraId}.jsonl`);

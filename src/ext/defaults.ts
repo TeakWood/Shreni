@@ -1,7 +1,9 @@
 import { appendFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
-import { logPath, type LoggedEvent } from '../sthapathi/activity-log.js';
-import type { EventSink, UsageMeter, PolicySource, Entitlements } from './types.js';
+import { logPath, usagePath, type LoggedEvent } from '../sthapathi/activity-log.js';
+import type { EventSink, UsageMeter, UsageRecord, UsageEntry, PolicySource, Entitlements } from './types.js';
+import { USAGE_SCHEMA_VERSION } from './types.js';
+import { costFor } from './pricing.js';
 
 // The free-tier default EventSink: append the event to the Kshetra's
 // activity.jsonl exactly as the pre-seam emit() did — same path, same
@@ -22,9 +24,34 @@ export const localFileSink: EventSink = {
   },
 };
 
-// The free-tier default UsageMeter: drop the record on the floor. Keeps the
-// standalone tool's behavior unchanged (no accounting, nothing emitted off the
-// machine). An optional extension swaps in a meter that records or aggregates.
+// The default UsageMeter: derive the run's cost from the price table
+// (pricing.ts) and append one canonical UsageEntry to the Kshetra's usage.jsonl
+// — same mkdir-then-append, one-JSON-object-per-line format as the activity log
+// beside it. Everything stays on the machine (no accounting emitted off-box); it
+// is the durable source the metrics aggregator (g2k.2) and spend (F5) read.
+//
+// Like localFileSink this may throw (a full disk, a permissions error); the
+// runner's reportUsage() wraps every record() call so a metering failure never
+// fails an otherwise-successful agent run.
+export const fileUsageMeter: UsageMeter = {
+  record(usage: UsageRecord): void {
+    const { costUsd, priced } = costFor(usage);
+    const entry: UsageEntry = {
+      ...usage,
+      ts: new Date().toISOString(),
+      schemaVersion: USAGE_SCHEMA_VERSION,
+      costUsd,
+      priced,
+    };
+    const path = usagePath(usage.kshetra);
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, JSON.stringify(entry) + '\n', 'utf8');
+  },
+};
+
+// The prior free-tier default: drop the record on the floor. No longer the
+// default (fileUsageMeter is), but kept as an explicit opt-out an extension —
+// or a test — can swap back in to record nothing.
 export const noopMeter: UsageMeter = {
   record(): void {
     // intentionally does nothing

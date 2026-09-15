@@ -5,23 +5,27 @@
 // startup before the Sthapathi loop arms.
 
 import { SinkRegistry } from './sink-registry.js';
-import { localFileSink, noopMeter, staticPolicySource, allEnabledEntitlements } from './defaults.js';
+import { localFileSink, fileUsageMeter, staticPolicySource, allEnabledEntitlements } from './defaults.js';
 import type { EventSink, UsageMeter, PolicySource, Entitlements, ExtensionCore } from './types.js';
 
 export type {
-  EventSink, UsageMeter, UsageRecord, PolicySource, Entitlements,
+  EventSink, UsageMeter, UsageRecord, UsageEntry, PolicySource, Entitlements,
   ModelSelection, SelectModelRequest, PolicyRunContext, PolicyDecision,
   AgentRole, ExtensionCore, Extension,
 } from './types.js';
+export { USAGE_SCHEMA_VERSION } from './types.js';
 export { SinkRegistry } from './sink-registry.js';
-export { localFileSink, noopMeter, staticPolicySource, allEnabledEntitlements } from './defaults.js';
+export { localFileSink, fileUsageMeter, noopMeter, staticPolicySource, allEnabledEntitlements } from './defaults.js';
+export { costFor, priceFor, BUILT_IN_PRICES, pricingOverridePath } from './pricing.js';
+export type { ModelPrice, CostResult } from './pricing.js';
 
-// Default sink list = [localFileSink]; default meter = no-op; default policy =
-// static (today's kshetra.yaml selection, always allowed); default entitlements =
-// all enabled. All mutable so the loader can extend/swap them; read only through
-// the accessors below so a swapped impl is picked up by later reads.
+// Default sink list = [localFileSink]; default meter = file (persists a
+// UsageEntry per run to the Kshetra's usage.jsonl); default policy = static
+// (today's kshetra.yaml selection, always allowed); default entitlements = all
+// enabled. All mutable so the loader can extend/swap them; read only through the
+// accessors below so a swapped impl is picked up by later reads.
 const sinkRegistry = new SinkRegistry([localFileSink]);
-let usageMeter: UsageMeter = noopMeter;
+let usageMeter: UsageMeter = fileUsageMeter;
 let policySource: PolicySource = staticPolicySource;
 let entitlements: Entitlements = allEnabledEntitlements;
 

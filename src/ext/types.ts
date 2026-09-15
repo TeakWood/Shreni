@@ -45,9 +45,38 @@ export interface UsageRecord {
   toolCallCount: number;
 }
 
-// Receives one record per finalized agent run. The default implementation is a
-// no-op, so the standalone tool is unchanged; an optional extension may record
-// or aggregate these numbers.
+// Bump when the persisted UsageEntry shape changes in a way a consumer must
+// branch on. Independent of the activity log's SCHEMA_VERSION — the two feeds
+// version separately.
+export const USAGE_SCHEMA_VERSION = 1;
+
+// THE CANONICAL USAGE ENTRY (epic g2k). One of these is appended to
+// ~/.shreni/kshetra/<id>/usage.jsonl per finalized agent run by the default
+// UsageMeter, and it is the single record shape the rest of the metrics work
+// builds on: the aggregator (g2k.2) sums over it, spend accounting (F5) reads
+// `costUsd` from it, and the parked ledger (F4) folds it in as one entry kind.
+// Decide it here once.
+//
+// It is the input UsageRecord plus a persistence envelope:
+//   • `ts` / `schemaVersion` mirror the activity log's envelope so a consumer
+//     can order entries and know which fields to expect.
+//   • `costUsd` is the run's cost derived from the price table AT RECORD TIME
+//     (pricing.ts) — a point-in-time snapshot, so later price changes never
+//     rewrite past spend.
+//   • `priced` is false when no price-table entry covered the provider/model;
+//     `costUsd` is then a 0 placeholder that means "unknown", NOT a real $0.
+//     (Gemini's all-zero token counts, by contrast, are `priced: true` with a
+//     genuine 0 cost.)
+export interface UsageEntry extends UsageRecord {
+  ts: string;
+  schemaVersion: number;
+  costUsd: number;
+  priced: boolean;
+}
+
+// Receives one record per finalized agent run. The default implementation
+// persists it (defaults.ts, fileUsageMeter); an optional extension may swap in a
+// meter that records or aggregates these numbers elsewhere.
 export interface UsageMeter {
   record(usage: UsageRecord): void;
 }
