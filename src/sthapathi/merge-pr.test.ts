@@ -51,7 +51,7 @@ vi.mock('./parikshaka-dispatch.js', () => ({ dispatchParikshakaAsync: vi.fn() })
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
-const { resolveMergePolicy, openPrAndDefer, buildPrBody, reconcilePullRequests, parseAwaitingMerge, AWAITING_MERGE_LABEL } =
+const { resolveMergePolicy, openPrAndDefer, buildPrBody, reconcilePullRequests, parseAwaitingMerge, AWAITING_MERGE_LABEL, resetDeferredEpicLog } =
   await import('./merge.js');
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -295,6 +295,73 @@ describe('reconcilePullRequests', () => {
     mockPush.mockRejectedValueOnce(new Error('remote ref does not exist'));
     await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
     expect(mockClose).toHaveBeenCalled();
+  });
+
+  // A merged epic bead whose children are still open (bug dpi): bd refuses to
+  // close it. Reconcile must defer, not throw, so the pass keeps running and the
+  // log doesn't fill with a stack every 5 minutes.
+  describe('merged epic with open children', () => {
+    const epicErr = () => Object.assign(
+      new Error('bd close failed: cannot close epic proj-42: 3 open child issue(s); close children first or use --force to override'),
+      { name: 'BeadsError' },
+    );
+
+    beforeEach(() => resetDeferredEpicLog());
+
+    it('defers the close (keeps label, no branch delete, no throw)', async () => {
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+      mockClose.mockRejectedValue(epicErr());
+      await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
+      expect(mockClose).toHaveBeenCalledWith('proj-42', expect.stringContaining('Merged via PR'));
+      expect(mockRemoveLabel).not.toHaveBeenCalled(); // awaiting-merge kept
+      expect(mockDeleteBranch).not.toHaveBeenCalled();
+      expect(mockClearBeadAttempts).not.toHaveBeenCalled();
+    });
+
+    it('logs once at info across repeated passes, not every pass', async () => {
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+      mockClose.mockRejectedValue(epicErr());
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      await reconcilePullRequests(KSHETRA);
+      await reconcilePullRequests(KSHETRA);
+      const deferLogs = log.mock.calls.filter(c => String(c[0]).includes('open children'));
+      expect(deferLogs).toHaveLength(1);
+      log.mockRestore();
+    });
+
+    it('still closes and cleans up once the children have landed', async () => {
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+      mockClose.mockRejectedValueOnce(epicErr()); // pass 1: children open
+      await reconcilePullRequests(KSHETRA);
+      mockClose.mockResolvedValue('closed'); // pass 2: children now done
+      await reconcilePullRequests(KSHETRA);
+      expect(mockClearBeadAttempts).toHaveBeenCalledWith(KSHETRA, 'proj-42');
+      expect(mockDeleteBranch).toHaveBeenCalledWith('bead-proj-42/fix-auth', { force: true });
+    });
+
+    it('does not abort reconciliation of other beads in the same pass', async () => {
+      mockList.mockResolvedValue(JSON.stringify([
+        { id: 'proj-42', title: 'Epic auth' },
+        { id: 'proj-99', title: 'Fix login' },
+      ]));
+      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+      // proj-42 (processed first) is the wedged epic; proj-99 must still close.
+      mockClose.mockRejectedValueOnce(epicErr());
+      mockClose.mockResolvedValue('closed');
+      await reconcilePullRequests(KSHETRA);
+      expect(mockClose).toHaveBeenCalledWith('proj-99', expect.stringContaining('Merged via PR'));
+      expect(mockClearBeadAttempts).toHaveBeenCalledWith(KSHETRA, 'proj-99');
+    });
+
+    it('rethrows a non-epic close failure (unchanged behavior)', async () => {
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+      mockClose.mockRejectedValue(new Error('bd close failed: database is locked'));
+      await expect(reconcilePullRequests(KSHETRA)).rejects.toThrow('database is locked');
+    });
   });
 
   // Active follow-up detection (epic hjw): OPEN is no longer an unconditional

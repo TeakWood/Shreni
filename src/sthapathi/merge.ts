@@ -313,6 +313,25 @@ export function parseAwaitingMerge(raw: string): AwaitingMergeBead[] {
   return beads;
 }
 
+// bd refuses to close an epic while it still has open children:
+// `cannot close epic <id>: N open child issue(s); close children first ...`.
+// When an epic's own PR merges before its children land, reconcile must defer the
+// close rather than let bd throw — recognise that specific refusal here.
+function isEpicOpenChildrenError(err: unknown): boolean {
+  const msg = (err as Error)?.message ?? '';
+  return /cannot close epic/i.test(msg) && /open child/i.test(msg);
+}
+
+// Epics whose merged-PR close we've already deferred-and-logged, so a merged epic
+// with open children logs once (at info) rather than every reconcile pass.
+// Process-lifetime memory; keyed by "<kshetra>:<bead>". Reset in tests.
+const deferredEpicsLogged = new Set<string>();
+
+// Test-only: forget which deferred epics have been logged.
+export function resetDeferredEpicLog(): void {
+  deferredEpicsLogged.clear();
+}
+
 // Reconcile deferred PR beads (mergePolicy 'pr'). For each bead labelled
 // awaiting-merge, check its PR: MERGED → close the bead and drop the branch;
 // CLOSED-without-merge → block for a human and clear the marker; OPEN (or gh
@@ -353,7 +372,30 @@ export async function reconcilePullRequests(kshetra: KshetraConfig): Promise<voi
     }
 
     if (pr.state === 'MERGED') {
-      await bdClient.close(bead.id, `Merged via PR: ${pr.url}`);
+      try {
+        await bdClient.close(bead.id, `Merged via PR: ${pr.url}`);
+      } catch (err) {
+        if (isEpicOpenChildrenError(err)) {
+          // Epic PR merged but children still open — bd won't close it yet. Keep
+          // the awaiting-merge label and defer; a later pass closes it (and drops
+          // the branch) once the children land. Log once at info instead of
+          // erroring — and throwing — every pass, which also aborted the rest of
+          // the reconcile loop.
+          const key = `${kshetra.id}:${bead.id}`;
+          if (!deferredEpicsLogged.has(key)) {
+            deferredEpicsLogged.add(key);
+            console.log(
+              `[shreni reconcile:${kshetra.id}] ${bead.id} epic PR merged but has open children — ` +
+              `deferring close until they land`,
+            );
+          }
+          continue;
+        }
+        throw err;
+      }
+      // Close succeeded — the epic's children (if any) are all done, or it had
+      // none. Any earlier deferral no longer applies.
+      deferredEpicsLogged.delete(`${kshetra.id}:${bead.id}`);
       emitTelemetry('task_merged', { policy: 'pr' });
       clearBeadAttempts(kshetra, bead.id);
       // Drop the merged branch locally and (best-effort) on the remote — GitHub
