@@ -15,6 +15,7 @@ import { reconcilePullRequests } from '../sthapathi/merge';
 import { selectFollowup } from '../sthapathi/pr-followup';
 import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
 import { loadExtension } from '../ext/loader';
+import { findRoleCredentialGaps } from './provider-preflight';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -33,6 +34,18 @@ const kshetra = loadRegistry().find(k => k.id === kshetraId);
 
 if (!kshetra) {
   console.error(`[shreni worker] kshetra not registered: ${kshetraId}`);
+  process.exit(1);
+}
+
+// Credential preflight (b0f.3): with per-role providers a worker may drive
+// several providers at once. Verify every role's provider has credentials NOW —
+// a hard gate before any work starts — so a missing key fails loud here rather
+// than mid-run when that agent is first dispatched. Subscription providers
+// (Claude's login default) are never flagged.
+const credentialGaps = findRoleCredentialGaps(kshetra);
+if (credentialGaps.length > 0) {
+  console.error(`[shreni worker:${kshetraId}] cannot start — missing provider credentials:`);
+  for (const gap of credentialGaps) console.error(`  • ${gap.message}`);
   process.exit(1);
 }
 

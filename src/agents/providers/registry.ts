@@ -28,6 +28,16 @@ export interface ProviderInfo {
   // using one — a first-run user must not be silently dropped onto an unfinished
   // provider (the BYO-subscription promise depends on the first run working).
   experimental: boolean;
+  // Env vars any one of which supplies API-key credentials for this provider's
+  // CLI. The credential preflight (b0f.3) checks these at startup so a role wired
+  // to a provider with no key fails loud up-front, not mid-run.
+  apiKeyEnvVars: readonly string[];
+  // True when the CLI can authenticate via its own login/subscription WITHOUT an
+  // API-key env var (the BYO-subscription path). For such a provider a missing key
+  // is not a hard error — the run is assumed to use the CLI's login. Anthropic's
+  // `claude` is the default supported subscription path and runs with no
+  // ANTHROPIC_API_KEY, so it must never be blocked for a missing key.
+  subscriptionAuth: boolean;
 }
 
 export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
@@ -40,6 +50,10 @@ export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
     installCmd: 'npm install -g @anthropic-ai/claude-code',
     docsUrl: 'https://docs.anthropic.com/en/docs/claude-code/overview',
     experimental: false,
+    apiKeyEnvVars: ['ANTHROPIC_API_KEY'],
+    // The default supported path is a Claude subscription (`claude` login), which
+    // runs with no ANTHROPIC_API_KEY — so a missing key must not block startup.
+    subscriptionAuth: true,
   },
   openai: {
     cliName: 'codex',
@@ -51,6 +65,10 @@ export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
     installCmd: 'npm install -g @openai/codex',
     docsUrl: 'https://github.com/openai/codex',
     experimental: true,
+    apiKeyEnvVars: ['OPENAI_API_KEY'],
+    // Experimental adapter driven by env — treat an API key as required so a
+    // per-role Codex reviewer fails loud at startup if unconfigured.
+    subscriptionAuth: false,
   },
   gemini: {
     cliName: 'gemini',
@@ -62,6 +80,10 @@ export const PROVIDER_REGISTRY: Record<Provider, ProviderInfo> = {
     installCmd: 'npm install -g @google/gemini-cli',
     docsUrl: 'https://github.com/google-gemini/gemini-cli',
     experimental: true,
+    apiKeyEnvVars: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+    // Experimental adapter driven by env — treat an API key as required so a
+    // per-role Gemini agent fails loud at startup if unconfigured.
+    subscriptionAuth: false,
   },
 };
 

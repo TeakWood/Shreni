@@ -3,6 +3,7 @@ import { delimiter, isAbsolute, join } from 'path';
 import { createInterface } from 'readline';
 import type { Provider } from '../agents/providers/types.js';
 import { PROVIDER_REGISTRY, providerBin } from '../agents/providers/registry.js';
+import { AGENT_ROLES, resolveAgentModel, type AgentRole, type KshetraConfig } from '../kshetra/config.js';
 
 // The default provider when init is run without --provider and the operator just
 // hits Enter at the prompt (§3.5).
@@ -80,4 +81,59 @@ export function checkProviderInstalled(
   const bin = providerBin(provider);
   if (commandExists(bin, env)) return { ok: true, bin };
   return { ok: false, bin, message: installMessage(provider, bin) };
+}
+
+// ── Credential preflight (b0f.3) ──────────────────────────────────────────────
+//
+// A per-role provider (b0f) means a worker can drive several providers at once
+// (e.g. a Claude Silpi with a Codex Viharapala). If a role's provider has no
+// credentials, the failure otherwise only shows when THAT agent first runs —
+// mid-run, after other work has started. These functions let the worker check
+// every role's provider up-front and abort with a clear message instead.
+
+// True when any of the provider's API-key env vars is set to a non-empty value.
+function providerKeyed(provider: Provider, env: NodeJS.ProcessEnv): boolean {
+  return PROVIDER_REGISTRY[provider].apiKeyEnvVars.some(v => (env[v] ?? '').trim() !== '');
+}
+
+// A provider used by one or more roles that has no usable credentials. Only
+// providers that REQUIRE an API key (subscriptionAuth === false) can appear here:
+// a subscription provider (Anthropic's `claude`) authenticates via its own login,
+// so a missing key is never a hard gap.
+export interface CredentialGap {
+  provider: Provider;
+  roles: AgentRole[];
+  message: string;
+}
+
+// Find every provider a role resolves to that requires an API key but has none
+// set. Grouped by provider (one gap per provider, listing the affected roles) so
+// the operator sees each missing credential once. A subscription-auth provider
+// with no key is intentionally NOT a gap — it runs on the CLI's login.
+export function findRoleCredentialGaps(
+  kshetra: KshetraConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): CredentialGap[] {
+  const rolesByProvider = new Map<Provider, AgentRole[]>();
+  for (const role of AGENT_ROLES) {
+    const { provider } = resolveAgentModel(kshetra, role);
+    const list = rolesByProvider.get(provider) ?? [];
+    list.push(role);
+    rolesByProvider.set(provider, list);
+  }
+
+  const gaps: CredentialGap[] = [];
+  for (const [provider, roles] of rolesByProvider) {
+    const info = PROVIDER_REGISTRY[provider];
+    if (info.subscriptionAuth) continue; // login/subscription path — no key required
+    if (providerKeyed(provider, env)) continue; // key present
+    gaps.push({
+      provider,
+      roles,
+      message:
+        `${info.cliName} (${provider}) is used by role(s) ${roles.join(', ')} but no API key is set — ` +
+        `set ${info.apiKeyEnvVars.join(' or ')} in the environment Shreni runs under before starting.`,
+    });
+  }
+  return gaps;
 }

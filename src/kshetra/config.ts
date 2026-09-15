@@ -175,7 +175,7 @@ const AgentRoleConfigSchema = z.object({
 
 // The role keys that may carry a per-role sub-config. Iterated by the
 // superRefine so a new role is validated automatically once added here.
-const AGENT_ROLES = ['suthradhara', 'silpi', 'viharapala', 'parikshaka'] as const;
+export const AGENT_ROLES = ['suthradhara', 'silpi', 'viharapala', 'parikshaka'] as const;
 
 const AgentsConfigSchema = z.object({
   provider: ProviderSchema.default('anthropic'),

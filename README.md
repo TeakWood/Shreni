@@ -301,16 +301,45 @@ stack:
   linter: eslint
 
 agents:
-  provider: claude          # supported provider; codex / gemini are experimental
+  provider: anthropic       # supported provider; openai (codex) / gemini are experimental
   model: claude-sonnet-4-6
   maxRoundsPerBead: 3
 ```
 
-> **Agent providers.** **Claude** (`claude`) is the supported, default provider.
-> Adapters for **Codex** (`codex`) and **Gemini** (`gemini`) are wired but
-> **experimental** — draft and not verified end-to-end — and ship with no default
-> model, so they require an explicit `agents.model`. `shreni init-kshetra` warns
-> you if you pick one. If you want a reliable first run, use Claude.
+> **Agent providers.** **Anthropic** (Claude, CLI `claude`) is the supported,
+> default provider. Adapters for **OpenAI** (Codex, CLI `codex`) and **Gemini**
+> (`gemini`) are wired but **experimental** — draft and not verified end-to-end —
+> and ship with no default model, so they require an explicit `model`.
+> `shreni init-kshetra` warns you if you pick one. If you want a reliable first
+> run, use Claude. (The `provider` value is the internal name — `anthropic`,
+> `openai`, or `gemini` — while the CLI it drives is `claude` / `codex` / `gemini`.)
+
+#### Per-role provider & model
+
+Each agent role — `silpi` (coder), `viharapala` (reviewer), `parikshaka` (test),
+`suthradhara` (planner) — can override the flat `provider`/`model` with its own.
+An omitted field inherits the flat default, so you can override just the model, or
+both. This unlocks **independent review**: a Codex reviewer judging a Claude
+implementation, for example.
+
+```yaml
+agents:
+  provider: anthropic          # flat default for any role that doesn't override
+  model: claude-sonnet-4-6
+  maxRoundsPerBead: 3
+  silpi:
+    model: claude-opus-4-1     # heavier coder, still on Anthropic (inherits provider)
+  viharapala:
+    provider: openai           # a Codex reviewer judging the Claude silpi's work
+    model: gpt-5-codex         # experimental provider ⇒ model is required
+```
+
+> **Credentials.** Each role's provider must be authenticated in the environment
+> the worker runs under. Anthropic's `claude` uses your subscription login by
+> default (no key needed); the experimental providers need an API key —
+> `OPENAI_API_KEY` for Codex, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for Gemini.
+> A worker whose role resolves to a key-required provider with no key set **fails
+> at startup with a clear error**, not mid-run.
 
 ### Config source of truth
 
