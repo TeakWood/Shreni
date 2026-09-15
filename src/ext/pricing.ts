@@ -64,6 +64,19 @@ export function pricingOverridePath(): string {
 // override must never crash metering.
 let cachedTable: Record<string, Record<string, ModelPrice>> | null = null;
 
+// A well-formed override entry must supply every ModelPrice lane as a finite,
+// non-negative number. A partial entry ({inputPerMTok: 4}) or a non-numeric one
+// would leave a lane undefined/NaN and poison costFor into persisting NaN
+// costUsd; a negative rate would persist a nonsensical negative cost — so
+// anything short of all four finite, non-negative fields is rejected (fail-open
+// to the built-in).
+function isValidModelPrice(v: unknown): v is ModelPrice {
+  if (!v || typeof v !== 'object') return false;
+  const p = v as Record<string, unknown>;
+  return (['inputPerMTok', 'outputPerMTok', 'cacheReadPerMTok', 'cacheWritePerMTok'] as const)
+    .every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]) && (p[k] as number) >= 0);
+}
+
 function loadOverrides(): Record<string, Record<string, ModelPrice>> {
   let raw: string;
   try {
@@ -71,12 +84,34 @@ function loadOverrides(): Record<string, Record<string, ModelPrice>> {
   } catch {
     return {}; // no override file — the common case
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, Record<string, ModelPrice>>) : {};
+    parsed = JSON.parse(raw);
   } catch {
     return {}; // malformed JSON — ignore rather than crash the run
   }
+  if (!parsed || typeof parsed !== 'object') return {};
+
+  // Keep only complete, finite-numeric model entries. A malformed/partial entry
+  // is dropped with a warning so the built-in price shows through the merge,
+  // never leaving a lane undefined for costFor to turn into NaN.
+  const clean: Record<string, Record<string, ModelPrice>> = {};
+  for (const [provider, models] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!models || typeof models !== 'object') {
+      console.warn(`[pricing] ignoring override for provider "${provider}": not an object`);
+      continue;
+    }
+    for (const [model, price] of Object.entries(models as Record<string, unknown>)) {
+      if (isValidModelPrice(price)) {
+        (clean[provider] ??= {})[model] = price;
+      } else {
+        console.warn(
+          `[pricing] ignoring override for ${provider}/${model}: each of inputPerMTok, outputPerMTok, cacheReadPerMTok, cacheWritePerMTok must be a finite, non-negative number`,
+        );
+      }
+    }
+  }
+  return clean;
 }
 
 function priceTable(): Record<string, Record<string, ModelPrice>> {

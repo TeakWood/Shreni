@@ -77,4 +77,61 @@ describe('priceFor with ~/.shreni/pricing.json override', () => {
     mockedRead.mockReturnValue('{ not json');
     expect(priceFor('anthropic', 'claude-sonnet-4-6')?.inputPerMTok).toBe(3);
   });
+
+  it('drops a partial override entry and fails open to the built-in (no NaN)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Only inputPerMTok supplied — the other three lanes would be undefined.
+    mockedRead.mockReturnValue(JSON.stringify({
+      anthropic: { 'claude-sonnet-4-6': { inputPerMTok: 4 } },
+    }));
+    const price = priceFor('anthropic', 'claude-sonnet-4-6');
+    // The built-in survives the merge untouched — no undefined lanes.
+    expect(price).toEqual(BUILT_IN_PRICES.anthropic['claude-sonnet-4-6']);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('never persists NaN costUsd from a partial override', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockedRead.mockReturnValue(JSON.stringify({
+      anthropic: { 'claude-sonnet-4-6': { inputPerMTok: 4 } },
+    }));
+    const { costUsd, priced } = costFor(record({
+      inputTokens: 1_000_000, outputTokens: 1_000_000,
+      cacheReadTokens: 1_000_000, cacheCreationTokens: 1_000_000,
+    }));
+    expect(priced).toBe(true);
+    expect(Number.isFinite(costUsd)).toBe(true);
+    // Falls back to the built-in rates, not the partial override's 4.
+    expect(costUsd).toBeCloseTo(3 + 15 + 0.3 + 3.75, 6);
+  });
+
+  it('rejects a non-numeric override lane', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockedRead.mockReturnValue(JSON.stringify({
+      anthropic: { 'claude-sonnet-4-6': { inputPerMTok: '3', outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheWritePerMTok: 3.75 } },
+    }));
+    expect(priceFor('anthropic', 'claude-sonnet-4-6')).toEqual(BUILT_IN_PRICES.anthropic['claude-sonnet-4-6']);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('rejects a negative override lane (would persist a negative cost)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockedRead.mockReturnValue(JSON.stringify({
+      anthropic: { 'claude-sonnet-4-6': { inputPerMTok: -5, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheWritePerMTok: 3.75 } },
+    }));
+    expect(priceFor('anthropic', 'claude-sonnet-4-6')).toEqual(BUILT_IN_PRICES.anthropic['claude-sonnet-4-6']);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('accepts a complete override entry with all four finite lanes', () => {
+    mockedRead.mockReturnValue(JSON.stringify({
+      anthropic: { 'claude-sonnet-4-6': { inputPerMTok: 4, outputPerMTok: 16, cacheReadPerMTok: 0.4, cacheWritePerMTok: 4 } },
+    }));
+    expect(priceFor('anthropic', 'claude-sonnet-4-6')).toEqual({
+      inputPerMTok: 4, outputPerMTok: 16, cacheReadPerMTok: 0.4, cacheWritePerMTok: 4,
+    });
+  });
 });
