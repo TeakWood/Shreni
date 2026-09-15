@@ -22,6 +22,10 @@ export type { ModelPrice, CostResult } from './pricing.js';
 // Kshetra. Consumed by the budget mayProceed policy (ho4.3).
 export { computeSpend, readUsageEntries, readSpendSoFar } from './spend.js';
 export type { SpendSoFar } from './spend.js';
+// Budget mayProceed policy (ho4.3): composes USD cap enforcement on top of the
+// active policy. Wired at worker startup after the extension loads.
+export { makeBudgetPolicy } from './budget-policy.js';
+export type { BudgetPolicyDeps } from './budget-policy.js';
 
 // Default sink list = [localFileSink]; default meter = file (persists a
 // UsageEntry per run to the Kshetra's usage.jsonl); default policy = static

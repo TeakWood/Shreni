@@ -15,6 +15,7 @@ import { reconcilePullRequests } from '../sthapathi/merge';
 import { selectFollowup } from '../sthapathi/pr-followup';
 import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
 import { loadExtension } from '../ext/loader';
+import { extensionCore, getPolicySource, makeBudgetPolicy } from '../ext/index';
 import { findRoleCredentialGaps } from './provider-preflight';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
@@ -163,6 +164,11 @@ async function startup(): Promise<void> {
   // first event. Fail-open: a missing/throwing extension degrades to the local
   // defaults with one log line (extension-points.md §"Loading an extension").
   await loadExtension({ log: msg => console.log(`[shreni worker:${kshetraId}] ${msg}`) });
+  // Enforce kshetra.yaml budget caps (ho4.3) on top of whatever policy is now
+  // active — the static default, or an extension's own policy loaded just above.
+  // Composed last so the caps always apply; the inner policy keeps its model
+  // selection and can still deny for its own reasons.
+  extensionCore.setPolicySource(makeBudgetPolicy(getPolicySource()));
   await sync();
   const resumable = await recoverKshetra(kshetra!);
   // RECOVER has just reconciled the drift a stuck pause escalated over, so a
