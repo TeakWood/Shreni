@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import {
   writeFileSync, appendFileSync, symlinkSync,
-  existsSync, mkdirSync, readFileSync, readlinkSync,
+  existsSync, mkdirSync, readFileSync, readlinkSync, chmodSync,
 } from 'fs';
 import { resolve, join, dirname, basename } from 'path';
 import { homedir } from 'os';
@@ -211,6 +211,28 @@ export async function pushBeadsRepo(beadsPath: string): Promise<void> {
   }
   const branch = await exec('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: beadsPath });
   await exec('git', ['push', '-u', 'origin', branch], { cwd: beadsPath });
+}
+
+// ── Step 3.6: Silence bd's per-invocation warnings ────────────────────────────
+
+// `git clone` / `bd init` leave the beads repo dir at the default 0755 and never
+// set `beads.role`, so every `bd` command against the Kshetra prints two
+// warnings: a permissions nag (recommends 0700) and a `beads.role not
+// configured` nag (GH#2950). Tighten the dir to 0700 and stamp the role into the
+// repo's local git config so both go quiet. Idempotent: chmod to an already-0700
+// dir is a no-op, and `git config` overwrites in place — safe to re-run on an
+// existing Kshetra. `role` defaults to 'maintainer' (bd's own recommendation for
+// the DB owner); pass 'contributor' for a read-mostly checkout. Best-effort: this
+// only quiets cosmetic warnings, so a chmod/config failure warns and continues
+// rather than wedging an otherwise-complete init.
+export async function hardenBeadsRepo(beadsPath: string, role = 'maintainer'): Promise<void> {
+  if (!existsSync(beadsPath)) return; // nothing materialized — nothing to harden
+  try {
+    chmodSync(beadsPath, 0o700);
+    await exec('git', ['config', 'beads.role', role], { cwd: beadsPath });
+  } catch (err) {
+    console.log(`  could not harden beads repo at ${beadsPath} (bd may warn) — ${(err as Error).message}`);
+  }
 }
 
 // ── Step 4: Create .beads symlink ─────────────────────────────────────────────
@@ -898,6 +920,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           await cloneBeadsRepo(beadsRemote, beadsPath);
         }
         await initBeadsDb(beadsPath);
+        await hardenBeadsRepo(beadsPath);
         await pushBeadsRepo(beadsPath);
       },
     },

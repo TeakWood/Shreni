@@ -30,6 +30,7 @@ const mockReadFileSync = vi.fn<() => string>().mockReturnValue('');
 const mockReadlinkSync = vi.fn<(p: string) => string>().mockImplementation(() => {
   throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 });
+const mockChmodSync = vi.fn();
 vi.mock('fs', () => ({
   writeFileSync: mockWriteFileSync,
   appendFileSync: mockAppendFileSync,
@@ -38,6 +39,7 @@ vi.mock('fs', () => ({
   mkdirSync: mockMkdirSync,
   readFileSync: mockReadFileSync,
   readlinkSync: mockReadlinkSync,
+  chmodSync: mockChmodSync,
 }));
 
 const mockRegisterKshetra = vi.fn();
@@ -74,6 +76,7 @@ const {
   createGitHubRepo,
   cloneBeadsRepo,
   initBeadsDb,
+  hardenBeadsRepo,
   pushBeadsRepo,
   createBeadsSymlink,
   addToGitignore,
@@ -274,6 +277,47 @@ describe('initBeadsDb', () => {
     mockExistsSync.mockImplementation((p: string) => p.endsWith('.dolt'));
     await initBeadsDb('/repos/myapp-beads');
     expect(mockExecFile).not.toHaveBeenCalled();
+  });
+});
+
+// ── Step 3.6: hardenBeadsRepo (nao) ──────────────────────────────────────────
+
+describe('hardenBeadsRepo', () => {
+  it('chmods the beads dir to 0700 and configures beads.role=maintainer', async () => {
+    mockExistsSync.mockReturnValue(true);
+    resolveExec('');
+    await hardenBeadsRepo('/repos/myapp-beads');
+    expect(mockChmodSync).toHaveBeenCalledWith('/repos/myapp-beads', 0o700);
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'git', ['config', 'beads.role', 'maintainer'],
+      expect.objectContaining({ cwd: '/repos/myapp-beads' }),
+    );
+  });
+
+  it('honors an overridden role value', async () => {
+    mockExistsSync.mockReturnValue(true);
+    resolveExec('');
+    await hardenBeadsRepo('/repos/myapp-beads', 'contributor');
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'git', ['config', 'beads.role', 'contributor'],
+      expect.objectContaining({ cwd: '/repos/myapp-beads' }),
+    );
+  });
+
+  it('is a no-op when the beads dir does not exist', async () => {
+    mockExistsSync.mockReturnValue(false);
+    await hardenBeadsRepo('/repos/myapp-beads');
+    expect(mockChmodSync).not.toHaveBeenCalled();
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('fails soft (warns, does not throw) when git config errors', async () => {
+    mockExistsSync.mockReturnValue(true);
+    resolveExecByCommand({ 'git config beads.role': null });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await expect(hardenBeadsRepo('/repos/myapp-beads')).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('could not harden beads repo'));
+    log.mockRestore();
   });
 });
 
