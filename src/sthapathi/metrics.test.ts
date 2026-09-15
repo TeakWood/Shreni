@@ -39,6 +39,19 @@ describe('computeMetrics — empty log', () => {
     });
   });
 
+  it('tolerates unknown/new event types (e.g. Suthradhara lifecycle, fnd.1) without throwing or miscounting', () => {
+    const m = computeMetrics({
+      events: [
+        ev({ type: 'suthradhara_launched', kshetra: 'k', sessionId: 's', claudeSessionId: 'c', resume: false }),
+        ev({ type: 'suthradhara_menu_choice', kshetra: 'k', sessionId: 's', choice: 'end' }),
+        taskDone('b1', true, 2),
+      ],
+    });
+    // The new types are ignored; only the task_done is counted.
+    expect(m.totalTasks).toBe(1);
+    expect(m.approvedTasks).toBe(1);
+  });
+
   it('treats empty arrays the same as omitted feeds', () => {
     expect(computeMetrics({ events: [], usage: [], notifications: [] })).toEqual(computeMetrics());
   });

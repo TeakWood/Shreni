@@ -52,3 +52,34 @@ describe('emit envelope', () => {
     expect(getCurrentRunId(k)).toBe('');
   });
 });
+
+describe('Suthradhara lifecycle events (fnd.1)', () => {
+  it('emits and round-trips every Suthradhara lifecycle variant with its fields', () => {
+    const k = 'fnd-suthra';
+    emit({ type: 'suthradhara_launched', kshetra: k, sessionId: 's-1', claudeSessionId: 'c-1', resume: false });
+    emit({ type: 'suthradhara_plan_filed', kshetra: k, sessionId: 's-1', epicId: 'e-1', docPath: '.shreni/design/x.md', summary: 'planned x' });
+    emit({ type: 'suthradhara_doc_pushed', kshetra: k, sessionId: 's-1', branch: 'suthradhara/x', docPath: '.shreni/design/x.md' });
+    emit({ type: 'suthradhara_menu_choice', kshetra: k, sessionId: 's-1', choice: 'extend' });
+    emit({ type: 'suthradhara_session_ended', kshetra: k, sessionId: 's-1', epicId: 'e-1' });
+
+    const log = readLog(k);
+    expect(log.map(e => e.type)).toEqual([
+      'suthradhara_launched', 'suthradhara_plan_filed', 'suthradhara_doc_pushed',
+      'suthradhara_menu_choice', 'suthradhara_session_ended',
+    ]);
+    // Envelope stamped like any other event; fields survive the round-trip.
+    expect(log.every(e => e.schemaVersion === SCHEMA_VERSION && typeof e.ts === 'string')).toBe(true);
+    const filed = log[1];
+    expect(filed.type === 'suthradhara_plan_filed' && filed.epicId).toBe('e-1');
+    const menu = log[3];
+    expect(menu.type === 'suthradhara_menu_choice' && menu.choice).toBe('extend');
+  });
+
+  it('session_ended may omit the optional epicId (session that filed nothing)', () => {
+    const k = 'fnd-suthra-noepic';
+    emit({ type: 'suthradhara_session_ended', kshetra: k, sessionId: 's-9' });
+    const [ev] = readLog(k);
+    expect(ev.type).toBe('suthradhara_session_ended');
+    expect((ev as { epicId?: string }).epicId).toBeUndefined();
+  });
+});

@@ -13,7 +13,19 @@ export type ActivityEvent =
   | { type: 'viharapala_done';  kshetra: string; beadId: string; round: number; verdict: 'APPROVE' | 'REJECT'; score: number; mustFix: string[] }
   | { type: 'task_done';        kshetra: string; beadId: string; title: string; approved: boolean; rounds: number }
   | { type: 'beads_synced';     kshetra: string }
-  | { type: 'error';            kshetra: string; beadId?: string; message: string };
+  | { type: 'error';            kshetra: string; beadId?: string; message: string }
+  // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
+  // launched session runs interactive with no stream-json, so these lifecycle
+  // events — not the per-token agent_text/agent_tool_call the executors emit — are
+  // its monitoring surface; fnd.2 emits them from the launcher control loop, fnd.5
+  // renders them. Keyed by kshetra + sessionId (the shreni session id, distinct
+  // from the beadId/runId correlation the executor loop uses). Token usage is
+  // recovered separately from the session transcript (fnd.3/fnd.4), not from these.
+  | { type: 'suthradhara_launched';      kshetra: string; sessionId: string; claudeSessionId: string; resume: boolean }
+  | { type: 'suthradhara_plan_filed';    kshetra: string; sessionId: string; epicId: string; docPath: string; summary: string }
+  | { type: 'suthradhara_doc_pushed';    kshetra: string; sessionId: string; branch: string; docPath: string }
+  | { type: 'suthradhara_menu_choice';   kshetra: string; sessionId: string; choice: 'extend' | 'new' | 'end' }
+  | { type: 'suthradhara_session_ended'; kshetra: string; sessionId: string; epicId?: string };
 
 // Bump when the on-disk event envelope changes shape in a way a consumer must
 // branch on. A consumer reads schemaVersion to know which fields to expect.
