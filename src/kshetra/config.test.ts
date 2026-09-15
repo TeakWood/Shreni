@@ -327,6 +327,52 @@ agents:
     expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
   });
 
+  it('accepts optional per-bead and per-Kshetra budget caps (ho4)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+budget:
+  perBeadUsd: 5
+  perKshetraUsd: 100.5
+`);
+    const config = loadKshetraConfig(path);
+    expect(config.budget).toEqual({ perBeadUsd: 5, perKshetraUsd: 100.5 });
+  });
+
+  it('accepts a partial budget block (only one cap set)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+budget:
+  perKshetraUsd: 250
+`);
+    const config = loadKshetraConfig(path);
+    expect(config.budget).toEqual({ perKshetraUsd: 250 });
+    expect(config.budget?.perBeadUsd).toBeUndefined();
+  });
+
+  it('leaves budget undefined when the block is omitted (uncapped)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML);
+    expect(loadKshetraConfig(path).budget).toBeUndefined();
+  });
+
+  it('rejects a non-positive budget cap', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+budget:
+  perBeadUsd: 0
+`);
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+  });
+
+  it('rejects a negative budget cap', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + `
+budget:
+  perKshetraUsd: -10
+`);
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+  });
+
   it('throws KshetraConfigError when file does not exist', () => {
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(KshetraConfigError);
     expect(() => loadKshetraConfig(join(dir, 'missing.yaml'))).toThrow(/Cannot read file/);

@@ -449,6 +449,28 @@ gates:                    # all optional — these are the defaults
   tripwire. Defaults are conservative and `warn`-level; raise to `block` if an
   oversized diff must never reach review.
 
+### Budget caps (`budget:`)
+
+An unattended harness spends real money on every agent run. The optional `budget:`
+block sets **USD spend ceilings** so a runaway loop can't quietly rack up cost
+("it ran overnight and spent $400"):
+
+```yaml
+budget:                     # both optional; omit the block for uncapped (default)
+  perBeadUsd: 5             # cap one bead's cumulative agent spend
+  perKshetraUsd: 100        # cap the whole Kshetra's lifetime spend
+```
+
+- **Optional and additive.** Omit `budget:` entirely (today's behavior, uncapped),
+  or set just one cap. Caps must be a positive dollar amount — "no cap" is
+  expressed by omission, never `0`.
+- **How it's measured.** Spend-so-far is summed from the persisted usage ledger
+  (`usage.jsonl`), priced per model from the built-in rate table (overridable via
+  `~/.shreni/pricing.json`).
+- **Enforcement.** A run that would breach a cap is hard-stopped at the
+  `mayProceed` decision point before the agent spawns — the cap is checked
+  up-front, not after the spend.
+
 ## Running the Harness
 
 ### Start / Stop

@@ -244,6 +244,17 @@ const WatchdogConfigSchema = z.object({
   maxRecoverAttempts: z.number().int().min(1).optional(),
 });
 
+// Spend caps (epic ho4). Optional USD ceilings a budget policy (ho4.3) enforces on
+// mayProceed, reading spend-so-far from persisted usage (ho4.2): `perBeadUsd`
+// bounds one bead's cumulative agent spend, `perKshetraUsd` bounds the whole
+// Kshetra's lifetime spend. An omitted field is uncapped; the whole block is
+// optional (no `budget:` = fully uncapped, today's behavior). Caps must be finite
+// and > 0 — a 0 cap would block all work, so "no cap" is expressed by omission.
+const BudgetConfigSchema = z.object({
+  perBeadUsd: z.number().finite().positive().optional(),
+  perKshetraUsd: z.number().finite().positive().optional(),
+});
+
 export const KshetraConfigSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/, 'id must be lowercase alphanumeric with hyphens'),
   name: z.string(),
@@ -260,6 +271,9 @@ export const KshetraConfigSchema = z.object({
   priority: PriorityConfigSchema.default({ p0AutoAssign: true, maxConcurrentBeads: 1 }),
   gates: GatesConfigSchema.default(GATES_DEFAULTS),
   watchdog: WatchdogConfigSchema.optional(),
+  // Spend caps (epic ho4). Optional; the budget mayProceed policy (ho4.3) reads
+  // these to hard-stop a bead or Kshetra that would exceed its USD ceiling.
+  budget: BudgetConfigSchema.optional(),
   // External MCP servers defined once for the Kshetra (epic pmb). Optional —
   // a Kshetra with no external grounding omits the block entirely. Per-role
   // grants under agents.<role>.mcp reference server names defined here; the
@@ -296,6 +310,9 @@ export type AgentRole = (typeof AGENT_ROLES)[number];
 // wiring. b0f.2 resolves a role's override against the flat agents default.
 export type AgentRoleConfig = z.infer<typeof AgentRoleConfigSchema>;
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
+// Optional per-bead / per-Kshetra USD spend caps (epic ho4), enforced by the
+// budget mayProceed policy (ho4.3). An absent field/block means uncapped.
+export type BudgetConfig = z.infer<typeof BudgetConfigSchema>;
 
 // Resolve the effective provider+model for one agent role (b0f.2): a role's own
 // override wins, else the flat agents.{provider,model} default. Each field falls
