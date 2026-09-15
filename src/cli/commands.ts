@@ -26,6 +26,7 @@ import { autoStartPhalaka, autoStopPhalaka } from './phalaka-autostart';
 import { runSuthradhara } from './suthradhara';
 import { runTail } from './tail';
 import { runReport } from './report';
+import { runShow } from './show';
 import { runInit } from './init';
 import { runTelemetry } from './telemetry';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -357,6 +358,18 @@ export const COMMANDS: Command[] = [
     usage: '[@<id> | --kshetra <id>]',
     run(ctx) {
       return runReport({
+        args: ctx.args,
+        flagKshetra: ctx.flag('--kshetra'),
+        cwd: process.cwd(),
+      });
+    },
+  },
+  {
+    name: 'show',
+    summary: 'Join a bead\'s plan (bd) and execution (ledger) into one timeline',
+    usage: '<beadId> [@<id> | --kshetra <id>]',
+    run(ctx) {
+      return runShow({
         args: ctx.args,
         flagKshetra: ctx.flag('--kshetra'),
         cwd: process.cwd(),
