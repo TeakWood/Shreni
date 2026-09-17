@@ -13,7 +13,7 @@ import {
 import { listSessions } from '../suthradhara/persistence';
 import { readHandoff, type Handoff } from '../suthradhara/handoff';
 import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-log';
-import { getUsageMeter, costFor, type UsageMeter } from '../ext/index';
+import { getUsageMeter, getPolicySource, costFor, type UsageMeter, type PolicySource, type PolicyDecision } from '../ext/index';
 import { readSessionUsage, type SessionUsage } from '../suthradhara/usage';
 import { resolveAgentModel, type KshetraConfig } from '../kshetra/config';
 
@@ -114,6 +114,7 @@ export async function runSuthradhara(sub: string | undefined, opts: RunOpts): Pr
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
 
   if (sub === 'start') {
+    if (!gateFirstLaunch(kshetra, 'launching')) return; // fnd.7: budget gate
     const result = await startSession(kshetra);
     if (result.status === 'already_running') {
       console.log(`suthradhara[${result.kshetraId}]: already running (pid ${result.pid})`);
@@ -156,6 +157,10 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
     );
   }
 
+  // fnd.7: a resume relaunches an interactive session, so gate it on the budget
+  // cap too (via the same first-launch gate the `start` command uses).
+  if (!gateFirstLaunch(kshetra, 'resuming')) return;
+
   const result = await resumeSession(kshetra, sessionId);
   if (result.status === 'already_running') {
     console.log(
@@ -192,6 +197,9 @@ export interface PlanningLoopDeps {
   // Injected so tests assert one record per session without a real transcript.
   meter?: UsageMeter;
   readUsage?: (cwd: string, claudeSessionId: string) => SessionUsage;
+  // Budget gate seam (fnd.7). Defaults to the shared getPolicySource(); injected
+  // so tests can drive the deny path without wiring a real budget policy.
+  policy?: PolicySource;
 }
 
 export type MenuChoice = 'extend' | 'new' | 'end';
@@ -228,6 +236,49 @@ export function renderSummary(kshetra: KshetraConfig, handoff: Handoff | null): 
   return lines;
 }
 
+// Pre-launch budget gate (epic fnd.7). A planning session's spend lands against
+// the Kshetra (its per-bead spend is $0 until it files an epic, whose spend is
+// keyed separately), so this enforces the per-Kshetra USD cap — mirroring
+// runner.ts's pre-run mayProceed, but at the LAUNCH boundary because an
+// interactive session can't be killed mid-stream once spawned. Consults the
+// active policy and records a policy_decision event (like runner.ts) so a blocked
+// launch shows on the ledger, not just as an absence. Fail-open: the default
+// static policy — and a Kshetra with no budget caps — always allows.
+export function mayLaunchSession(
+  kshetra: KshetraConfig,
+  emit: (ev: ActivityEvent) => void,
+  policy: PolicySource,
+): PolicyDecision {
+  const { provider, model } = resolveAgentModel(kshetra, 'suthradhara');
+  // Synthetic per-Kshetra bead key: a fresh session owns no bead at launch, so
+  // per-bead spend reads $0 and the per-bead cap never fires here — the
+  // per-Kshetra cap is what gates a launch.
+  const beadId = `suthradhara:${kshetra.id}`;
+  const decision = policy.mayProceed({ kshetra: kshetra.id, beadId, agent: 'suthradhara', provider, model });
+  emit({
+    type: 'policy_decision',
+    kshetra: kshetra.id, beadId, agent: 'suthradhara', policy: 'mayProceed',
+    provider, model,
+    allowed: decision.allowed,
+    ...(decision.allowed ? {} : { reason: decision.reason }),
+  });
+  return decision;
+}
+
+// Gate the FIRST launch of a command (start / resume) on the budget cap, but only
+// when a launch would actually happen — an already-running session is a no-op, so
+// skip the gate (and its policy_decision event) rather than record a decision for
+// a launch that won't occur. Returns true to proceed, or false (after logging the
+// denial) to abort. `verb` distinguishes the operator-facing message per command.
+function gateFirstLaunch(kshetra: KshetraConfig, verb: 'launching' | 'resuming'): boolean {
+  if (statusSession(kshetra.id).running) return true; // no launch → nothing to gate
+  const gate = mayLaunchSession(kshetra, emitActivity, getPolicySource());
+  if (gate.allowed) return true;
+  const noun = verb === 'launching' ? 'launching a planning session' : 'resuming the planning session';
+  console.log(`suthradhara[${kshetra.id}]: ${gate.reason} — not ${noun}.`);
+  return false;
+}
+
 async function runPlanningLoop(
   kshetra: KshetraConfig,
   first: LaunchResult,
@@ -239,6 +290,7 @@ async function runPlanningLoop(
   const emit = deps.emit ?? emitActivity;
   const meter = deps.meter ?? getUsageMeter();
   const readUsage = deps.readUsage ?? readSessionUsage;
+  const policy = deps.policy ?? getPolicySource();
   const { provider, model } = resolveAgentModel(kshetra, 'suthradhara');
   let current = first;
   // The first session may be a resume (`suthradhara resume`); every relaunch the
@@ -359,6 +411,16 @@ async function runPlanningLoop(
     if (choice === 'end') {
       await teardownWorktrees(kshetra);
       log(`suthradhara[${kshetra.id}]: planning ended.`);
+      return;
+    }
+
+    // fnd.7: gate the extend/new relaunch on the budget cap before spending more.
+    // A denied continuation ends the loop cleanly (teardown + return) rather than
+    // opening another session the Kshetra can't afford.
+    const gate = mayLaunchSession(kshetra, emit, policy);
+    if (!gate.allowed) {
+      log(`suthradhara[${kshetra.id}]: ${gate.reason} — ending planning instead of launching another session.`);
+      await teardownWorktrees(kshetra);
       return;
     }
 

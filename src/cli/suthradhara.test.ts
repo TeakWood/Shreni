@@ -35,6 +35,7 @@ const {
   resolveTargetKshetra,
   runSuthradhara,
   runPlanningLoop,
+  mayLaunchSession,
   parseMenuChoice,
   renderSummary,
 } = await import('./suthradhara');
@@ -96,6 +97,8 @@ describe('runSuthradhara — dispatch that does not enter the loop', () => {
   });
 
   it('start reports already_running without entering the loop', async () => {
+    // Already-running short-circuits the budget gate (fnd.7): no launch, no gate.
+    mockStatusSession.mockReturnValue({ kshetraId: 'alpha', running: true, pid: 100 });
     mockStartSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await runSuthradhara('start', { args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A] });
@@ -126,6 +129,8 @@ describe('runSuthradhara — dispatch that does not enter the loop', () => {
   });
 
   it('resume reports already_running, and rejects bad/unknown ids', async () => {
+    // Already-running short-circuits the budget gate (fnd.7): no relaunch, no gate.
+    mockStatusSession.mockReturnValue({ kshetraId: 'alpha', running: true, pid: 100 });
     mockResumeSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await runSuthradhara('resume', { args: [ALPHA_SESSION], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A] });
@@ -422,5 +427,71 @@ describe('runPlanningLoop run_usage fold (fnd.6)', () => {
     })).resolves.toBeUndefined();
     expect(records).toHaveLength(1);
     expect(logs.join('\n')).toContain('run_usage fold failed');
+  });
+});
+
+describe('mayLaunchSession budget gate (fnd.7)', () => {
+  const allowPolicy = { selectModel: () => ({ provider: 'anthropic', model: 'm' }), mayProceed: () => ({ allowed: true as const }) };
+  const denyPolicy = {
+    selectModel: () => ({ provider: 'anthropic', model: 'm' }),
+    mayProceed: () => ({ allowed: false as const, reason: 'Kshetra alpha has spent $12 of its $10 per-Kshetra budget cap' }),
+  };
+
+  it('passes the decision through and records an allowed policy_decision', () => {
+    const events: Array<Record<string, unknown>> = [];
+    const decision = mayLaunchSession(KSHETRA_A, (e) => events.push(e), allowPolicy);
+    expect(decision).toEqual({ allowed: true });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'policy_decision', kshetra: 'alpha', beadId: 'suthradhara:alpha',
+      agent: 'suthradhara', policy: 'mayProceed', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      allowed: true,
+    });
+    // An allowed decision carries no reason.
+    expect(events[0]).not.toHaveProperty('reason');
+  });
+
+  it('passes a denial through with its reason and records it on the ledger', () => {
+    const events: Array<Record<string, unknown>> = [];
+    const decision = mayLaunchSession(KSHETRA_A, (e) => events.push(e), denyPolicy);
+    expect(decision).toMatchObject({ allowed: false });
+    expect(events[0]).toMatchObject({
+      type: 'policy_decision', agent: 'suthradhara', policy: 'mayProceed',
+      allowed: false, reason: expect.stringContaining('per-Kshetra budget cap'),
+    });
+  });
+});
+
+describe('runPlanningLoop budget gate (fnd.7)', () => {
+  let WT: string;
+  beforeEach(() => { WT = mkdtempSync(join(tmpdir(), 'loop-gate-')); });
+  afterEach(() => { rmSync(WT, { recursive: true, force: true }); });
+
+  const launched = (worktreePath: string) => ({
+    status: 'launched' as const,
+    kshetraId: 'alpha', sessionId: ALPHA_SESSION, claudeSessionId: 'cid',
+    worktreePath, pid: 1, wait: vi.fn().mockResolvedValue(0),
+  });
+  const denyPolicy = {
+    selectModel: () => ({ provider: 'anthropic', model: 'm' }),
+    mayProceed: () => ({ allowed: false as const, reason: 'over budget' }),
+  };
+
+  it('refuses to relaunch on an extend when the budget gate denies, and ends cleanly', async () => {
+    const logs: string[] = [];
+    const events: Array<{ type: string }> = [];
+    // choice '1' == extend; the relaunch must be gated and denied before any spawn.
+    await runPlanningLoop(KSHETRA_A, launched(WT), {
+      ask: async () => '1', log: (m) => logs.push(m), emit: (e) => events.push(e),
+      meter: { record: () => {} },
+      readUsage: () => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 0 }),
+      policy: denyPolicy,
+    });
+    // No relaunch happened, and the loop tore down + returned.
+    expect(mockStartSession).not.toHaveBeenCalled();
+    expect(mockTeardown).toHaveBeenCalled();
+    expect(logs.join('\n')).toContain('over budget');
+    // The denial is on the ledger as a policy_decision.
+    expect(events.some(e => e.type === 'policy_decision')).toBe(true);
   });
 });

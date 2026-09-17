@@ -29,7 +29,7 @@ export type ActivityEvent =
   // policy_decision: one PolicySource call and its resolved answer. `policy` names
   // which call — 'selectModel' carries the resolved provider/model; 'mayProceed'
   // carries allow/deny + reason.
-  | { type: 'policy_decision';  kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; policy: 'selectModel' | 'mayProceed'; provider?: string; model?: string; allowed?: boolean; reason?: string }
+  | { type: 'policy_decision';  kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; policy: 'selectModel' | 'mayProceed'; provider?: string; model?: string; allowed?: boolean; reason?: string }
   // gate_result: one gate's verdict for a round. The gate's raw output is NOT
   // inlined — it is referenced by the envelope's runId into the run log. 'skip'
   // is distinct from 'pass' (4a2.10): a gate with no configured command (coverage,
