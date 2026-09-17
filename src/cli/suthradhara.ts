@@ -13,7 +13,7 @@ import {
 import { listSessions } from '../suthradhara/persistence';
 import { readHandoff, type Handoff } from '../suthradhara/handoff';
 import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-log';
-import { getUsageMeter, type UsageMeter } from '../ext/index';
+import { getUsageMeter, costFor, type UsageMeter } from '../ext/index';
 import { readSessionUsage, type SessionUsage } from '../suthradhara/usage';
 import { resolveAgentModel, type KshetraConfig } from '../kshetra/config';
 
@@ -293,13 +293,14 @@ async function runPlanningLoop(
     // rather than silently vanishing from spend. beadId is the filed epic id, or
     // the sessionId when nothing was filed; runId is the pinned claude session id.
     // Guarded so a metering hiccup never crashes the planning loop.
+    const usageBeadId = handoff?.epicId ?? current.sessionId;
     try {
       const usage = readUsage(current.worktreePath, current.claudeSessionId);
-      meter.record({
+      const record = {
         kshetra: kshetra.id,
-        beadId: handoff?.epicId ?? current.sessionId,
+        beadId: usageBeadId,
         runId: current.claudeSessionId,
-        agent: 'suthradhara',
+        agent: 'suthradhara' as const,
         provider,
         model,
         inputTokens: usage.inputTokens,
@@ -307,8 +308,40 @@ async function runPlanningLoop(
         cacheReadTokens: usage.cacheReadTokens,
         cacheCreationTokens: usage.cacheCreationTokens,
         toolCallCount: usage.toolCallCount,
-        outcome: 'ok',
-      });
+        outcome: 'ok' as const,
+      };
+      meter.record(record);
+      // Fold the same record into the run_usage stream (epic fnd.6), like
+      // runner.ts: the headline totals + cost, NOT the cache/tool breakdown (that
+      // stays in usage.jsonl, referenced by runId). costFor is the same pure price
+      // lookup the meter uses, so this cost matches the usage.jsonl entry exactly.
+      // One run_usage per planning session, 1:1 with the meter record above.
+      //
+      // NESTED, not sibling, try (unlike runner.ts's two independent blocks): the
+      // fold sits INSIDE the metering try, AFTER meter.record. So a meter.record
+      // throw skips this emit (falls to the outer catch) — deliberate, because the
+      // event documents itself as a summary of the UsageEntry the meter wrote, and
+      // emitting it when the write failed would claim usage that isn't in
+      // usage.jsonl. The inner try only isolates a fold failure from the metering
+      // that already succeeded; neither ever crashes the planning loop.
+      try {
+        const { costUsd, priced } = costFor(record);
+        emit({
+          type: 'run_usage',
+          kshetra: kshetra.id,
+          beadId: usageBeadId,
+          agent: 'suthradhara',
+          provider,
+          model,
+          inputTokens: record.inputTokens,
+          outputTokens: record.outputTokens,
+          costUsd,
+          priced,
+          outcome: 'ok',
+        });
+      } catch (err) {
+        log(`suthradhara[${kshetra.id}]: run_usage fold failed — ${(err as Error).message}`);
+      }
     } catch (err) {
       log(`suthradhara[${kshetra.id}]: usage metering failed — ${(err as Error).message}`);
     }

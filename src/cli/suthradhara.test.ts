@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { KshetraConfig } from '../kshetra/config';
+import { costFor } from '../ext/index';
 
 const mockStartSession = vi.fn();
 const mockStopSession = vi.fn();
@@ -250,23 +251,27 @@ describe('runPlanningLoop lifecycle events (fnd.2)', () => {
 
     expect(events.map(e => e.type)).toEqual([
       'suthradhara_launched', 'suthradhara_plan_filed', 'suthradhara_doc_pushed',
-      'suthradhara_session_ended', 'suthradhara_menu_choice',
+      'suthradhara_session_ended', 'run_usage', 'suthradhara_menu_choice',
     ]);
     expect(events[0]).toMatchObject({ sessionId: ALPHA_SESSION, claudeSessionId: 'cid', resume: false });
     expect(events[1]).toMatchObject({ epicId: 'e-1', docPath: '.shreni/design/sso.md', summary: 's' });
     expect(events[2]).toMatchObject({ branch: 'suthradhara/sso' });
     expect(events[3]).toMatchObject({ epicId: 'e-1' });
-    expect(events[4]).toMatchObject({ choice: 'end' });
+    // run_usage is keyed by the filed epic id (the same beadId the meter record uses).
+    expect(events[4]).toMatchObject({ type: 'run_usage', agent: 'suthradhara', beadId: 'e-1' });
+    expect(events[5]).toMatchObject({ choice: 'end' });
   });
 
   it('omits plan_filed/doc_pushed when the session filed no handoff', async () => {
-    const events: Array<{ type: string; epicId?: string }> = [];
+    const events: Array<{ type: string; epicId?: string; beadId?: string }> = [];
     await runPlanningLoop(KSHETRA_A, launched(WT), { ask: async () => '3', log: () => {}, emit: (e) => events.push(e) });
     expect(events.map(e => e.type)).toEqual([
-      'suthradhara_launched', 'suthradhara_session_ended', 'suthradhara_menu_choice',
+      'suthradhara_launched', 'suthradhara_session_ended', 'run_usage', 'suthradhara_menu_choice',
     ]);
     // session_ended carries no epicId when nothing was filed.
     expect(events[1].epicId).toBeUndefined();
+    // With no handoff, run_usage falls back to keying on the shreni session id.
+    expect(events[2]).toMatchObject({ type: 'run_usage', beadId: ALPHA_SESSION });
   });
 
   it('emits one launched + session_ended per session across extend -> end', async () => {
@@ -364,5 +369,58 @@ describe('runPlanningLoop usage recording (fnd.4)', () => {
       readUsage: () => ({ ...USAGE }),
     })).resolves.toBeUndefined();
     expect(logs.join('\n')).toContain('usage metering failed');
+  });
+});
+
+describe('runPlanningLoop run_usage fold (fnd.6)', () => {
+  let WT: string;
+  beforeEach(() => { WT = mkdtempSync(join(tmpdir(), 'loop-runusage-')); });
+  afterEach(() => { rmSync(WT, { recursive: true, force: true }); });
+
+  const launched = (worktreePath: string) => ({
+    status: 'launched' as const,
+    kshetraId: 'alpha', sessionId: ALPHA_SESSION, claudeSessionId: 'cid',
+    worktreePath, pid: 1, wait: vi.fn().mockResolvedValue(0),
+  });
+  const USAGE = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheCreationTokens: 20, toolCallCount: 3 };
+
+  it('emits one run_usage summary per session, cost matching the meter record 1:1', async () => {
+    writeHandoff(WT, { branch: 'suthradhara/sso', epicId: 'e-1', docPath: '.shreni/design/sso.md', summary: 's' });
+    const events: Array<Record<string, unknown>> = [];
+    const records: Array<Record<string, unknown>> = [];
+    await runPlanningLoop(KSHETRA_A, launched(WT), {
+      log: () => {}, ask: async () => '3',
+      emit: (e) => events.push(e),
+      meter: { record: (r) => records.push(r) },
+      readUsage: () => ({ ...USAGE }),
+    });
+    const usageEvents = events.filter(e => e.type === 'run_usage');
+    expect(usageEvents).toHaveLength(1);
+    // Same beadId/agent/provider/model + headline totals as the meter record, and
+    // the cost derived from the very same price lookup the meter uses.
+    const { costUsd, priced } = costFor(records[0] as never);
+    expect(usageEvents[0]).toMatchObject({
+      kshetra: 'alpha', beadId: 'e-1', agent: 'suthradhara',
+      provider: 'anthropic', model: 'claude-sonnet-4-6',
+      inputTokens: 10, outputTokens: 5, costUsd, priced, outcome: 'ok',
+    });
+    // The summary carries no cache/tool breakdown — that stays in usage.jsonl.
+    expect(usageEvents[0]).not.toHaveProperty('toolCallCount');
+    expect(usageEvents[0]).not.toHaveProperty('cacheReadTokens');
+  });
+
+  it('meters even if the run_usage fold throws, and logs the fold failure without crashing', async () => {
+    // A meter that succeeds, but an emit that throws only on run_usage — the
+    // record must still land and the loop must survive.
+    const records: Array<Record<string, unknown>> = [];
+    const logs: string[] = [];
+    await expect(runPlanningLoop(KSHETRA_A, launched(WT), {
+      log: (m) => logs.push(m), ask: async () => '3',
+      emit: (e) => { if ((e as { type: string }).type === 'run_usage') throw new Error('sink down'); },
+      meter: { record: (r) => records.push(r) },
+      readUsage: () => ({ ...USAGE }),
+    })).resolves.toBeUndefined();
+    expect(records).toHaveLength(1);
+    expect(logs.join('\n')).toContain('run_usage fold failed');
   });
 });

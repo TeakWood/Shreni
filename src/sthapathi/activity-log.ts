@@ -44,8 +44,11 @@ export type ActivityEvent =
   // the full record — the cache/tool breakdown stays in usage.jsonl, referenced
   // by the envelope's runId. `priced` false means costUsd is an "unknown"
   // placeholder, not a real $0. One per metered run finalization (ok and error),
-  // mirroring usage.jsonl 1:1.
-  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error' }
+  // mirroring usage.jsonl 1:1. Suthradhara emits one per planning session too
+  // (epic fnd.6), from the launcher loop right after its meter.record — same
+  // 1:1 discipline, so a planning session shows up in the run_usage stream
+  // alongside the executors rather than only in usage.jsonl.
+  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error' }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are
