@@ -7,6 +7,7 @@ import type {
   BeadDetail,
   KshetraAction,
   KshetraSummary,
+  PlanningSession,
   ProcessSnapshot,
   TaskListResponse,
 } from '../lib/types';
@@ -33,6 +34,10 @@ export function fetchKshetras(token: string): Promise<KshetraSummary[]> {
 
 export function fetchProcesses(token: string): Promise<ProcessSnapshot[]> {
   return getJson<ProcessSnapshot[]>('/api/processes', token);
+}
+
+export function fetchPlanningSessions(token: string): Promise<PlanningSession[]> {
+  return getJson<PlanningSession[]>('/api/planning-sessions', token);
 }
 
 export function fetchTasks(

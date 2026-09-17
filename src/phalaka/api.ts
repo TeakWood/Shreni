@@ -7,6 +7,7 @@ import { beadsRead, readKshetraTasks, isValidBeadId } from './beads-read.js';
 import { readNotifications } from '../sthapathi/notifications.js';
 import { PR_NEEDS_FOLLOWUP_LABEL } from '../sthapathi/pr-followup.js';
 import { readProcessSnapshots } from './process-read.js';
+import { readPlanningSessions } from './planning-read.js';
 import { assembleKshetraStatus } from '../kshetra/status.js';
 import { pauseKshetraById, resumeKshetraById } from '../cli/pause.js';
 import type { KshetraConfig } from '../kshetra/config.js';
@@ -134,6 +135,31 @@ export const ProcessSnapshotSchema = z.object({
 });
 
 export const ProcessListSchema = z.array(ProcessSnapshotSchema);
+
+// ── Planning sessions (Suthradhara monitoring surface, epic fnd.5) ───────────
+// One row per interactive planning session, folded from the activity stream so an
+// operator can watch a running / just-ended session and its recovered token cost
+// alongside the executor process rows.
+export const PlanningSessionSchema = z.object({
+  kshetraId: z.string(),
+  sessionId: z.string(),
+  phase: z.enum(['launched', 'plan_filed', 'doc_pushed', 'ended']),
+  running: z.boolean(),
+  launchedAt: z.string().optional(),
+  endedAt: z.string().optional(),
+  resume: z.boolean().optional(),
+  epicId: z.string().optional(),
+  docPath: z.string().optional(),
+  summary: z.string().optional(),
+  choice: z.enum(['extend', 'new', 'end']).optional(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  costUsd: z.number().nonnegative(),
+  priced: z.boolean(),
+  usageRecorded: z.boolean(),
+});
+
+export const PlanningSessionListSchema = z.array(PlanningSessionSchema);
 
 // ── Action responses (control plane mutations) ──────────────────────────────
 // One schema per mutating route, encoding the owning primitive's success
@@ -349,6 +375,14 @@ export function registerPhalakaApi(app: FastifyInstance): void {
     });
 
     return ProcessListSchema.parse(enriched);
+  });
+
+  // Planning sessions (fnd.5): file-only fold of the Suthradhara activity stream.
+  // Like /api/processes it never calls bd — it degrades to [] for a Kshetra with
+  // no activity rather than erroring.
+  app.get('/api/planning-sessions', async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    return PlanningSessionListSchema.parse(readPlanningSessions());
   });
 
   app.get('/api/kshetras/:id/tasks', async (req, reply) => {

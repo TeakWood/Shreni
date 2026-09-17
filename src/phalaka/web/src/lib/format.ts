@@ -78,3 +78,58 @@ export function formatAge(ms: number | undefined | null): string {
 export function processLabel(snap: { kind: string; kshetraId?: string }): string {
   return snap.kshetraId || (snap.kind === 'phalaka' ? 'dashboard' : snap.kind);
 }
+
+// ── Planning-session formatting (Suthradhara monitoring, fnd.5) ──────────────
+
+// Stable identity of a planning-session row across re-fetches: a session id is
+// globally unique (kshetra-prefixed), so it keys the row on its own.
+export function planningKey(s: { sessionId: string }): string {
+  return s.sessionId;
+}
+
+// Compact token count: 940 / 1.2k / 3.4M. Keeps a busy session's totals legible
+// in a single row without a full thousands-separated number.
+export function formatTokens(n: number): string {
+  if (!isFinite(n) || n < 0) return '—';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k';
+  return (n / 1_000_000).toFixed(1) + 'M';
+}
+
+// USD cost for a session. `priced` false means the run wasn't in the price table,
+// so the number is an unknown placeholder, not a real $0 — shown as 'unpriced'.
+// A metered $0 (usageRecorded, priced) still reads '$0.00', distinct from a
+// not-yet-metered running session ('—', handled by the caller via usageRecorded).
+export function formatCost(costUsd: number, priced: boolean): string {
+  if (!priced) return 'unpriced';
+  if (!isFinite(costUsd) || costUsd < 0) return '—';
+  return '$' + costUsd.toFixed(costUsd > 0 && costUsd < 0.01 ? 4 : 2);
+}
+
+// The furthest lifecycle milestone a session reached, as a short label + pill
+// colour: launched (neutral) → plan filed (sky) → doc pushed (amber) → ended
+// (slate). A still-running session reads by its phase; `ended` is terminal.
+export function planningPhaseLabel(phase: string): string {
+  switch (phase) {
+    case 'launched': return 'launched';
+    case 'plan_filed': return 'plan filed';
+    case 'doc_pushed': return 'doc pushed';
+    case 'ended': return 'ended';
+    default: return phase;
+  }
+}
+
+export function planningPhaseClass(phase: string): string {
+  switch (phase) {
+    case 'launched':
+      return 'bg-slate-600 text-slate-200 light:bg-slate-200 light:text-slate-700';
+    case 'plan_filed':
+      return 'bg-sky-700 text-sky-100 light:bg-sky-100 light:text-sky-800';
+    case 'doc_pushed':
+      return 'bg-amber-700 text-amber-100 light:bg-amber-100 light:text-amber-800';
+    case 'ended':
+      return 'bg-slate-700 text-slate-400 light:bg-slate-200 light:text-slate-600';
+    default:
+      return 'bg-slate-700 text-slate-300 light:bg-slate-200 light:text-slate-700';
+  }
+}

@@ -32,6 +32,9 @@ vi.mock('../sthapathi/notifications.js', () => ({ readNotifications: mockReadNot
 const mockReadProcessSnapshots = vi.fn<() => unknown[]>();
 vi.mock('./process-read.js', () => ({ readProcessSnapshots: mockReadProcessSnapshots }));
 
+const mockReadPlanningSessions = vi.fn<() => unknown[]>();
+vi.mock('./planning-read.js', () => ({ readPlanningSessions: mockReadPlanningSessions }));
+
 const mockAssembleKshetraStatus = vi.fn<(k: KshetraConfig) => Promise<unknown>>();
 vi.mock('../kshetra/status.js', () => ({ assembleKshetraStatus: mockAssembleKshetraStatus }));
 
@@ -53,6 +56,7 @@ const {
   BeadDetailSchema,
   NotificationListResponseSchema,
   ProcessListSchema,
+  PlanningSessionListSchema,
   PauseActionResponseSchema,
   ResumeActionResponseSchema,
 } = await import('./api.js');
@@ -101,6 +105,7 @@ beforeEach(async () => {
   mockLoadState.mockReturnValue({ kshetras: {} });
   mockReadNotifications.mockReturnValue([]);
   mockReadProcessSnapshots.mockReturnValue([]);
+  mockReadPlanningSessions.mockReturnValue([]);
   mockAssembleKshetraStatus.mockResolvedValue({ activeBead: undefined, queueDepth: 0 });
   mockPauseKshetraById.mockReturnValue({ status: 'paused', id: 'myapp' });
   mockResumeKshetraById.mockReturnValue({ status: 'resumed', id: 'myapp' });
@@ -305,6 +310,36 @@ describe('GET /api/processes', () => {
     expect(mockAssembleKshetraStatus).not.toHaveBeenCalled();
     expect(body[0]!.activeBead).toBeUndefined();
     expect(body[0]!.queueDepth).toBeUndefined();
+  });
+});
+
+describe('GET /api/planning-sessions', () => {
+  const SESSION = {
+    kshetraId: 'myapp', sessionId: 's1', phase: 'ended' as const, running: false,
+    launchedAt: '2026-09-17T10:00:00Z', endedAt: '2026-09-17T10:05:00Z',
+    epicId: 'e-1', docPath: 'd.md', summary: 'sso', choice: 'end' as const,
+    inputTokens: 100, outputTokens: 40, costUsd: 0.5, priced: true, usageRecorded: true,
+  };
+
+  it('401 without a token', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/planning-sessions' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('200 with a valid token, validating against the zod schema', async () => {
+    mockReadPlanningSessions.mockReturnValue([SESSION]);
+    const res = await app.inject({ method: 'GET', url: `/api/planning-sessions?token=${TOKEN}` });
+    expect(res.statusCode).toBe(200);
+    const body = PlanningSessionListSchema.parse(res.json());
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({ sessionId: 's1', phase: 'ended', costUsd: 0.5, inputTokens: 100 });
+  });
+
+  it('returns [] when no Kshetra has planning activity', async () => {
+    mockReadPlanningSessions.mockReturnValue([]);
+    const res = await app.inject({ method: 'GET', url: `/api/planning-sessions?token=${TOKEN}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual([]);
   });
 });
 

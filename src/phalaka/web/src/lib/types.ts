@@ -119,3 +119,27 @@ export interface ProcessSnapshot {
   lastProgressAt?: string;
   error?: string;
 }
+
+// Suthradhara planning-session monitoring (epic fnd.5). Mirrors
+// PlanningSessionSchema in src/phalaka/api.ts — one row per interactive planning
+// session, folded from the activity stream with its recovered token cost.
+export type PlanningPhase = 'launched' | 'plan_filed' | 'doc_pushed' | 'ended';
+
+export interface PlanningSession {
+  kshetraId: string;
+  sessionId: string;
+  phase: PlanningPhase;
+  running: boolean;
+  launchedAt?: string;
+  endedAt?: string;
+  resume?: boolean;
+  epicId?: string;
+  docPath?: string;
+  summary?: string;
+  choice?: 'extend' | 'new' | 'end';
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  priced: boolean;
+  usageRecorded: boolean;
+}

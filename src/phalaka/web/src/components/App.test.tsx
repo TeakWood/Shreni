@@ -23,12 +23,20 @@ const PROCESSES = [
 const TASKS = [
   { id: 'sishya-1', title: 'A blocked bead', status: 'blocked', priority: 1, type: 'task', updatedAt: '2026-07-30' },
 ];
+const PLANNING_SESSIONS = [
+  {
+    kshetraId: 'sishya', sessionId: 'sishya-plan-1', phase: 'ended', running: false,
+    epicId: 'sishya-epic-1', inputTokens: 800, outputTokens: 200, costUsd: 0.25,
+    priced: true, usageRecorded: true,
+  },
+];
 
 function mockFetch(url: string): Promise<Response> {
   const path = url.split('?')[0];
   let body: unknown = {};
   if (path === '/api/kshetras') body = KSHETRAS;
   else if (path === '/api/processes') body = PROCESSES;
+  else if (path === '/api/planning-sessions') body = PLANNING_SESSIONS;
   else if (path.endsWith('/tasks')) body = { kshetraId: 'sishya', tasks: TASKS };
   return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
 }
@@ -63,5 +71,11 @@ describe('App integration', () => {
     // Triage: 2 blocked beads → one blocked entry surfaces "needs a human"
     expect(screen.getByText('Needs a human')).toBeTruthy();
     await waitFor(() => expect(screen.getByText(/2 beads blocked/)).toBeTruthy());
+
+    // Planning-session panel (fnd.5): the just-ended Suthradhara session appears
+    // with its epic and recovered cost.
+    await waitFor(() => expect(screen.getByText('Planning sessions')).toBeTruthy());
+    expect(screen.getByText('sishya-epic-1')).toBeTruthy();
+    expect(document.body.textContent).toContain('$0.25');
   });
 });

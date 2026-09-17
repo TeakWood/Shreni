@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { KshetraSummary, ProcessSnapshot } from '../lib/types';
+import type { KshetraSummary, PlanningSession, ProcessSnapshot } from '../lib/types';
 import { processKey } from '../lib/format';
 import { collectTriageEntries } from '../lib/triage';
-import { fetchKshetras, fetchProcesses, readToken } from '../api/client';
+import { fetchKshetras, fetchPlanningSessions, fetchProcesses, readToken } from '../api/client';
 import { useEventStream } from '../api/useEventStream';
 import { Board } from './Board';
+import { PlanningSessionPanel } from './PlanningSessionPanel';
 import { ProcessPanel } from './ProcessPanel';
 import { TriageFeed } from './TriageFeed';
 import { useTheme } from './useTheme';
@@ -33,6 +34,8 @@ export function App() {
   const [boardError, setBoardError] = useState<string | null>(null);
   const [processes, setProcesses] = useState<ProcMap>({});
   const [processError, setProcessError] = useState<string | null>(null);
+  const [planningSessions, setPlanningSessions] = useState<PlanningSession[]>([]);
+  const [planningError, setPlanningError] = useState<string | null>(null);
   const [showClosed, setShowClosed] = useState(false);
   const [theme, toggleTheme] = useTheme();
   // Bumped on every board (re)load so KshetraCards re-pull their task lists.
@@ -59,18 +62,38 @@ export function App() {
       .catch(e => setProcessError(e instanceof Error ? e.message : String(e)));
   }, [token]);
 
+  // Planning sessions are folded from the activity stream, so they refresh on the
+  // same doorbell as the board (an activity frame). Loaded through its own error
+  // slot so a planning-fold failure never blanks the board.
+  const loadPlanning = useCallback(() => {
+    return fetchPlanningSessions(token)
+      .then(list => {
+        setPlanningSessions(list);
+        setPlanningError(null);
+      })
+      .catch(e => setPlanningError(e instanceof Error ? e.message : String(e)));
+  }, [token]);
+
   const onProcessEvent = useCallback((snap: ProcessSnapshot) => {
     setProcesses(prev => upsert(prev, snap));
   }, []);
 
+  // The activity doorbell rings for both task transitions (board) and Suthradhara
+  // lifecycle events (planning), so re-fetch both together.
+  const onBoardChange = useCallback(() => {
+    loadBoard();
+    loadPlanning();
+  }, [loadBoard, loadPlanning]);
+
   const onPoll = useCallback(() => {
     loadBoard();
     loadProcesses();
-  }, [loadBoard, loadProcesses]);
+    loadPlanning();
+  }, [loadBoard, loadProcesses, loadPlanning]);
 
   const streamStatus = useEventStream(token, {
     onProcessEvent,
-    onBoardChange: loadBoard,
+    onBoardChange,
     onPoll,
   });
 
@@ -78,7 +101,8 @@ export function App() {
   useEffect(() => {
     loadBoard();
     loadProcesses();
-  }, [loadBoard, loadProcesses]);
+    loadPlanning();
+  }, [loadBoard, loadProcesses, loadPlanning]);
 
   const processList = useMemo(
     () => Object.keys(processes).sort().map(k => processes[k]),
@@ -118,6 +142,7 @@ export function App() {
       <main className="px-4 py-4 max-w-4xl mx-auto">
         <TriageFeed entries={triageEntries} />
         <ProcessPanel processes={processList} streamStatus={streamStatus} error={processError} />
+        <PlanningSessionPanel sessions={planningSessions} error={planningError} />
         <Board
           kshetras={kshetras}
           token={token}

@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TriageFeed } from './TriageFeed';
 import { ProcessPanel } from './ProcessPanel';
-import type { ProcessSnapshot } from '../lib/types';
+import { PlanningSessionPanel } from './PlanningSessionPanel';
+import type { PlanningSession, ProcessSnapshot } from '../lib/types';
 
 // These replace the old renderTriageEntry / renderProcessRow / renderTriageFeed
 // string-render tests: the components are pure, so renderToStaticMarkup gives the
@@ -76,5 +77,43 @@ describe('ProcessPanel', () => {
   it('shows an empty state when there are no processes', () => {
     const html = renderToStaticMarkup(<ProcessPanel processes={[]} streamStatus="connecting" error={null} />);
     expect(html).toContain('No processes.');
+  });
+});
+
+describe('PlanningSessionPanel', () => {
+  const ended: PlanningSession = {
+    kshetraId: 'proj', sessionId: 'proj-2026-abc123', phase: 'ended', running: false,
+    epicId: 'proj-epic-1', docPath: 'd.md', summary: 'SSO planning',
+    inputTokens: 1200, outputTokens: 300, costUsd: 0.5, priced: true, usageRecorded: true,
+  };
+
+  it('renders phase, epic, token total and cost for a just-ended session', () => {
+    const html = renderToStaticMarkup(<PlanningSessionPanel sessions={[ended]} error={null} />);
+    expect(html).toContain('Planning sessions');
+    expect(html).toContain('ended'); // phase pill
+    expect(html).toContain('proj-epic-1'); // epic id
+    expect(html).toContain('1.5k tok'); // 1200 + 300
+    expect(html).toContain('$0.50'); // cost
+    expect(html).toContain('abc123'); // session id tail
+  });
+
+  it('marks a live session and dashes an unmetered total', () => {
+    const running: PlanningSession = {
+      kshetraId: 'proj', sessionId: 'proj-live', phase: 'launched', running: true,
+      inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, usageRecorded: false,
+    };
+    const html = renderToStaticMarkup(<PlanningSessionPanel sessions={[running]} error={null} />);
+    expect(html).toContain('live');
+    expect(html).not.toContain('tok'); // no token total until metered
+  });
+
+  it('renders nothing when no planning has run (no error)', () => {
+    const html = renderToStaticMarkup(<PlanningSessionPanel sessions={[]} error={null} />);
+    expect(html).toBe('');
+  });
+
+  it('surfaces an error even with no sessions', () => {
+    const html = renderToStaticMarkup(<PlanningSessionPanel sessions={[]} error={'boom'} />);
+    expect(html).toContain('boom');
   });
 });
