@@ -83,3 +83,44 @@ describe('Suthradhara lifecycle events (fnd.1)', () => {
     expect((ev as { epicId?: string }).epicId).toBeUndefined();
   });
 });
+
+describe('study A1 event kinds (408.1)', () => {
+  it('emits and round-trips a turn_usage row with its raw per-call counters', () => {
+    const k = 'a1-turn-usage';
+    emit({ type: 'task_claimed', kshetra: k, beadId: 'b-1', title: 'T' });
+    emit({
+      type: 'turn_usage', kshetra: k, beadId: 'b-1', agent: 'silpi', provider: 'claude',
+      model: 'claude-opus-4-8', turnIndex: 3, messageId: 'msg_abc',
+      inputTokens: 1200, cacheReadTokens: 40000, cacheCreationTokens: 800, sidechain: false,
+    });
+    const row = readLog(k)[1];
+    expect(row.type).toBe('turn_usage');
+    if (row.type !== 'turn_usage') throw new Error('unreachable');
+    // Envelope stamped, and the runId from task_claimed propagates onto the row.
+    expect(row.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(row.runId).toBe(getCurrentRunId(k));
+    // Raw counters stored as-is; effective_context is derived at read time, not stored.
+    expect(row.inputTokens).toBe(1200);
+    expect(row.cacheReadTokens).toBe(40000);
+    expect(row.cacheCreationTokens).toBe(800);
+    expect(row.messageId).toBe('msg_abc');
+    expect(row.sidechain).toBe(false);
+    expect('effective_context' in row).toBe(false);
+  });
+
+  it('emits and round-trips a context_compacted event', () => {
+    const k = 'a1-compacted';
+    emit({ type: 'task_claimed', kshetra: k, beadId: 'b-1', title: 'T' });
+    emit({
+      type: 'context_compacted', kshetra: k, beadId: 'b-1', agent: 'silpi', provider: 'claude',
+      model: 'claude-opus-4-8', trigger: 'auto', preTokens: 155000, turnIndex: 20,
+    });
+    const ev = readLog(k)[1];
+    expect(ev.type).toBe('context_compacted');
+    if (ev.type !== 'context_compacted') throw new Error('unreachable');
+    expect(ev.trigger).toBe('auto');
+    expect(ev.preTokens).toBe(155000);
+    expect(ev.turnIndex).toBe(20);
+    expect(ev.runId).toBe(getCurrentRunId(k));
+  });
+});

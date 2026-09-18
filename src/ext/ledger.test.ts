@@ -42,6 +42,11 @@ describe('isDecisionGrade', () => {
     expect(isDecisionGrade(ev({ type: 'agent_tool_call', beadId: 'b1' } as LoggedEvent))).toBe(false);
   });
 
+  it('classifies the study kinds (408.1): turn_usage run-log, context_compacted decision-grade', () => {
+    expect(isDecisionGrade(ev({ type: 'turn_usage', beadId: 'b1' } as LoggedEvent))).toBe(false);
+    expect(isDecisionGrade(ev({ type: 'context_compacted', beadId: 'b1' } as LoggedEvent))).toBe(true);
+  });
+
   it('rejects pure telemetry and planning-session lifecycle', () => {
     expect(isDecisionGrade(ev({ type: 'round_start', beadId: 'b1' } as LoggedEvent))).toBe(false);
     expect(isDecisionGrade(ev({ type: 'beads_synced' } as LoggedEvent))).toBe(false);
@@ -69,6 +74,32 @@ describe('audienceFor', () => {
     for (const kind of ['agent_text', 'round_start', 'beads_synced', 'error', 'suthradhara_launched'] as const) {
       expect(audienceFor(kind)).toBe<LedgerAudience>('audit');
     }
+  });
+
+  it('classifies the study kinds (408.1) as audit — never agent-visible', () => {
+    // turn_usage is run-log (follows agent_tool_call); context_compacted describes
+    // the agent's own memory loss and must not be folded into an agent prompt.
+    expect(audienceFor('turn_usage')).toBe<LedgerAudience>('audit');
+    expect(audienceFor('context_compacted')).toBe<LedgerAudience>('audit');
+  });
+});
+
+describe('readLedger never surfaces context_compacted to an agent (408.1)', () => {
+  it('withholds context_compacted from an agent-clearance reader', () => {
+    const entries: LedgerEntry[] = [
+      toLedgerEntry(ev({ type: 'task_claimed', beadId: 'b1', title: 't' } as LoggedEvent)),
+      toLedgerEntry(
+        ev({
+          type: 'context_compacted', beadId: 'b1', agent: 'silpi', provider: 'claude',
+          model: 'claude-opus-4-8', trigger: 'auto', preTokens: 150000, turnIndex: 12, runId: 'r1',
+        } as LoggedEvent),
+      ),
+    ];
+    const asAgent = readLedger(entries, 'b1', { audience: 'agent' });
+    expect(asAgent.some(e => e.kind === 'context_compacted')).toBe(false);
+    // But an audit reviewer sees it — it is decision-grade provenance.
+    const asAudit = readLedger(entries, 'b1', { audience: 'audit' });
+    expect(asAudit.some(e => e.kind === 'context_compacted')).toBe(true);
   });
 });
 

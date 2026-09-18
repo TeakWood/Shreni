@@ -49,6 +49,32 @@ export type ActivityEvent =
   // 1:1 discipline, so a planning session shows up in the run_usage stream
   // alongside the executors rather than only in usage.jsonl.
   | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error' }
+  // turn_usage (RUN-LOG, epic 408/A1): per-MODEL-CALL context usage, the raw input
+  // to Figure 1 (effective_context vs. assistant-turn index). It is O(turns) —
+  // strictly run-log, activity.jsonl only, NOT decision-grade and NOT usage.jsonl
+  // (that holds one priced summary per run). The unit is the model call, not the
+  // stream event: dedupe on `messageId` upstream or the curve shows false
+  // stair-steps. Only the INPUT side is trusted per call (output_tokens on
+  // intermediate assistant events may be partial; cost keeps coming from the
+  // priced 'result' summary via run_usage). `turnIndex` is 0-based and counts the
+  // main thread and each sidechain separately. `sidechain` true tags a subagent
+  // (Task tool) call, which lives in a DIFFERENT context window and must not be
+  // mixed into the main-thread curve. effective_context is DERIVED at read time
+  // (inputTokens + cacheReadTokens + cacheCreationTokens), never stored — same
+  // store-raw-counters principle as run_usage. Provider-neutral; only the Claude
+  // adapter populates it today (408.2), other adapters stay no-ops.
+  | { type: 'turn_usage';       kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; turnIndex: number; messageId: string; inputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; sidechain: boolean }
+  // context_compacted (DECISION-GRADE, epic 408/A1): the provider CLI compacted
+  // the run's context — from this point the agent works from a summary of its own
+  // earlier work. It is rare (0–few per run) so ledger volume stays bounded, and
+  // it is audit-relevant, so it goes to the ledger (decision 5). RECORD-ONLY:
+  // Shreni does not abort/retry/replan on it (decision 6) — reacting would change
+  // the treatment E1 measures. `trigger` distinguishes an automatic boundary from
+  // a manual /compact; `preTokens` is the context size just before the boundary;
+  // `turnIndex` is the last main-thread turn before it. It must NOT be visible to
+  // the 'agent' audience — it describes the agent's own memory loss, not task
+  // context. Provider-neutral; only the Claude adapter populates it today (408.3).
+  | { type: 'context_compacted'; kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; trigger: 'auto' | 'manual'; preTokens: number; turnIndex: number }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are

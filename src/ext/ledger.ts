@@ -80,10 +80,16 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     case 'gate_result':
     case 'merge_done':
     case 'run_usage':
+    // context_compacted is decision-grade (epic 408 decision 5): rare, audit-
+    // relevant, goes to the ledger. turn_usage is NOT — it is O(turns) run-log.
+    case 'context_compacted':
       return true;
     case 'round_start':
     case 'agent_text':
     case 'agent_tool_call':
+    // turn_usage is the high-volume per-model-call run-log tier (epic 408): it
+    // stays in activity.jsonl and must never grow the git-tracked ledger.
+    case 'turn_usage':
     case 'beads_synced':
     case 'error':
     case 'suthradhara_launched':
@@ -127,6 +133,12 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
       return 'operator';
     // Pure provenance — what landed on main and how. An accountability record.
     case 'merge_done':
+    // context_compacted is a decision-grade provenance record of the agent's own
+    // memory loss (epic 408). It is audit-relevant, and — critically — must NOT
+    // be visible to the 'agent' audience: it describes the agent's lost context,
+    // not task context. 'audit' is the most restrictive audience, so it is never
+    // folded into an agent prompt.
+    case 'context_compacted':
       return 'audit';
     // Non-decision kinds. They never reach ledger.jsonl (isDecisionGrade filters
     // them at the sink), but are classified so this switch stays exhaustive over
@@ -134,6 +146,10 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     case 'round_start':
     case 'agent_text':
     case 'agent_tool_call':
+    // turn_usage: high-volume per-model-call run-log (epic 408). Follows the
+    // run-log convention (agent_text / agent_tool_call) — audit-only, and it never
+    // reaches the ledger because it is not decision-grade.
+    case 'turn_usage':
     case 'beads_synced':
     case 'error':
     case 'suthradhara_launched':
