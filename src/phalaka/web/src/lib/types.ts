@@ -85,6 +85,8 @@ export type ProcessStatus =
   | 'working'
   | 'idle'
   | 'paused-manual'
+  // Paused because the configured base branch is missing on origin (uvu.7).
+  | 'paused-missing-base'
   | 'stuck'
   | 'stale-heartbeat'
   | 'dead'
@@ -114,6 +116,8 @@ export interface ProcessSnapshot {
   heartbeatAgeMs?: number;
   paused: boolean;
   stuck?: ProcessStuck;
+  // Set only on a 'paused-missing-base' row — the branch that must be created.
+  baseBranch?: string;
   activeBead?: ProcessActiveBead;
   queueDepth?: number;
   lastProgressAt?: string;

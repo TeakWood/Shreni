@@ -13,7 +13,10 @@ const mockLoadRegistry = vi.fn<() => KshetraConfig[]>();
 vi.mock('../kshetra/registry.js', () => ({ loadRegistry: mockLoadRegistry }));
 
 const mockLoadState = vi.fn();
-vi.mock('../kshetra/state.js', () => ({ loadState: mockLoadState }));
+vi.mock('../kshetra/state.js', () => ({
+  loadState: mockLoadState,
+  MISSING_BASE_BRANCH_REASON: 'missing-base-branch',
+}));
 
 const mockReadPid = vi.fn<(id: string) => number | null>();
 const mockIsAlive = vi.fn<(pid: number) => boolean>();
@@ -101,6 +104,25 @@ describe('deriveWorkerStatus (ADR §4.3 / §4.4)', () => {
         signals({ paused: true, reason: 'manual', heartbeatAgeMs: STUCK_MS + 60_000 }),
       ),
     ).toBe('paused-manual');
+  });
+
+  it('paused-missing-base — paused for reason:missing-base-branch (uvu.7)', () => {
+    expect(
+      deriveWorkerStatus(signals({ paused: true, reason: 'missing-base-branch', requiresManualResume: true })),
+    ).toBe('paused-missing-base');
+  });
+
+  it('missing-base takes precedence over the generic paused-manual latch', () => {
+    // A missing-base pause is ALSO requiresManualResume; the specific status must win.
+    expect(
+      deriveWorkerStatus(signals({ paused: true, reason: 'missing-base-branch', requiresManualResume: true })),
+    ).not.toBe('paused-manual');
+  });
+
+  it('a watchdog stuck marker still wins over a missing-base pause', () => {
+    expect(
+      deriveWorkerStatus(signals({ stuck: true, paused: true, reason: 'missing-base-branch', requiresManualResume: true })),
+    ).toBe('stuck');
   });
 
   it('working — busy phase with a fresh heartbeat', () => {

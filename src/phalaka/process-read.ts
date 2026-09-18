@@ -1,7 +1,7 @@
 import { statSync } from 'fs';
 import type { KshetraConfig } from '../kshetra/config.js';
 import { loadRegistry } from '../kshetra/registry.js';
-import { loadState } from '../kshetra/state.js';
+import { loadState, MISSING_BASE_BRANCH_REASON } from '../kshetra/state.js';
 import { readPid, isAlive, workerPidPath } from '../cli/pid.js';
 import { heartbeatPath } from '../sthapathi/activity-log.js';
 import { STUCK_THRESHOLD_MS } from '../sthapathi/watchdog.js';
@@ -26,6 +26,10 @@ export type ProcessStatus =
   | 'working'
   | 'idle'
   | 'paused-manual'
+  // Paused because the configured base branch is absent on origin (uvu.4). A
+  // distinct status (not paused-manual) so Phalaka can escalate it in triage
+  // with a create-the-branch remediation.
+  | 'paused-missing-base'
   | 'stuck'
   | 'stale-heartbeat'
   | 'dead'
@@ -40,6 +44,9 @@ export interface ProcessSnapshot {
   heartbeatAgeMs?: number;
   paused: boolean;
   stuck?: { since: string; reason: string; remediation: string; phase?: string; beadId?: string };
+  // The configured base branch (repo.mainBranch), populated only for a
+  // 'paused-missing-base' row so triage can name the branch that is missing.
+  baseBranch?: string;
   // Enriched by the /api/processes endpoint via assembleKshetraStatus() — never
   // populated here (this layer does not call bd).
   activeBead?: { id: string; title: string; agent?: string; round?: number };
@@ -91,6 +98,11 @@ export function deriveWorkerStatus(s: WorkerStatusSignals): ProcessStatus {
   // *also* paused+requiresManualResume (reason:'stuck'); the marker is the honest
   // signal that a human is needed, not that a human deliberately paused it.
   if (s.stuck) return 'stuck';
+
+  // Paused because the base branch is missing on origin (uvu.4). Checked before
+  // the generic paused-manual branch (a missing-base pause is also
+  // requiresManualResume) so it escalates in triage with its own remediation.
+  if (s.paused && s.reason === MISSING_BASE_BRANCH_REASON) return 'paused-missing-base';
 
   // A deliberate `shreni pause` (reason:'manual'), distinct from a watchdog pause.
   if (s.paused && (s.reason === 'manual' || s.requiresManualResume)) return 'paused-manual';
@@ -174,6 +186,8 @@ export function readProcessSnapshots(now: number = Date.now()): ProcessSnapshot[
       heartbeatAgeMs: heartbeatAgeMs ?? undefined,
       paused: ks?.paused ?? false,
       stuck: ks?.stuck,
+      // Name the missing branch for triage; only meaningful for this status.
+      baseBranch: status === 'paused-missing-base' ? cfg.repo.mainBranch : undefined,
       lastProgressAt: ks?.lastProgressAt,
     });
   }

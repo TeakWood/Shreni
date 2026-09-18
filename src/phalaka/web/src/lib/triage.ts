@@ -8,7 +8,7 @@
 
 import { formatAge, processKey, processLabel } from './format';
 
-export type TriageSeverity = 'stuck' | 'dead' | 'stale-heartbeat' | 'blocked';
+export type TriageSeverity = 'stuck' | 'dead' | 'missing-base' | 'stale-heartbeat' | 'blocked';
 
 export interface TriageEntry {
   key: string; // stable identity — React key + dedupe
@@ -28,10 +28,14 @@ export function triageSeverityRank(severity: string): number {
       return 0;
     case 'dead':
       return 1;
-    case 'stale-heartbeat':
+    // A paused-for-missing-base worker can do NO work until an operator acts,
+    // so it outranks an early-warning stale heartbeat and a merely blocked queue.
+    case 'missing-base':
       return 2;
-    case 'blocked':
+    case 'stale-heartbeat':
       return 3;
+    case 'blocked':
+      return 4;
     default:
       return 99;
   }
@@ -43,6 +47,8 @@ export function triageSeverityClass(severity: string): string {
       return 'bg-red-800 text-red-100 light:bg-red-100 light:text-red-800';
     case 'dead':
       return 'bg-slate-800 text-red-300 light:bg-red-50 light:text-red-700';
+    case 'missing-base':
+      return 'bg-orange-800 text-orange-100 light:bg-orange-100 light:text-orange-800';
     case 'stale-heartbeat':
       return 'bg-yellow-700 text-yellow-100 light:bg-yellow-100 light:text-yellow-800';
     case 'blocked':
@@ -62,9 +68,25 @@ export function triageEntryForProcess(snap: {
   phase?: string;
   heartbeatAgeMs?: number;
   stuck?: { reason: string; remediation: string; beadId?: string };
+  baseBranch?: string;
 }): TriageEntry | null {
   const label = processLabel(snap);
   const id = snap.kshetraId || '<id>';
+  // Paused because the configured base branch is missing on origin (uvu.4). The
+  // worker can do NO work until the branch exists; the approval CLI (uvu.5)
+  // creates it and resumes the Kshetra.
+  if (snap.status === 'paused-missing-base') {
+    const branch = snap.baseBranch || 'the configured base branch';
+    return {
+      key: 'missing-base:' + processKey(snap),
+      severity: 'missing-base',
+      label,
+      kshetraId: snap.kshetraId,
+      reason:
+        'base branch "' + branch + '" does not exist on origin — the daemon is paused until it is created',
+      remediation: 'shreni base-branch create ' + id,
+    };
+  }
   if (snap.status === 'stuck') {
     return {
       key: 'stuck:' + processKey(snap),

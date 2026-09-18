@@ -6,8 +6,13 @@ import { git } from './git.js';
 import { checkBaseBranch } from './base-branch.js';
 import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
 import { REPO_MAP_RELATIVE_PATH } from '../kshetra/repo-map.js';
-import { loadState, pauseKshetra, recordProgress, recordStall } from '../kshetra/state.js';
+import { loadState, pauseKshetra, recordProgress, recordStall, MISSING_BASE_BRANCH_REASON } from '../kshetra/state.js';
 import { appendNotification } from './notifications.js';
+
+// Re-exported for back-compat: .4 first exported this from pickup, and the
+// approval CLI (.5) imports it here. The definition now lives in state.js (see
+// there for why). Phalaka's read layer imports it straight from state.js.
+export { MISSING_BASE_BRANCH_REASON };
 // The bead type the legacy Suthradhara commit engine used for its per-session
 // audit bead. That engine is gone (epic d3y — launched planning sessions file
 // directly and write no audit bead), but historical `suthradhara-session` beads
@@ -24,12 +29,6 @@ export class PreFlightError extends Error {
     this.name = 'PreFlightError';
   }
 }
-
-// Pause reason set when the configured base branch (repo.mainBranch) is absent
-// on origin. The operator clears it by creating the branch on origin — the
-// approval CLI action (Shreni-beads-uvu.5) resumes the Kshetra. Phalaka triage
-// (uvu.7) keys its remediation off this reason.
-export const MISSING_BASE_BRANCH_REASON = 'missing-base-branch';
 
 // Pause the Kshetra + notify the operator that repo.mainBranch is missing on
 // origin, IDEMPOTENTLY: if it is already paused for this reason we neither

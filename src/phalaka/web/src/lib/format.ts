@@ -49,6 +49,8 @@ export function processStatusPillClass(status: string): string {
       return 'bg-slate-600 text-slate-200 light:bg-slate-200 light:text-slate-700';
     case 'paused-manual':
       return 'bg-amber-700 text-amber-100 light:bg-amber-100 light:text-amber-800';
+    case 'paused-missing-base':
+      return 'bg-orange-800 text-orange-100 light:bg-orange-100 light:text-orange-800';
     case 'stale-heartbeat':
       return 'bg-yellow-700 text-yellow-100 light:bg-yellow-100 light:text-yellow-800';
     case 'stuck':

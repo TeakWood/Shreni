@@ -5,6 +5,13 @@ import type { KshetraConfig } from './config.js';
 
 const STATE_PATH = resolve(homedir(), '.shreni', 'state.json');
 
+// Pause reason set when a Kshetra's configured base branch (repo.mainBranch) is
+// absent on origin (epic Shreni-beads-uvu). Defined here — the lightweight state
+// module both the daemon (pickup) and the observe-only Phalaka read layer
+// (process-read) already import — so it stays a single source of truth without
+// coupling the fast-poll read path to the daemon executor graph.
+export const MISSING_BASE_BRANCH_REASON = 'missing-base-branch';
+
 interface KshetraState {
   paused: boolean;
   reason?: string;

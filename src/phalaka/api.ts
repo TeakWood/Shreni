@@ -121,11 +121,13 @@ export const ProcessSnapshotSchema = z.object({
   kind: z.enum(['worker', 'phalaka', 'suthradhara']),
   kshetraId: z.string().optional(),
   pid: z.number().int(),
-  status: z.enum(['working', 'idle', 'paused-manual', 'stuck', 'stale-heartbeat', 'dead', 'healthy']),
+  status: z.enum(['working', 'idle', 'paused-manual', 'paused-missing-base', 'stuck', 'stale-heartbeat', 'dead', 'healthy']),
   phase: z.string().optional(),
   heartbeatAgeMs: z.number().optional(),
   paused: z.boolean(),
   stuck: ProcessStuckSchema.optional(),
+  // The configured base branch, set only on a 'paused-missing-base' row (uvu.7).
+  baseBranch: z.string().optional(),
   // Bead-derived enrichment, merged from assembleKshetraStatus() for worker rows.
   activeBead: ProcessActiveBeadSchema.optional(),
   queueDepth: z.number().int().nonnegative().optional(),

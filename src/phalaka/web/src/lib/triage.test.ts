@@ -8,9 +8,10 @@ import {
 } from './triage';
 
 describe('triageSeverityRank', () => {
-  it('orders stuck < dead < stale-heartbeat < blocked, unknown last', () => {
+  it('orders stuck < dead < missing-base < stale-heartbeat < blocked, unknown last', () => {
     expect(triageSeverityRank('stuck')).toBeLessThan(triageSeverityRank('dead'));
-    expect(triageSeverityRank('dead')).toBeLessThan(triageSeverityRank('stale-heartbeat'));
+    expect(triageSeverityRank('dead')).toBeLessThan(triageSeverityRank('missing-base'));
+    expect(triageSeverityRank('missing-base')).toBeLessThan(triageSeverityRank('stale-heartbeat'));
     expect(triageSeverityRank('stale-heartbeat')).toBeLessThan(triageSeverityRank('blocked'));
     expect(triageSeverityRank('weird')).toBeGreaterThan(triageSeverityRank('blocked'));
   });
@@ -18,8 +19,8 @@ describe('triageSeverityRank', () => {
 
 describe('triageSeverityClass', () => {
   it('gives each severity a distinct class and a fallback', () => {
-    const classes = ['stuck', 'dead', 'stale-heartbeat', 'blocked'].map(triageSeverityClass);
-    expect(new Set(classes).size).toBe(4);
+    const classes = ['stuck', 'dead', 'missing-base', 'stale-heartbeat', 'blocked'].map(triageSeverityClass);
+    expect(new Set(classes).size).toBe(5);
     expect(triageSeverityClass('weird')).toContain('slate');
   });
 });
@@ -67,6 +68,26 @@ describe('triageEntryForProcess', () => {
     expect(e!.reason).toContain('3m');
     expect(e!.reason).toContain('phase=CODING');
     expect(e!.remediation).toContain('shreni logs --kshetra proj');
+  });
+
+  it('surfaces a missing-base pause naming the branch + create remediation (uvu.7)', () => {
+    const e = triageEntryForProcess({
+      kind: 'worker',
+      kshetraId: 'proj',
+      status: 'paused-missing-base',
+      baseBranch: 'develop',
+    });
+    expect(e!.severity).toBe('missing-base');
+    expect(e!.key).toBe('missing-base:worker:proj');
+    expect(e!.reason).toContain('develop');
+    expect(e!.reason).toContain('does not exist on origin');
+    expect(e!.remediation).toBe('shreni base-branch create proj');
+  });
+
+  it('missing-base falls back to a generic name when baseBranch is absent', () => {
+    const e = triageEntryForProcess({ kind: 'worker', kshetraId: 'proj', status: 'paused-missing-base' });
+    expect(e!.severity).toBe('missing-base');
+    expect(e!.reason).toContain('the configured base branch');
   });
 
   it('returns null for a healthy/working/idle/paused process', () => {
