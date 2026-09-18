@@ -75,6 +75,15 @@ vi.mock('readline', () => ({
   createInterface: () => ({ question: mockQuestion, close: vi.fn() }),
 }));
 
+// Base-branch helper (uvu.2) — mocked so resolveInitMainBranch tests control
+// existence/creation without a real origin.
+const mockCheckBaseBranch = vi.fn<() => Promise<{ exists: boolean }>>();
+const mockCreateBaseBranch = vi.fn<() => Promise<{ branch: string; base: string }>>();
+vi.mock('../sthapathi/base-branch', () => ({
+  checkBaseBranch: () => mockCheckBaseBranch(),
+  createBaseBranch: () => mockCreateBaseBranch(),
+}));
+
 // ── imports after mocks ───────────────────────────────────────────────────────
 
 const {
@@ -103,6 +112,7 @@ const {
   initKshetra,
   promptMergePolicy,
   resolveMergePolicy,
+  resolveInitMainBranch,
   SHRENI_SECTION,
 } = await import('./init-kshetra');
 
@@ -503,6 +513,14 @@ describe('generateKshetraYaml', () => {
     expect(out).toContain('maxRoundsPerBead: 3');
   });
 
+  it('defaults mainBranch to main when none is given (uvu.3)', () => {
+    expect(generateKshetraYaml(OPTS)).toContain('mainBranch: main');
+  });
+
+  it('writes a custom mainBranch when provided (uvu.3)', () => {
+    expect(generateKshetraYaml({ ...OPTS, mainBranch: 'develop' })).toContain('mainBranch: develop');
+  });
+
   it('writes a detected node toolchain profile (packageManager + commands)', () => {
     const out = generateKshetraYaml({
       ...OPTS,
@@ -574,6 +592,76 @@ describe('generateKshetraYaml', () => {
 });
 
 // ── scaffoldConventions ───────────────────────────────────────────────────────
+
+// ── resolveInitMainBranch (uvu.3) ─────────────────────────────────────────────
+
+describe('resolveInitMainBranch', () => {
+  beforeEach(() => {
+    mockCheckBaseBranch.mockResolvedValue({ exists: true });
+    mockCreateBaseBranch.mockResolvedValue({ branch: 'develop', base: 'main' });
+  });
+
+  it('non-TTY keeps the default main with no prompt and no origin check', async () => {
+    const promptBranch = vi.fn();
+    const branch = await resolveInitMainBranch('/repo', 'my-app', { isTTY: false }, { promptBranch });
+    expect(branch).toBe('main');
+    expect(promptBranch).not.toHaveBeenCalled();
+    expect(mockCheckBaseBranch).not.toHaveBeenCalled();
+  });
+
+  it('returns the chosen branch when it already exists on origin (no create prompt)', async () => {
+    mockCheckBaseBranch.mockResolvedValue({ exists: true });
+    const promptCreate = vi.fn();
+    const branch = await resolveInitMainBranch(
+      '/repo', 'my-app', { isTTY: true },
+      { promptBranch: async () => 'develop', promptCreate },
+    );
+    expect(branch).toBe('develop');
+    expect(promptCreate).not.toHaveBeenCalled();
+    expect(mockCreateBaseBranch).not.toHaveBeenCalled();
+  });
+
+  it('creates+pushes when the branch is missing and the operator says yes', async () => {
+    mockCheckBaseBranch.mockResolvedValue({ exists: false });
+    const branch = await resolveInitMainBranch(
+      '/repo', 'my-app', { isTTY: true },
+      { promptBranch: async () => 'develop', promptCreate: async () => true },
+    );
+    expect(branch).toBe('develop');
+    expect(mockCreateBaseBranch).toHaveBeenCalledTimes(1);
+  });
+
+  it('completes with a warning (no create) when the operator declines', async () => {
+    mockCheckBaseBranch.mockResolvedValue({ exists: false });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const branch = await resolveInitMainBranch(
+      '/repo', 'my-app', { isTTY: true },
+      { promptBranch: async () => 'develop', promptCreate: async () => false },
+    );
+    expect(branch).toBe('develop');
+    expect(mockCreateBaseBranch).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('shreni base-branch create my-app'));
+    warn.mockRestore();
+  });
+
+  it('a blank branch answer keeps main', async () => {
+    mockCheckBaseBranch.mockResolvedValue({ exists: true });
+    const branch = await resolveInitMainBranch('/repo', 'my-app', { isTTY: true }, { promptBranch: async () => 'main' });
+    expect(branch).toBe('main');
+  });
+
+  it('does not block init when the origin check throws', async () => {
+    mockCheckBaseBranch.mockRejectedValue(new Error('origin unreachable'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const branch = await resolveInitMainBranch(
+      '/repo', 'my-app', { isTTY: true },
+      { promptBranch: async () => 'develop' },
+    );
+    expect(branch).toBe('develop');
+    expect(mockCreateBaseBranch).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
 
 describe('scaffoldConventions', () => {
   beforeEach(() => {

@@ -9,7 +9,8 @@ import { homedir } from 'os';
 import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
 import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
-import { GATES_DEFAULTS, type GatesConfig, type StackConfig } from '../kshetra/config';
+import { GATES_DEFAULTS, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
+import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
 import { detectToolchain, suggestPack, type DetectedStack } from './detect-toolchain';
 import { createInterface } from 'readline';
 import type { Provider } from '../agents/providers/types';
@@ -490,6 +491,87 @@ async function promptLine(question: string): Promise<string> {
   }
 }
 
+// Interview + validation for repo.mainBranch (uvu.3). This runs AFTER the app
+// repo phase, so origin exists to check against. A non-TTY (scripted / dry-run)
+// run keeps today's behaviour byte-for-byte: 'main', no prompt, no network.
+//
+// On a TTY it optionally takes a custom branch name, then uses the shared
+// base-branch helper (uvu.2) to check it exists on origin. If missing, it offers
+// to create+push it (cut from origin's default via the .1 primitives). Declining
+// completes init with a clear warning that the daemon will PAUSE the Kshetra
+// until the branch exists (uvu.4) — recoverable with `shreni base-branch create`.
+// A failed origin check never blocks init: the daemon re-validates at runtime.
+// `prompts` is injectable so tests drive it without a real TTY.
+export async function resolveInitMainBranch(
+  repoPath: string,
+  slug: string,
+  ctx: { isTTY: boolean },
+  prompts: {
+    promptBranch?: () => Promise<string>;
+    promptCreate?: (branch: string) => Promise<boolean>;
+  } = {},
+): Promise<string> {
+  if (!ctx.isTTY) return 'main';
+
+  const promptBranch =
+    prompts.promptBranch ??
+    (async () => {
+      const answer = (
+        await promptLine(
+          '\nBase branch — the branch the whole loop builds on (branch-off, merge, PR base).\n' +
+            '  base branch (default main): ',
+        )
+      ).trim();
+      return answer || 'main';
+    });
+  const promptCreate =
+    prompts.promptCreate ??
+    (async (branch: string) => {
+      const answer = (
+        await promptLine(`  origin/${branch} does not exist — create and push it now? [y/N]: `)
+      ).trim();
+      return /^y(es)?$/i.test(answer);
+    });
+
+  const branch = await promptBranch();
+  // The shared helper only reads repo.path + repo.mainBranch.
+  const kshetra = { repo: { path: repoPath, mainBranch: branch } } as unknown as KshetraConfig;
+
+  let exists: boolean;
+  try {
+    ({ exists } = await checkBaseBranch(kshetra));
+  } catch (err) {
+    console.warn(
+      `  ⚠ could not check origin for "${branch}": ${(err as Error).message}. ` +
+        `Continuing — the daemon will validate it at runtime.`,
+    );
+    return branch;
+  }
+
+  if (exists) {
+    console.log(`  ✓ origin/${branch} exists.`);
+    return branch;
+  }
+
+  if (await promptCreate(branch)) {
+    try {
+      const { base } = await createBaseBranch(kshetra);
+      console.log(`  ✓ created origin/${branch} from origin/${base} and pushed it.`);
+    } catch (err) {
+      console.warn(
+        `  ⚠ could not create origin/${branch}: ${(err as Error).message}. ` +
+          `The daemon will pause the Kshetra until it exists.`,
+      );
+    }
+  } else {
+    console.warn(
+      `  ⚠ origin/${branch} is missing — the daemon will PAUSE this Kshetra until it exists. ` +
+        `Create it later with: shreni base-branch create ${slug}`,
+    );
+  }
+  return branch;
+}
+
 // Suggest-and-confirm (84m.3). A single top scorer asks Y/n; a tie asks which
 // of the tied packs to use (blank = none). Declining always falls back to the
 // bare language-profile path.
@@ -530,6 +612,9 @@ export function generateKshetraYaml(opts: {
   repoRemote: string;
   beadsPath: string;
   beadsRemote: string;
+  // The base branch the whole loop builds on (uvu.3). Defaults to 'main' when
+  // the interview did not resolve a custom value (non-TTY / scripted runs).
+  mainBranch?: string;
   // Either a detected toolchain profile (preferred) or a bare language string
   // (back-compat) — the language is normalised into a minimal DetectedStack.
   stack?: DetectedStack;
@@ -564,7 +649,7 @@ export function generateKshetraYaml(opts: {
     repo: {
       path: opts.repoPath,
       remote: opts.repoRemote,
-      mainBranch: 'main',
+      mainBranch: opts.mainBranch ?? 'main',
       branchPattern: 'bead-{id}/{slug}',
       // Only emit mergePolicy when 'pr' — 'push' is the default, so a plain
       // config stays clean and back-compatible.
@@ -930,6 +1015,9 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   // Shared state threaded between phases via closures.
   let beadsRemote = '';
   let configPath = configTarget;
+  // repo.mainBranch (uvu.3): resolved in the Base branch phase (after origin
+  // exists), consumed by generateKshetraYaml in the Config phase.
+  let mainBranch = 'main';
 
   const phases: InitPhase[] = [
     {
@@ -939,6 +1027,17 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         `or create the repo at ${repoPath} yourself with an 'origin' remote and re-run.`,
       run: async () => {
         await ensureAppRepo(getOrg, opts.slug, repoPath);
+      },
+    },
+    {
+      name: 'Base branch',
+      recovery:
+        `ensure the repo at ${repoPath} has an 'origin' remote you can push to, ` +
+        `or set repo.mainBranch in the config to a branch that exists on origin.`,
+      run: async () => {
+        mainBranch = await resolveInitMainBranch(repoPath, opts.slug, {
+          isTTY: Boolean(process.stdin.isTTY),
+        });
       },
     },
     {
@@ -1010,6 +1109,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           repoRemote,
           beadsPath,
           beadsRemote,
+          mainBranch,
           stack,
           packStack,
           pack: pack ? `${pack.name}@${pack.version}` : undefined,
