@@ -15,6 +15,7 @@ vi.mock('./beads.js', () => ({
 
 const mockStatus = vi.fn<() => Promise<{ modified: string[]; staged: string[]; untracked: string[] }>>();
 const mockBranchExists = vi.fn<() => Promise<boolean>>();
+const mockRemoteBranchExists = vi.fn<() => Promise<boolean>>();
 const mockCheckout = vi.fn<() => Promise<void>>();
 const mockPull = vi.fn<() => Promise<void>>();
 const mockFetch = vi.fn<() => Promise<void>>();
@@ -25,6 +26,7 @@ vi.mock('./git.js', () => ({
   git: vi.fn(() => ({
     status: mockStatus,
     branchExists: mockBranchExists,
+    remoteBranchExists: mockRemoteBranchExists,
     checkout: mockCheckout,
     pull: mockPull,
     fetch: mockFetch,
@@ -46,8 +48,12 @@ vi.mock('./health.js', () => ({
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
-const { parseReadyOutput, pickNext, preFlightCheck, selectNext, prepareTask, PreFlightError } =
+const { parseReadyOutput, pickNext, preFlightCheck, selectNext, prepareTask, PreFlightError, MISSING_BASE_BRANCH_REASON } =
   await import('./pickup.js');
+// state + notifications are real, but src/test-setup.ts redirects HOME to a
+// throwaway temp dir, so these read/write a per-run sandbox — never ~/.shreni.
+const { loadState } = await import('../kshetra/state.js');
+const { readNotifications } = await import('./notifications.js');
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -81,6 +87,7 @@ beforeEach(() => {
   mockStatus.mockResolvedValue({ modified: [], staged: [], untracked: [] });
   mockDiscardPath.mockResolvedValue(undefined);
   mockBranchExists.mockResolvedValue(false);
+  mockRemoteBranchExists.mockResolvedValue(true); // base branch present by default
   mockCheckout.mockResolvedValue(undefined);
   mockPull.mockResolvedValue(undefined);
   mockCheckHealth.mockResolvedValue({ green: true, failCount: 0, baseline: 0, sha: 'sha' });
@@ -298,6 +305,67 @@ describe('preFlightCheck', () => {
     });
     mockStatus.mockResolvedValue({ modified: ['.shreni/repo-map.md', 'src/app.ts'], staged: [], untracked: [] });
     await expect(preFlightCheck(TASK, KSHETRA)).rejects.toThrow('dirty working tree');
+  });
+
+  // ── missing base branch guard (uvu.4) ──────────────────────────────────────
+  // Each test uses a UNIQUE kshetra id so the persisted pause + notification
+  // feed (real state.json / notifications.jsonl in the temp HOME) never bleed
+  // across tests.
+  describe('missing base branch', () => {
+    function ksh(id: string): KshetraConfig {
+      return { ...KSHETRA, id, repo: { ...KSHETRA.repo, mainBranch: 'develop' } };
+    }
+
+    it('checks the base branch BEFORE checking out main', async () => {
+      const order: string[] = [];
+      mockRemoteBranchExists.mockImplementation(async () => { order.push('remote-check'); return true; });
+      mockCheckout.mockImplementation(async () => { order.push('checkout'); });
+      await preFlightCheck(TASK, ksh('base-order'));
+      expect(order.indexOf('remote-check')).toBeLessThan(order.indexOf('checkout'));
+    });
+
+    it('does not touch the work tree when the base branch is present', async () => {
+      await preFlightCheck(TASK, ksh('base-present'));
+      expect(mockCheckout).toHaveBeenCalled(); // normal path proceeds
+    });
+
+    it('pauses + notifies + aborts before checkout when the base is missing', async () => {
+      const k = ksh('base-missing');
+      mockRemoteBranchExists.mockResolvedValue(false);
+      await expect(preFlightCheck(TASK, k)).rejects.toThrow(PreFlightError);
+      expect(mockCheckout).not.toHaveBeenCalled(); // aborted before the cryptic failure point
+
+      const s = loadState().kshetras[k.id];
+      expect(s?.paused).toBe(true);
+      expect(s?.reason).toBe(MISSING_BASE_BRANCH_REASON);
+      expect(s?.requiresManualResume).toBe(true);
+
+      const notes = readNotifications(k.id);
+      expect(notes).toHaveLength(1);
+      expect(notes[0].event).toBe(MISSING_BASE_BRANCH_REASON);
+      expect(notes[0].message).toContain('develop');
+      expect(notes[0].remediation).toContain(k.id);
+    });
+
+    it('is idempotent: a second poll neither re-pauses nor re-notifies', async () => {
+      const k = ksh('base-idempotent');
+      mockRemoteBranchExists.mockResolvedValue(false);
+      await expect(preFlightCheck(TASK, k)).rejects.toThrow(PreFlightError);
+      await expect(preFlightCheck(TASK, k)).rejects.toThrow(PreFlightError);
+      await expect(preFlightCheck(TASK, k)).rejects.toThrow(PreFlightError);
+      // three polls, ONE notification (not one per poll)
+      expect(readNotifications(k.id)).toHaveLength(1);
+    });
+
+    it('prepareTask returns null (no claim) when the base branch is missing', async () => {
+      const k = ksh('base-prepare');
+      mockRemoteBranchExists.mockResolvedValue(false);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await prepareTask(TASK, k);
+      expect(result).toBeNull();
+      expect(mockClaim).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
   });
 });
 

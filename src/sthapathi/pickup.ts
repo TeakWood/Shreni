@@ -3,9 +3,11 @@ import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
+import { checkBaseBranch } from './base-branch.js';
 import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
 import { REPO_MAP_RELATIVE_PATH } from '../kshetra/repo-map.js';
-import { recordProgress, recordStall } from '../kshetra/state.js';
+import { loadState, pauseKshetra, recordProgress, recordStall } from '../kshetra/state.js';
+import { appendNotification } from './notifications.js';
 // The bead type the legacy Suthradhara commit engine used for its per-session
 // audit bead. That engine is gone (epic d3y — launched planning sessions file
 // directly and write no audit bead), but historical `suthradhara-session` beads
@@ -21,6 +23,34 @@ export class PreFlightError extends Error {
     super(message);
     this.name = 'PreFlightError';
   }
+}
+
+// Pause reason set when the configured base branch (repo.mainBranch) is absent
+// on origin. The operator clears it by creating the branch on origin — the
+// approval CLI action (Shreni-beads-uvu.5) resumes the Kshetra. Phalaka triage
+// (uvu.7) keys its remediation off this reason.
+export const MISSING_BASE_BRANCH_REASON = 'missing-base-branch';
+
+// Pause the Kshetra + notify the operator that repo.mainBranch is missing on
+// origin, IDEMPOTENTLY: if it is already paused for this reason we neither
+// re-pause nor re-notify, so the 30s poll cannot spam the feed. (The worker's
+// selectNext gate also stops re-reaching preFlightCheck once it is manually
+// paused; this guard makes the notify idempotent independently of that path.)
+function pauseForMissingBaseBranch(kshetra: KshetraConfig, branch: string): void {
+  const current = loadState().kshetras[kshetra.id];
+  if (current?.paused === true && current.reason === MISSING_BASE_BRANCH_REASON) return;
+  pauseKshetra(kshetra, {
+    manual: true,
+    reason: MISSING_BASE_BRANCH_REASON,
+    message: `Base branch '${branch}' does not exist on origin`,
+  });
+  appendNotification(kshetra.id, {
+    ts: new Date().toISOString(),
+    event: MISSING_BASE_BRANCH_REASON,
+    reason: `The configured base branch '${branch}' does not exist on origin.`,
+    remediation: `Create it on origin, then resume: shreni base-branch create ${kshetra.id}`,
+    message: `Kshetra '${kshetra.id}' paused — base branch '${branch}' is missing on origin.`,
+  });
 }
 
 const BeadsIssueSchema = z.object({
@@ -94,6 +124,18 @@ export function pickNext(tasks: Task[]): Task | null {
 export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promise<void> {
   const g = git(kshetra);
   const main = kshetra.repo.mainBranch;
+
+  // Base-branch guard (uvu.4): the whole loop branches from and pushes to
+  // origin/<mainBranch>. When it is missing on origin — a custom or mistyped
+  // value that was never pushed — the checkout(main) + pull below fail
+  // cryptically on EVERY poll. Detect it up front, pause the Kshetra for
+  // operator approval (idempotent — one notification, not one per poll), and
+  // abort the cycle cleanly via PreFlightError (prepareTask returns null).
+  const { exists } = await checkBaseBranch(kshetra, g);
+  if (!exists) {
+    pauseForMissingBaseBranch(kshetra, main);
+    throw new PreFlightError(task, `base branch '${main}' missing on origin`);
+  }
 
   await g.checkout(main);
 
