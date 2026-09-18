@@ -12,6 +12,7 @@ import { stopWorker } from './stop';
 import { runStatus } from './status';
 import { loadRegistry } from '../kshetra/registry';
 import { pauseKshetraById, resumeKshetraById } from './pause';
+import { createBaseBranchForKshetra } from './base-branch';
 import { runAgents } from './agents';
 import { runLogs } from './logs';
 import { runRun } from './run';
@@ -136,6 +137,40 @@ export const COMMANDS: Command[] = [
         console.log(`  ${result.hint}`);
       } else {
         console.log(`Kshetra "${id}" resumed — daemon will pick tasks on next cycle`);
+      }
+    },
+  },
+  {
+    name: 'base-branch',
+    summary: 'Create the configured base branch on origin for a kshetra paused because it is missing, then resume it',
+    usage: 'create <id>',
+    async run(ctx) {
+      const sub = ctx.args[0];
+      if (sub !== 'create') {
+        throw new Error('Usage: shreni base-branch create <id>');
+      }
+      const id = ctx.args[1];
+      if (!id) throw new Error('Usage: shreni base-branch create <id>');
+
+      const result = await createBaseBranchForKshetra(id);
+      switch (result.status) {
+        case 'not_found':
+          throw new Error(`Kshetra not found: ${id}`);
+        case 'not_paused_for_missing_base':
+          // Graceful no-op (exit 0): the operator asked to clear a missing-base
+          // pause that isn't in effect. Don't touch an unrelated pause.
+          console.log(
+            result.reason
+              ? `Kshetra "${id}" is paused for "${result.reason}", not a missing base branch — nothing to do.`
+              : `Kshetra "${id}" is not paused for a missing base branch — nothing to do.`,
+          );
+          break;
+        case 'already_exists':
+          console.log(`Base branch "${result.branch}" already exists on origin — resumed kshetra "${id}".`);
+          break;
+        case 'created':
+          console.log(`Created origin/${result.branch} from origin/${result.base} and resumed kshetra "${id}".`);
+          break;
       }
     },
   },
