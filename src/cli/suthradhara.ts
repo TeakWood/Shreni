@@ -16,6 +16,7 @@ import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-
 import { getUsageMeter, getPolicySource, costFor, type UsageMeter, type PolicySource, type PolicyDecision } from '../ext/index';
 import { readSessionUsage, type SessionUsage } from '../suthradhara/usage';
 import { resolveAgentModel, type KshetraConfig } from '../kshetra/config';
+import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
 
 // Resolve the target Kshetra for a Suthradhara subcommand. Precedence:
 //   1. @<id> as a bare positional token (at-mention)
@@ -115,6 +116,10 @@ export async function runSuthradhara(sub: string | undefined, opts: RunOpts): Pr
 
   if (sub === 'start') {
     if (!gateFirstLaunch(kshetra, 'launching')) return; // fnd.7: budget gate
+    // uvu.6: verify the base branch exists before startSession cuts a worktree
+    // from origin/<mainBranch>. Skip when a session is already running — no
+    // launch, no cut (mirrors gateFirstLaunch's already-running short-circuit).
+    if (!statusSession(kshetra.id).running && !(await ensureBaseBranchForLaunch(kshetra))) return;
     const result = await startSession(kshetra);
     if (result.status === 'already_running') {
       console.log(`suthradhara[${result.kshetraId}]: already running (pid ${result.pid})`);
@@ -160,6 +165,9 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
   // fnd.7: a resume relaunches an interactive session, so gate it on the budget
   // cap too (via the same first-launch gate the `start` command uses).
   if (!gateFirstLaunch(kshetra, 'resuming')) return;
+  // uvu.6: base-branch preflight before resumeSession touches a worktree cut
+  // from origin/<mainBranch>. Skip when already running (no relaunch, no cut).
+  if (!statusSession(kshetra.id).running && !(await ensureBaseBranchForLaunch(kshetra))) return;
 
   const result = await resumeSession(kshetra, sessionId);
   if (result.status === 'already_running') {
@@ -200,6 +208,9 @@ export interface PlanningLoopDeps {
   // Budget gate seam (fnd.7). Defaults to the shared getPolicySource(); injected
   // so tests can drive the deny path without wiring a real budget policy.
   policy?: PolicySource;
+  // Base-branch preflight seam (uvu.6). Defaults to ensureBaseBranchForLaunch
+  // wired to this loop's ask/log; injected so tests drive the missing-base path.
+  ensureBaseBranch?: (kshetra: KshetraConfig) => Promise<boolean>;
 }
 
 export type MenuChoice = 'extend' | 'new' | 'end';
@@ -279,6 +290,67 @@ function gateFirstLaunch(kshetra: KshetraConfig, verb: 'launching' | 'resuming')
   return false;
 }
 
+// Injectable seams for the base-branch preflight, so tests drive it without a
+// real origin or TTY.
+export interface BaseBranchPreflightDeps {
+  ask?: (q: string) => Promise<string>;
+  check?: (k: KshetraConfig) => Promise<{ exists: boolean }>;
+  create?: (k: KshetraConfig) => Promise<{ branch: string; base: string }>;
+  log?: (m: string) => void;
+}
+
+// Interactive base-branch preflight before a planning-session launch (uvu.6).
+// Suthradhara worktrees are cut from origin/<mainBranch> (worktree.ts), so a
+// missing base branch fails deep in worktree creation. Check up front via the
+// shared helper (uvu.2): if it exists, proceed; if missing, prompt to create+
+// push it (cut from origin's default) — on yes proceed, on no abort the launch
+// with a clear message. Returns whether the launch may proceed. A failed origin
+// check aborts rather than diving into a doomed worktree cut.
+export async function ensureBaseBranchForLaunch(
+  kshetra: KshetraConfig,
+  deps: BaseBranchPreflightDeps = {},
+): Promise<boolean> {
+  const ask = deps.ask ?? defaultAsk;
+  const check = deps.check ?? checkBaseBranch;
+  const create = deps.create ?? createBaseBranch;
+  const log = deps.log ?? ((m: string) => console.log(m));
+  const branch = kshetra.repo.mainBranch;
+
+  let exists: boolean;
+  try {
+    ({ exists } = await check(kshetra));
+  } catch (err) {
+    log(
+      `suthradhara[${kshetra.id}]: could not check origin for base branch "${branch}" — ` +
+        `${(err as Error).message}. Aborting launch.`,
+    );
+    return false;
+  }
+  if (exists) return true;
+
+  const answer = (
+    await ask(`Base branch "${branch}" does not exist on origin. Create and push it now? [y/N] `)
+  ).trim();
+  if (!/^y(es)?$/i.test(answer)) {
+    log(
+      `suthradhara[${kshetra.id}]: base branch "${branch}" is missing on origin — launch aborted. ` +
+        `Create it (e.g. \`shreni base-branch create ${kshetra.id}\`) and retry.`,
+    );
+    return false;
+  }
+  try {
+    const { base } = await create(kshetra);
+    log(`suthradhara[${kshetra.id}]: created origin/${branch} from origin/${base}.`);
+    return true;
+  } catch (err) {
+    log(
+      `suthradhara[${kshetra.id}]: failed to create origin/${branch} — ` +
+        `${(err as Error).message}. Launch aborted.`,
+    );
+    return false;
+  }
+}
+
 async function runPlanningLoop(
   kshetra: KshetraConfig,
   first: LaunchResult,
@@ -291,6 +363,8 @@ async function runPlanningLoop(
   const meter = deps.meter ?? getUsageMeter();
   const readUsage = deps.readUsage ?? readSessionUsage;
   const policy = deps.policy ?? getPolicySource();
+  const ensureBaseBranch =
+    deps.ensureBaseBranch ?? ((k: KshetraConfig) => ensureBaseBranchForLaunch(k, { ask, log }));
   const { provider, model } = resolveAgentModel(kshetra, 'suthradhara');
   let current = first;
   // The first session may be a resume (`suthradhara resume`); every relaunch the
@@ -420,6 +494,15 @@ async function runPlanningLoop(
     const gate = mayLaunchSession(kshetra, emit, policy);
     if (!gate.allowed) {
       log(`suthradhara[${kshetra.id}]: ${gate.reason} — ending planning instead of launching another session.`);
+      await teardownWorktrees(kshetra);
+      return;
+    }
+
+    // uvu.6: a "new" relaunch reaps the worktree and cuts a fresh one from
+    // origin/<mainBranch>; verify the base branch still exists before doing so,
+    // rather than failing deep in worktree creation. ("extend" reuses the
+    // current worktree — no fresh cut — so the check is cheap and passes.)
+    if (!(await ensureBaseBranch(kshetra))) {
       await teardownWorktrees(kshetra);
       return;
     }

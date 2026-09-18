@@ -5,6 +5,12 @@ import { join } from 'path';
 import type { KshetraConfig } from '../kshetra/config';
 import { costFor } from '../ext/index';
 
+// Hoisted so the vi.mock factory can reference it without TDZ issues.
+const { mockQuestion } = vi.hoisted(() => ({ mockQuestion: vi.fn() }));
+vi.mock('readline', () => ({
+  createInterface: () => ({ question: mockQuestion, close: vi.fn() }),
+}));
+
 const mockStartSession = vi.fn();
 const mockStopSession = vi.fn();
 const mockStatusSession = vi.fn();
@@ -28,6 +34,15 @@ vi.mock('../kshetra/registry', () => ({
   loadRegistry: vi.fn(() => []),
 }));
 
+// Base-branch preflight (uvu.6) — default to "exists" so existing launch/loop
+// tests are unaffected; individual tests flip it to drive the missing path.
+const mockCheckBaseBranch = vi.fn(async () => ({ exists: true }));
+const mockCreateBaseBranch = vi.fn(async () => ({ branch: 'main', base: 'main' }));
+vi.mock('../sthapathi/base-branch', () => ({
+  checkBaseBranch: () => mockCheckBaseBranch(),
+  createBaseBranch: () => mockCreateBaseBranch(),
+}));
+
 const {
   parseAtMention,
   parseSessionId,
@@ -38,6 +53,7 @@ const {
   mayLaunchSession,
   parseMenuChoice,
   renderSummary,
+  ensureBaseBranchForLaunch,
 } = await import('./suthradhara');
 const { writeHandoff } = await import('../suthradhara/handoff');
 
@@ -56,7 +72,13 @@ const KSHETRA_B = {
 const ALPHA_SESSION = 'alpha-20260727T140312-a3f2';
 const BETA_SESSION = 'beta-20260727T140312-b1c8';
 
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Re-establish the base-branch preflight default each test (clearAllMocks
+  // keeps implementations, but a per-test override would otherwise leak).
+  mockCheckBaseBranch.mockResolvedValue({ exists: true });
+  mockCreateBaseBranch.mockResolvedValue({ branch: 'main', base: 'main' });
+});
 
 describe('parseAtMention', () => {
   it('extracts the id from @<id> at any position', () => {
@@ -493,5 +515,112 @@ describe('runPlanningLoop budget gate (fnd.7)', () => {
     expect(logs.join('\n')).toContain('over budget');
     // The denial is on the ledger as a policy_decision.
     expect(events.some(e => e.type === 'policy_decision')).toBe(true);
+  });
+});
+
+// ── base-branch preflight (uvu.6) ─────────────────────────────────────────────
+
+describe('ensureBaseBranchForLaunch', () => {
+  it('proceeds without prompting when the base branch exists', async () => {
+    const ask = vi.fn();
+    const ok = await ensureBaseBranchForLaunch(KSHETRA_A, {
+      ask, check: async () => ({ exists: true }), log: () => {},
+    });
+    expect(ok).toBe(true);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it('creates+pushes and proceeds when missing and the operator says yes', async () => {
+    const create = vi.fn(async () => ({ branch: 'main', base: 'main' }));
+    const ok = await ensureBaseBranchForLaunch(KSHETRA_A, {
+      ask: async () => 'y', check: async () => ({ exists: false }), create, log: () => {},
+    });
+    expect(ok).toBe(true);
+    expect(create).toHaveBeenCalledWith(KSHETRA_A);
+  });
+
+  it('aborts (no create) when missing and the operator declines', async () => {
+    const create = vi.fn();
+    const logs: string[] = [];
+    const ok = await ensureBaseBranchForLaunch(KSHETRA_A, {
+      ask: async () => 'n', check: async () => ({ exists: false }), create, log: (m) => logs.push(m),
+    });
+    expect(ok).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+    expect(logs.join('\n')).toContain('launch aborted');
+  });
+
+  it('aborts when the origin check throws (does not dive into a doomed cut)', async () => {
+    const ok = await ensureBaseBranchForLaunch(KSHETRA_A, {
+      check: async () => { throw new Error('origin unreachable'); }, log: () => {},
+    });
+    expect(ok).toBe(false);
+  });
+
+  it('aborts when creation fails after a yes', async () => {
+    const ok = await ensureBaseBranchForLaunch(KSHETRA_A, {
+      ask: async () => 'y',
+      check: async () => ({ exists: false }),
+      create: async () => { throw new Error('push rejected'); },
+      log: () => {},
+    });
+    expect(ok).toBe(false);
+  });
+});
+
+describe('base-branch preflight wired into the launch paths (uvu.6)', () => {
+  it('start aborts before startSession when the base is missing and declined', async () => {
+    mockStatusSession.mockReturnValue({ kshetraId: 'alpha', running: false });
+    mockCheckBaseBranch.mockResolvedValue({ exists: false });
+    // Drive the [y/N] prompt (real defaultAsk → mocked readline) to answer 'n'.
+    mockQuestion.mockImplementation((_q: string, cb: (a: string) => void) => cb('n'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runSuthradhara('start', { args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A] });
+    expect(mockStartSession).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  it('start proceeds to startSession when the base exists', async () => {
+    mockStatusSession.mockReturnValue({ kshetraId: 'alpha', running: false });
+    mockCheckBaseBranch.mockResolvedValue({ exists: true });
+    mockStartSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 1 });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runSuthradhara('start', { args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A] });
+    expect(mockStartSession).toHaveBeenCalledWith(KSHETRA_A);
+    logSpy.mockRestore();
+  });
+
+  it('skips the base check when a session is already running', async () => {
+    mockStatusSession.mockReturnValue({ kshetraId: 'alpha', running: true, pid: 9 });
+    mockStartSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 9 });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runSuthradhara('start', { args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A] });
+    expect(mockCheckBaseBranch).not.toHaveBeenCalled();
+    expect(mockStartSession).toHaveBeenCalledWith(KSHETRA_A);
+    logSpy.mockRestore();
+  });
+});
+
+describe('runPlanningLoop base-branch preflight (uvu.6)', () => {
+  let WT: string;
+  beforeEach(() => { WT = mkdtempSync(join(tmpdir(), 'loop-base-')); });
+  afterEach(() => { rmSync(WT, { recursive: true, force: true }); });
+  const launched = (worktreePath: string) => ({
+    status: 'launched' as const,
+    kshetraId: 'alpha', sessionId: ALPHA_SESSION, claudeSessionId: 'cid',
+    worktreePath, pid: 1, wait: vi.fn().mockResolvedValue(0),
+  });
+
+  it('a relaunch aborts + tears down when the base branch has gone missing', async () => {
+    await runPlanningLoop(KSHETRA_A, launched(WT), {
+      ask: async () => '2', // new story → relaunch
+      log: () => {},
+      emit: () => {},
+      meter: { record: () => {} },
+      readUsage: () => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCallCount: 0 }),
+      ensureBaseBranch: async () => false,
+    });
+    expect(mockStartSession).not.toHaveBeenCalled();
+    expect(mockTeardown).toHaveBeenCalledWith(KSHETRA_A);
   });
 });
