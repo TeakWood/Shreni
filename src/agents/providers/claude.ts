@@ -15,6 +15,26 @@ function parseClaudeUsage(usage: unknown): TokenUsage | undefined {
   };
 }
 
+// The context-window denominator for the run (epic 408/A1, part B). The `result`
+// message carries a `modelUsage` object keyed by model id; each entry reports a
+// `contextWindow`. Take the entry for the MAIN-LOOP model only — match the
+// resolved model id exactly, else the sole key that starts with it. If no entry
+// matches unambiguously, return undefined: never guess and never take the max
+// across models, because a Haiku subagent's entry would give the wrong window.
+function pickContextWindow(modelUsage: unknown, model: string): number | undefined {
+  if (!modelUsage || typeof modelUsage !== 'object') return undefined;
+  const mu = modelUsage as Record<string, unknown>;
+  let entry = mu[model];
+  if (entry === undefined) {
+    const prefixMatches = Object.keys(mu).filter(k => k.startsWith(model));
+    if (prefixMatches.length !== 1) return undefined; // ambiguous or none → don't guess
+    entry = mu[prefixMatches[0]];
+  }
+  if (!entry || typeof entry !== 'object') return undefined;
+  const cw = (entry as Record<string, unknown>)['contextWindow'];
+  return typeof cw === 'number' ? cw : undefined;
+}
+
 // Anthropic — the `claude` CLI in print mode with stream-json output. This is
 // the reference adapter: validated against `claude --help`.
 //
@@ -89,6 +109,12 @@ export const claudeAdapter: ProviderAdapter = {
   createParser(opts: AgentRunnerOpts, emit: AdapterEmit): StreamParser {
     let resultMsg: { result: string | null; structured_output: unknown; is_error: boolean; usage?: TokenUsage } | null = null;
     let toolCallCount = 0;
+    // Per-call usage is deduped on message.id: the CLI emits one 'assistant' event
+    // per content block (text + each tool_use), all sharing message.id and the
+    // same usage block. Emit turn_usage ONCE per distinct id or the effective-
+    // context curve shows false stair-steps (epic 408 decision 1). Per parser
+    // instance, so a retried attempt starts fresh.
+    const seenMessageIds = new Set<string>();
 
     return {
       onLine(line: string): void {
@@ -114,14 +140,43 @@ export const claudeAdapter: ProviderAdapter = {
               emit.toolCall(name, toolDetail(name, input));
             }
           }
+
+          // Per-model-call usage (epic 408/A1). One turn_usage per distinct
+          // message.id: the input-side counters are the raw input to the effective-
+          // context curve. Only the input side is trusted here (output_tokens may
+          // be partial on intermediate events); cost still comes from the priced
+          // 'result' total. A subagent (Task tool) call carries a non-null
+          // parent_tool_use_id and belongs to a different context window → sidechain.
+          const messageId = message['id'];
+          if (emit.usage && typeof messageId === 'string' && !seenMessageIds.has(messageId)) {
+            const u = parseClaudeUsage(message['usage']);
+            if (u) {
+              seenMessageIds.add(messageId);
+              emit.usage({
+                messageId,
+                inputTokens: u.inputTokens,
+                cacheReadTokens: u.cacheReadTokens,
+                cacheCreationTokens: u.cacheCreationTokens,
+                sidechain: msg['parent_tool_use_id'] != null,
+              });
+            }
+          }
         }
 
         if (type === 'result') {
+          const usage = parseClaudeUsage(msg['usage']);
+          if (usage) {
+            // Carry the main-loop model's context window onto the run's usage, so
+            // peak_context has a denominator (epic 408/A1, part B). Cost and the
+            // four token counters are unchanged — they still come from this block.
+            const cw = pickContextWindow(msg['modelUsage'], opts.model);
+            if (cw !== undefined) usage.contextWindow = cw;
+          }
           resultMsg = {
             result: (msg['result'] as string | null) ?? null,
             structured_output: msg['structured_output'] ?? null,
             is_error: (msg['is_error'] as boolean) ?? false,
-            usage: parseClaudeUsage(msg['usage']),
+            usage,
           };
         }
       },

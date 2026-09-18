@@ -51,6 +51,11 @@ export interface UsageRecord {
   // from spend lost to errors. Entries written before schemaVersion 2 have no
   // `outcome`; read an absent value as 'ok' (v1 only ever recorded successes).
   outcome: 'ok' | 'error';
+  // The main-loop model's context-window size for the run (epic 408/A1, part B),
+  // the denominator peak_context is judged against. Additive OPTIONAL field — no
+  // USAGE_SCHEMA_VERSION bump; a reader treats absent as unknown (the provider
+  // surfaced no unambiguous entry, or it is a non-claude adapter). Never 0-filled.
+  contextWindow?: number;
 }
 
 // Bump when the persisted UsageEntry shape changes in a way a consumer must

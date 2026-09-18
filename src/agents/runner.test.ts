@@ -67,6 +67,22 @@ function okAdapter(usage: unknown, toolCallCount = 3) {
   };
 }
 
+// Drives the adapter's per-call usage hook: createParser fires emit.usage() once
+// per scripted call, so we can assert the runner turns them into turn_usage
+// events with the right per-thread turnIndex (epic 408/A1).
+function usageEmittingAdapter(
+  calls: Array<{ messageId: string; inputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; sidechain: boolean }>,
+) {
+  return {
+    name: 'anthropic' as const,
+    buildSpawn: () => ({ bin: 'true', args: [] }),
+    createParser: (_opts: AgentRunnerOpts, emit: { usage?: (u: unknown) => void }) => {
+      for (const c of calls) emit.usage?.(c);
+      return { onLine: () => {}, finalize: () => ({ structuredOutput: {}, resultText: '', toolCallCount: 0, usage: undefined }) };
+    },
+  };
+}
+
 const OPTS = (signal?: AbortSignal): AgentRunnerOpts => ({
   provider: 'anthropic',
   systemPrompt: 's',
@@ -186,6 +202,55 @@ describe('runAgent usage metering', () => {
     setTimeout(() => controller.abort(), 50);
     await expect(p).rejects.toBeInstanceOf(AgentAbortedError);
     expect(mockRecord).not.toHaveBeenCalled();
+  });
+});
+
+describe('runAgent turn_usage (epic 408/A1)', () => {
+  it('emits one turn_usage per call, counting main-thread and sidechain turnIndex separately', async () => {
+    mockEmitted.length = 0;
+    // main, sidechain, main, sidechain — the sidechain calls must NOT advance the
+    // main-thread index, and vice versa.
+    mockGetAdapter.mockReturnValue(usageEmittingAdapter([
+      { messageId: 'm0', inputTokens: 100, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: false },
+      { messageId: 's0', inputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: true },
+      { messageId: 'm1', inputTokens: 200, cacheReadTokens: 5, cacheCreationTokens: 1, sidechain: false },
+      { messageId: 's1', inputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: true },
+    ]));
+    await runAgent(OPTS());
+    const turns = mockEmitted.filter(e => e.type === 'turn_usage');
+    expect(turns.map(t => ({ messageId: t.messageId, turnIndex: t.turnIndex, sidechain: t.sidechain }))).toEqual([
+      { messageId: 'm0', turnIndex: 0, sidechain: false },
+      { messageId: 's0', turnIndex: 0, sidechain: true },
+      { messageId: 'm1', turnIndex: 1, sidechain: false },
+      { messageId: 's1', turnIndex: 1, sidechain: true },
+    ]);
+    // Provider/model come from the resolved selection; raw counters ride through.
+    expect(turns[2]).toMatchObject({
+      kshetra: 'myapp', beadId: 'bd-1', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      inputTokens: 200, cacheReadTokens: 5, cacheCreationTokens: 1,
+    });
+  });
+});
+
+describe('runAgent contextWindow carry-through (epic 408/A1 part B)', () => {
+  it('carries contextWindow onto the meter record and the run_usage ledger fold', async () => {
+    mockRecord.mockClear();
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(okAdapter({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheCreationTokens: 2, contextWindow: 200000 }));
+    await runAgent(OPTS());
+    expect(mockRecord.mock.calls[0][0]).toMatchObject({ contextWindow: 200000 });
+    const usageEvents = mockEmitted.filter(e => e.type === 'run_usage');
+    expect(usageEvents[0]).toMatchObject({ contextWindow: 200000 });
+  });
+
+  it('omits contextWindow entirely when the provider surfaced none (unknown, not 0)', async () => {
+    mockRecord.mockClear();
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(okAdapter({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheCreationTokens: 2 }));
+    await runAgent(OPTS());
+    expect(mockRecord.mock.calls[0][0]).not.toHaveProperty('contextWindow');
+    const usageEvents = mockEmitted.filter(e => e.type === 'run_usage');
+    expect(usageEvents[0]).not.toHaveProperty('contextWindow');
   });
 });
 

@@ -48,7 +48,12 @@ export type ActivityEvent =
   // (epic fnd.6), from the launcher loop right after its meter.record — same
   // 1:1 discipline, so a planning session shows up in the run_usage stream
   // alongside the executors rather than only in usage.jsonl.
-  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error' }
+  // `contextWindow` (epic 408/A1, part B): the main-loop model's context-window
+  // size for the run, folded from the UsageRecord so the ledger's run_usage entry
+  // carries peak_context's denominator. Additive OPTIONAL — absent when unknown
+  // (non-claude adapter, or no unambiguous main-loop-model entry); readers treat
+  // absent as unknown, so no SCHEMA_VERSION bump is needed.
+  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error'; contextWindow?: number }
   // turn_usage (RUN-LOG, epic 408/A1): per-MODEL-CALL context usage, the raw input
   // to Figure 1 (effective_context vs. assistant-turn index). It is O(turns) —
   // strictly run-log, activity.jsonl only, NOT decision-grade and NOT usage.jsonl

@@ -40,6 +40,13 @@ export interface TokenUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  // The model's context-window size for the run, recovered from the provider's
+  // per-model usage breakdown (epic 408/A1, part B). It is the denominator
+  // peak_context is judged against — compaction only fires near the limit, so a
+  // 0-vs-0 compaction result is uninterpretable without knowing how close the run
+  // came. Absent when the provider surfaced no unambiguous entry for the main-loop
+  // model (a reader treats absent as unknown; it is never guessed).
+  contextWindow?: number;
 }
 
 export interface AgentRunResult {
@@ -80,6 +87,21 @@ export interface SpawnSpec {
 export interface AdapterEmit {
   text(text: string): void;
   toolCall(tool: string, detail: string): void;
+  // Per-MODEL-CALL context usage (epic 408/A1). OPTIONAL so codex.ts / gemini.ts
+  // compile unchanged as no-ops — only the claude adapter populates it today. The
+  // adapter is responsible for calling this exactly once per distinct model call
+  // (deduping the CLI's per-content-block events on messageId); the runner turns
+  // each call into a turn_usage event, maintaining the 0-based turnIndex. Only the
+  // input-side counters are trusted per call (output_tokens on intermediate
+  // assistant events may be partial); `sidechain` tags a subagent (Task tool) call
+  // that lives in a different context window.
+  usage?(u: {
+    messageId: string;
+    inputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    sidechain: boolean;
+  }): void;
 }
 
 // A per-run parser. The dispatcher feeds stdout lines in, then calls finalize

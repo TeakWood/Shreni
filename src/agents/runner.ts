@@ -204,6 +204,10 @@ function reportUsage(
     cacheCreationTokens: usage?.cacheCreationTokens ?? 0,
     toolCallCount,
     outcome,
+    // Context-window denominator for the run (epic 408/A1, part B). Optional —
+    // absent when the provider surfaced no unambiguous main-loop-model entry; a
+    // reader treats absent as unknown, never as 0.
+    ...(usage?.contextWindow !== undefined ? { contextWindow: usage.contextWindow } : {}),
   };
   try {
     // usage.jsonl (epic g2k): the full per-run record with the price snapshot.
@@ -237,6 +241,10 @@ function reportUsage(
       costUsd,
       priced,
       outcome,
+      // Carry the context window into the ledger's run_usage fold (4a2.5) so
+      // peak_context/contextWindow can be evaluated at read time. Additive
+      // optional field; omitted when unknown.
+      ...(record.contextWindow !== undefined ? { contextWindow: record.contextWindow } : {}),
     });
   } catch {
     // A ledger-fold failure must never fail an otherwise-successful agent run.
@@ -252,6 +260,13 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
     // §3.1): the worker's own interval already keeps liveness fresh, but stamping on
     // emit makes a live-but-chatty agent register promptly for cross-process readers
     // (`shreni status` / Phalaka) between worker ticks.
+    // Per-call turn counters (epic 408/A1). The main thread and each sidechain
+    // (subagent) are counted separately: mixing a subagent's calls into the main-
+    // thread index would fake a sawtooth in the effective-context curve exactly
+    // where E1 is trying to detect one. 0-based, per runAttempt (a retried attempt
+    // is a fresh stream and starts over).
+    let mainTurnIndex = 0;
+    let sideTurnIndex = 0;
     const adapterEmit: AdapterEmit = {
       text(text: string) {
         if (!text.trim()) return;
@@ -261,6 +276,25 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
       toolCall(tool: string, detail: string) {
         touchHeartbeat(opts.kshetraId);
         emit({ type: 'agent_tool_call', kshetra: opts.kshetraId, beadId: opts.beadId, agent: opts.agentName, tool, detail });
+      },
+      usage(u) {
+        // opts here is runOpts: provider/model are the policy-resolved selection.
+        touchHeartbeat(opts.kshetraId);
+        const turnIndex = u.sidechain ? sideTurnIndex++ : mainTurnIndex++;
+        emit({
+          type: 'turn_usage',
+          kshetra: opts.kshetraId,
+          beadId: opts.beadId,
+          agent: opts.agentName,
+          provider: opts.provider,
+          model: opts.model,
+          turnIndex,
+          messageId: u.messageId,
+          inputTokens: u.inputTokens,
+          cacheReadTokens: u.cacheReadTokens,
+          cacheCreationTokens: u.cacheCreationTokens,
+          sidechain: u.sidechain,
+        });
       },
     };
 

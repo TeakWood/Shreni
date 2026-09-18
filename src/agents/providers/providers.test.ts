@@ -21,11 +21,13 @@ const BASE_OPTS: AgentRunnerOpts = {
 function recordingEmit() {
   const texts: string[] = [];
   const tools: { tool: string; detail: string }[] = [];
+  const usages: Array<{ messageId: string; inputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; sidechain: boolean }> = [];
   const emit: AdapterEmit = {
     text: (t) => texts.push(t),
     toolCall: (tool, detail) => tools.push({ tool, detail }),
+    usage: (u) => usages.push(u),
   };
-  return { emit, texts, tools };
+  return { emit, texts, tools, usages };
 }
 
 // ── getAdapter registry ────────────────────────────────────────────────────────
@@ -250,6 +252,102 @@ describe('claudeAdapter parser', () => {
     const parser = claudeAdapter.createParser(BASE_OPTS, emit);
     parser.onLine(JSON.stringify({ type: 'result', is_error: false, result: 'done', structured_output: { ok: true } }));
     expect(parser.finalize(0, '').usage).toBeUndefined();
+  });
+});
+
+// ── claude adapter: per-model-call usage + context window (epic 408/A1) ─────────
+
+describe('claudeAdapter per-call usage (408.2)', () => {
+  it('emits exactly ONE turn_usage per message.id across a message split into 3 assistant events', () => {
+    const { emit, usages } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    const message = {
+      id: 'msg_1',
+      usage: { input_tokens: 1000, output_tokens: 5, cache_read_input_tokens: 40000, cache_creation_input_tokens: 200 },
+    };
+    // The CLI emits one 'assistant' event per content block, all sharing message.id.
+    parser.onLine(JSON.stringify({ type: 'assistant', message: { ...message, content: [{ type: 'text', text: 'thinking' }] } }));
+    parser.onLine(JSON.stringify({ type: 'assistant', message: { ...message, content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/a' } }] } }));
+    parser.onLine(JSON.stringify({ type: 'assistant', message: { ...message, content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] } }));
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toEqual({
+      messageId: 'msg_1', inputTokens: 1000, cacheReadTokens: 40000, cacheCreationTokens: 200, sidechain: false,
+    });
+  });
+
+  it('tags a subagent (parent_tool_use_id present) call as sidechain: true', () => {
+    const { emit, usages } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(JSON.stringify({
+      type: 'assistant',
+      parent_tool_use_id: 'toolu_99',
+      message: { id: 'msg_sub', usage: { input_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, content: [{ type: 'text', text: 'sub' }] },
+    }));
+    expect(usages).toHaveLength(1);
+    expect(usages[0].sidechain).toBe(true);
+    expect(usages[0].messageId).toBe('msg_sub');
+  });
+
+  it('emits nothing (and does not throw) for an assistant event with no usage block', () => {
+    const { emit, usages } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    expect(() =>
+      parser.onLine(JSON.stringify({ type: 'assistant', message: { id: 'msg_x', content: [{ type: 'text', text: 'hi' }] } })),
+    ).not.toThrow();
+    expect(usages).toHaveLength(0);
+  });
+
+  it('ignores an assistant event with no message.id (cannot dedupe it safely)', () => {
+    const { emit, usages } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 5 }, content: [{ type: 'text', text: 'hi' }] } }));
+    expect(usages).toHaveLength(0);
+  });
+});
+
+describe('claudeAdapter context window from result.modelUsage (408.2 part B)', () => {
+  const resultLine = (modelUsage: unknown) => JSON.stringify({
+    type: 'result', is_error: false, result: 'done', structured_output: { ok: true },
+    usage: { input_tokens: 120, output_tokens: 45, cache_read_input_tokens: 30, cache_creation_input_tokens: 10 },
+    modelUsage,
+  });
+
+  it('carries contextWindow when modelUsage has an entry for the main-loop model', () => {
+    const { emit } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit); // model claude-sonnet-4-6
+    parser.onLine(resultLine({ 'claude-sonnet-4-6': { contextWindow: 200000 } }));
+    const usage = parser.finalize(0, '').usage;
+    expect(usage?.contextWindow).toBe(200000);
+    // Cost and the four token counters are unchanged by part B.
+    expect(usage).toMatchObject({ inputTokens: 120, outputTokens: 45, cacheReadTokens: 30, cacheCreationTokens: 10 });
+  });
+
+  it('matches a key that STARTS WITH the resolved model id (dated variant), when unambiguous', () => {
+    const { emit } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(resultLine({ 'claude-sonnet-4-6-20260101': { contextWindow: 1000000 } }));
+    expect(parser.finalize(0, '').usage?.contextWindow).toBe(1000000);
+  });
+
+  it('yields no contextWindow when only a non-matching (Haiku subagent) entry is present — never guesses', () => {
+    const { emit } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(resultLine({ 'claude-haiku-4-5': { contextWindow: 200000 } }));
+    expect(parser.finalize(0, '').usage?.contextWindow).toBeUndefined();
+  });
+
+  it('yields no contextWindow when the prefix match is ambiguous (two candidate keys)', () => {
+    const { emit } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(resultLine({ 'claude-sonnet-4-6-a': { contextWindow: 1 }, 'claude-sonnet-4-6-b': { contextWindow: 2 } }));
+    expect(parser.finalize(0, '').usage?.contextWindow).toBeUndefined();
+  });
+
+  it('does not throw and yields no contextWindow when modelUsage is missing', () => {
+    const { emit } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(resultLine(undefined));
+    expect(parser.finalize(0, '').usage?.contextWindow).toBeUndefined();
   });
 });
 
