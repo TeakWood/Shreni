@@ -76,6 +76,23 @@ describe('renderShow', () => {
     expect(out).toContain('Timeline: no ledger entries for this bead.');
   });
 
+  it('renders a context_compacted entry as a distinct COMPACT line (epic 408/A1)', () => {
+    const out = renderShow(
+      { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },
+      [entry('context_compacted', '2026-09-16T00:00:05.000Z', { trigger: 'auto', preTokens: 187000, turnIndex: 12 })],
+    );
+    expect(out).toContain('COMPACT');
+    expect(out).toContain('context compacted (auto, 187k tokens before)');
+  });
+
+  it('renders context_compacted with an unknown trigger when the provider gave none', () => {
+    const out = renderShow(
+      { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },
+      [entry('context_compacted', '2026-09-16T00:00:05.000Z', { trigger: 'unknown', preTokens: 0, turnIndex: 0 })],
+    );
+    expect(out).toContain('context compacted (unknown, 0 tokens before)');
+  });
+
   it('renders an unknown (forward-compat) kind without crashing', () => {
     const out = renderShow(
       { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },

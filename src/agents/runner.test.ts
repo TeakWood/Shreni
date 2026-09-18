@@ -232,6 +232,49 @@ describe('runAgent turn_usage (epic 408/A1)', () => {
   });
 });
 
+describe('runAgent context_compacted is record-only (epic 408/A1)', () => {
+  it('emits context_compacted at the last main-thread turnIndex and the run still succeeds', async () => {
+    mockEmitted.length = 0;
+    // Two main-thread turns happen, THEN compaction fires: the last main-thread
+    // turn before the boundary is index 1 (mainTurnIndex is at 2).
+    const adapter = {
+      name: 'anthropic' as const,
+      buildSpawn: () => ({ bin: 'true', args: [] }),
+      createParser: (_o: AgentRunnerOpts, emit: { usage?: (u: unknown) => void; compacted?: (c: unknown) => void }) => {
+        emit.usage?.({ messageId: 'm0', inputTokens: 100, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: false });
+        emit.usage?.({ messageId: 'm1', inputTokens: 150000, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: false });
+        emit.compacted?.({ trigger: 'auto', preTokens: 150000 });
+        return { onLine: () => {}, finalize: () => ({ structuredOutput: { ok: true }, resultText: 'done', toolCallCount: 0, usage: undefined }) };
+      },
+    };
+    mockGetAdapter.mockReturnValue(adapter);
+    // The run resolves normally — compaction did not abort/fail it.
+    await expect(runAgent(OPTS())).resolves.toMatchObject({ structuredOutput: { ok: true } });
+    const compacted = mockEmitted.filter(e => e.type === 'context_compacted');
+    expect(compacted).toHaveLength(1);
+    expect(compacted[0]).toMatchObject({
+      kshetra: 'myapp', beadId: 'bd-1', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      trigger: 'auto', preTokens: 150000, turnIndex: 1,
+    });
+  });
+
+  it('clamps turnIndex to 0 when compaction precedes any main-thread turn', async () => {
+    mockEmitted.length = 0;
+    const adapter = {
+      name: 'anthropic' as const,
+      buildSpawn: () => ({ bin: 'true', args: [] }),
+      createParser: (_o: AgentRunnerOpts, emit: { compacted?: (c: unknown) => void }) => {
+        emit.compacted?.({ trigger: 'unknown', preTokens: 0 });
+        return { onLine: () => {}, finalize: () => ({ structuredOutput: {}, resultText: '', toolCallCount: 0, usage: undefined }) };
+      },
+    };
+    mockGetAdapter.mockReturnValue(adapter);
+    await runAgent(OPTS());
+    const compacted = mockEmitted.filter(e => e.type === 'context_compacted');
+    expect(compacted[0]).toMatchObject({ trigger: 'unknown', turnIndex: 0 });
+  });
+});
+
 describe('runAgent contextWindow carry-through (epic 408/A1 part B)', () => {
   it('carries contextWindow onto the meter record and the run_usage ledger fold', async () => {
     mockRecord.mockClear();

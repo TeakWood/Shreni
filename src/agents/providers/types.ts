@@ -102,6 +102,12 @@ export interface AdapterEmit {
     cacheCreationTokens: number;
     sidechain: boolean;
   }): void;
+  // Context compaction detected on the run's stream (epic 408/A1). OPTIONAL — only
+  // the claude adapter surfaces it today. RECORD-ONLY: the runner emits a
+  // context_compacted event and does nothing else (no abort/retry/replan), because
+  // reacting would change the treatment the study measures. `trigger` is 'unknown'
+  // when the provider gave no compact_metadata (never fabricated as 'auto').
+  compacted?(c: { trigger: 'auto' | 'manual' | 'unknown'; preTokens: number }): void;
 }
 
 // A per-run parser. The dispatcher feeds stdout lines in, then calls finalize

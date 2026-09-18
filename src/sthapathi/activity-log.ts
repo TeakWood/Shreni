@@ -75,11 +75,12 @@ export type ActivityEvent =
   // it is audit-relevant, so it goes to the ledger (decision 5). RECORD-ONLY:
   // Shreni does not abort/retry/replan on it (decision 6) — reacting would change
   // the treatment E1 measures. `trigger` distinguishes an automatic boundary from
-  // a manual /compact; `preTokens` is the context size just before the boundary;
-  // `turnIndex` is the last main-thread turn before it. It must NOT be visible to
-  // the 'agent' audience — it describes the agent's own memory loss, not task
-  // context. Provider-neutral; only the Claude adapter populates it today (408.3).
-  | { type: 'context_compacted'; kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; trigger: 'auto' | 'manual'; preTokens: number; turnIndex: number }
+  // a manual /compact ('unknown' when the provider surfaced no compact_metadata —
+  // never fabricated as 'auto'); `preTokens` is the context size just before the
+  // boundary; `turnIndex` is the last main-thread turn before it. It must NOT be
+  // visible to the 'agent' audience — it describes the agent's own memory loss,
+  // not task context. Provider-neutral; only the Claude adapter populates it (408.3).
+  | { type: 'context_compacted'; kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; trigger: 'auto' | 'manual' | 'unknown'; preTokens: number; turnIndex: number }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are

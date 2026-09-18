@@ -34,6 +34,26 @@ describe('makeLedgerSink', () => {
     expect(entries[1].payload).toEqual({ mergePolicy: 'push', sha: 'abc' });
   });
 
+  it('folds a decision-grade context_compacted event into ledger.jsonl (epic 408/A1)', () => {
+    const sink = makeLedgerSink({ kshetraId: 'k1', ledgerPath });
+    sink.handle(ev({
+      type: 'context_compacted', beadId: 'b1', agent: 'silpi', provider: 'claude',
+      model: 'claude-opus-4-8', trigger: 'auto', preTokens: 187000, turnIndex: 12, runId: 'r1',
+    } as LoggedEvent));
+    const entries = parseLedgerLines(readFileSync(ledgerPath, 'utf8'));
+    expect(entries.map(e => e.kind)).toEqual(['context_compacted']);
+    expect(entries[0].payload).toEqual({ agent: 'silpi', provider: 'claude', model: 'claude-opus-4-8', trigger: 'auto', preTokens: 187000, turnIndex: 12 });
+  });
+
+  it('drops the run-log tier turn_usage — it stays local, out of git (epic 408/A1)', () => {
+    const sink = makeLedgerSink({ kshetraId: 'k1', ledgerPath });
+    sink.handle(ev({
+      type: 'turn_usage', beadId: 'b1', agent: 'silpi', provider: 'claude', model: 'claude-opus-4-8',
+      turnIndex: 0, messageId: 'm0', inputTokens: 100, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: false,
+    } as LoggedEvent));
+    expect(existsSync(ledgerPath)).toBe(false);
+  });
+
   it('drops the high-volume run-log tier (agent_text / agent_tool_call)', () => {
     const sink = makeLedgerSink({ kshetraId: 'k1', ledgerPath });
     sink.handle(ev({ type: 'agent_text', beadId: 'b1', agent: 'silpi', text: 'hi' } as LoggedEvent));

@@ -138,6 +138,15 @@ function fmtEntry(e: LedgerEntry): string {
     case 'merge_done':
       body = `${label('MERGE')}${text(p.mergePolicy)}${p.sha ? ` ${text(p.sha).slice(0, 12)}` : ''}${p.pr ? ` PR#${num(p.pr)}` : ''}`;
       break;
+    case 'context_compacted': {
+      // e.g. "context compacted (auto, 187k tokens before)". The compaction is a
+      // decision-grade audit record (epic 408): from this point the agent worked
+      // from a summary of its own earlier work.
+      const pre = num(p.preTokens);
+      const preStr = pre === undefined ? '?' : pre >= 1000 ? `${Math.round(pre / 1000)}k` : String(pre);
+      body = `${label('COMPACT')}context compacted (${text(p.trigger) || 'unknown'}, ${preStr} tokens before)`;
+      break;
+    }
     case 'task_done':
       body = `${label('DONE')}${p.approved ? 'APPROVED' : 'BLOCKED'} (${num(p.rounds)} round${num(p.rounds) === 1 ? '' : 's'})`;
       break;

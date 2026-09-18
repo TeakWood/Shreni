@@ -22,12 +22,14 @@ function recordingEmit() {
   const texts: string[] = [];
   const tools: { tool: string; detail: string }[] = [];
   const usages: Array<{ messageId: string; inputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; sidechain: boolean }> = [];
+  const compactions: Array<{ trigger: 'auto' | 'manual' | 'unknown'; preTokens: number }> = [];
   const emit: AdapterEmit = {
     text: (t) => texts.push(t),
     toolCall: (tool, detail) => tools.push({ tool, detail }),
     usage: (u) => usages.push(u),
+    compacted: (c) => compactions.push(c),
   };
-  return { emit, texts, tools, usages };
+  return { emit, texts, tools, usages, compactions };
 }
 
 // ── getAdapter registry ────────────────────────────────────────────────────────
@@ -348,6 +350,36 @@ describe('claudeAdapter context window from result.modelUsage (408.2 part B)', (
     const parser = claudeAdapter.createParser(BASE_OPTS, emit);
     parser.onLine(resultLine(undefined));
     expect(parser.finalize(0, '').usage?.contextWindow).toBeUndefined();
+  });
+});
+
+describe('claudeAdapter compaction detection (408.3)', () => {
+  it('emits one compacted event with trigger + preTokens on a compact_boundary system event', () => {
+    const { emit, compactions } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(JSON.stringify({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 187000 } }));
+    expect(compactions).toEqual([{ trigger: 'auto', preTokens: 187000 }]);
+  });
+
+  it('carries a manual trigger through', () => {
+    const { emit, compactions } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(JSON.stringify({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual', pre_tokens: 90000 } }));
+    expect(compactions).toEqual([{ trigger: 'manual', preTokens: 90000 }]);
+  });
+
+  it('falls back to trigger:unknown / preTokens:0 when compact_metadata is missing (does not throw)', () => {
+    const { emit, compactions } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    expect(() => parser.onLine(JSON.stringify({ type: 'system', subtype: 'compact_boundary' }))).not.toThrow();
+    expect(compactions).toEqual([{ trigger: 'unknown', preTokens: 0 }]);
+  });
+
+  it('ignores unrelated system events (init etc.)', () => {
+    const { emit, compactions } = recordingEmit();
+    const parser = claudeAdapter.createParser(BASE_OPTS, emit);
+    parser.onLine(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }));
+    expect(compactions).toHaveLength(0);
   });
 });
 

@@ -163,6 +163,21 @@ export const claudeAdapter: ProviderAdapter = {
           }
         }
 
+        // Context compaction (epic 408/A1). Verified format (claude-code 2.1.212):
+        // { type: 'system', subtype: 'compact_boundary', compact_metadata: {
+        //   trigger: 'auto'|'manual', pre_tokens } }. RECORD-ONLY — the runner emits
+        // context_compacted and takes no action. Tolerate a missing/garbled
+        // compact_metadata: trigger falls back to 'unknown' (never fabricated as
+        // 'auto'), preTokens to 0. Unrelated system events (init, etc.) are ignored.
+        if (type === 'system' && msg['subtype'] === 'compact_boundary') {
+          const meta = (msg['compact_metadata'] ?? {}) as Record<string, unknown>;
+          const rawTrigger = meta['trigger'];
+          const trigger: 'auto' | 'manual' | 'unknown' =
+            rawTrigger === 'auto' || rawTrigger === 'manual' ? rawTrigger : 'unknown';
+          const preTokens = typeof meta['pre_tokens'] === 'number' ? meta['pre_tokens'] : 0;
+          emit.compacted?.({ trigger, preTokens });
+        }
+
         if (type === 'result') {
           const usage = parseClaudeUsage(msg['usage']);
           if (usage) {

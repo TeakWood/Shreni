@@ -296,6 +296,24 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
           sidechain: u.sidechain,
         });
       },
+      compacted(c) {
+        // RECORD-ONLY (epic 408 decision 6): emit and return — no abort/retry/
+        // replan. `turnIndex` is the last main-thread turn BEFORE the boundary:
+        // mainTurnIndex is the next index to assign, so the last emitted is
+        // mainTurnIndex - 1 (clamped at 0 for the degenerate pre-first-turn case).
+        touchHeartbeat(opts.kshetraId);
+        emit({
+          type: 'context_compacted',
+          kshetra: opts.kshetraId,
+          beadId: opts.beadId,
+          agent: opts.agentName,
+          provider: opts.provider,
+          model: opts.model,
+          trigger: c.trigger,
+          preTokens: c.preTokens,
+          turnIndex: Math.max(0, mainTurnIndex - 1),
+        });
+      },
     };
 
     const parser = adapter.createParser(opts, adapterEmit);
