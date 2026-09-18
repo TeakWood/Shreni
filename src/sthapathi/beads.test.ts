@@ -217,10 +217,12 @@ describe('parseAcceptanceCriteria', () => {
 });
 
 describe('syncBeads resilience', () => {
-  // Drive git subcommands (add/commit/pull/push) independently.
+  // Drive git subcommands (add/commit/pull/push) independently. `rev-parse`
+  // (currentBranch, 4b2) defaults to 'main' unless a test overrides it, so the
+  // beads branch resolves and sync proceeds to pull/push.
   function gitMock(handlers: Record<string, { err?: string; stdout?: string }>) {
     execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: Function) => {
-      const h = handlers[args[0]] ?? {};
+      const h = handlers[args[0]] ?? (args[0] === 'rev-parse' ? { stdout: 'main' } : {});
       if (h.err) cb(Object.assign(new Error('Command failed'), { stderr: h.err }), { stdout: '', stderr: h.err });
       else cb(null, { stdout: h.stdout ?? '', stderr: '' });
     });
@@ -254,8 +256,17 @@ describe('syncBeads resilience', () => {
 });
 
 describe('syncBeads', () => {
-  it('calls pull --rebase, add -A, commit, and push in order', async () => {
-    mockSuccess('');
+  // Drive every git subcommand to success; rev-parse (currentBranch) returns the
+  // beads repo's branch so the sync resolves it instead of assuming 'main' (4b2).
+  function gitMockBranch(branch: string) {
+    execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: Function) => {
+      if (args[0] === 'rev-parse') cb(null, { stdout: `${branch}\n`, stderr: '' });
+      else cb(null, { stdout: '', stderr: '' });
+    });
+  }
+
+  it('resolves the beads branch, then pull --rebase / add / commit / rev-parse / push in order', async () => {
+    gitMockBranch('main');
     await syncBeads(KSHETRA);
 
     const calls = execFileMock.mock.calls.map((c: unknown[]) => (c as [string, string[]])[1]);
@@ -263,8 +274,31 @@ describe('syncBeads', () => {
     expect(calls[1][0]).toBe('commit');
     expect(calls[1][1]).toBe('-m');
     expect(calls[1][2]).toMatch(/^shreni: sync \d{4}-/); // ISO timestamp
-    expect(calls[2]).toEqual(['pull', '--rebase', 'origin', 'main']);
-    expect(calls[3]).toEqual(['push', 'origin', 'main']);
+    expect(calls[2]).toEqual(['rev-parse', '--abbrev-ref', 'HEAD']);
+    expect(calls[3]).toEqual(['pull', '--rebase', 'origin', 'main']);
+    expect(calls[4]).toEqual(['push', 'origin', 'main']);
+  });
+
+  it('pulls/pushes a NON-main beads branch, not a literal main (4b2)', async () => {
+    gitMockBranch('trunk');
+    await syncBeads(KSHETRA);
+    const calls = execFileMock.mock.calls.map((c: unknown[]) => (c as [string, string[]])[1]);
+    expect(calls).toContainEqual(['pull', '--rebase', 'origin', 'trunk']);
+    expect(calls).toContainEqual(['push', 'origin', 'trunk']);
+    // Never a hardcoded 'main'.
+    expect(calls.some(c => c[0] === 'pull' && c.includes('main'))).toBe(false);
+    expect(calls.some(c => c[0] === 'push' && c.includes('main'))).toBe(false);
+  });
+
+  it('skips pull/push (and warns) on a detached-HEAD beads repo — no nonsensical origin HEAD', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    gitMockBranch('HEAD'); // rev-parse --abbrev-ref returns HEAD when detached
+    await expect(syncBeads(KSHETRA)).resolves.toBeUndefined();
+    const calls = execFileMock.mock.calls.map((c: unknown[]) => (c as [string, string[]])[1]);
+    expect(calls.some(c => c[0] === 'pull')).toBe(false);
+    expect(calls.some(c => c[0] === 'push')).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('detached HEAD'));
+    warn.mockRestore();
   });
 
   it('continues through push even when commit is a no-op (nothing to commit)', async () => {
@@ -274,13 +308,15 @@ describe('syncBeads', () => {
       if (args[0] === 'commit') {
         const err = Object.assign(new Error('nothing to commit'), { stderr: 'nothing to commit, working tree clean' });
         cb(err, { stdout: '', stderr: 'nothing to commit, working tree clean' });
+      } else if (args[0] === 'rev-parse') {
+        cb(null, { stdout: 'main\n', stderr: '' });
       } else {
         cb(null, { stdout: '', stderr: '' });
       }
     });
 
     await expect(syncBeads(KSHETRA)).resolves.not.toThrow();
-    // pull + add + commit(no-op) + push = 4 calls
-    expect(callCount).toBe(4);
+    // add + commit(no-op) + rev-parse + pull + push = 5 calls
+    expect(callCount).toBe(5);
   });
 });

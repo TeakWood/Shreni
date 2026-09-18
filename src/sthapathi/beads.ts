@@ -186,8 +186,31 @@ async function doSyncBeads(kshetra: KshetraConfig): Promise<void> {
   // the rebase into the non-benign branch below, which retries next cycle. The
   // residual sub-ms unlinked-inode loss window is an accepted risk documented at
   // the write site (ext/ledger-sink.ts) — never affects issues.jsonl.
+  // The beads repo is a SEPARATE repo with its OWN default branch — deliberately
+  // NOT the project's repo.mainBranch (beads is append-only log + Dolt transport,
+  // not a branching workflow; coupling to the project base branch was considered
+  // and rejected, 4b2). Resolve its actual current branch instead of assuming
+  // 'main': a beads repo whose default branch isn't 'main' would otherwise fail
+  // every pull/push with "couldn't find remote ref main", and — because that
+  // error isn't benign — silently defer forever, so issues.jsonl/ledger.jsonl
+  // never reach the remote and the durability/audit guarantee quietly breaks.
+  let branch: string;
   try {
-    await g.pull('--rebase', 'origin', 'main');
+    branch = await g.currentBranch();
+  } catch (err) {
+    console.warn(`[shreni sync:${kshetra.id}] beads sync skipped: cannot resolve branch — ${(err as Error).message}`);
+    return;
+  }
+  if (!branch || branch === 'HEAD') {
+    // Detached HEAD (or an unresolvable ref): there is no branch to pull/push.
+    // Bail rather than issue a nonsensical `origin HEAD`; the local sync commit
+    // persists and a later cycle reconciles once a branch is checked out.
+    console.warn(`[shreni sync:${kshetra.id}] beads sync skipped: no branch checked out (detached HEAD)`);
+    return;
+  }
+
+  try {
+    await g.pull('--rebase', 'origin', branch);
   } catch (err) {
     if (!isBenignSyncError(err)) {
       console.warn(`[shreni sync:${kshetra.id}] beads pull skipped: ${(err as Error).message}`);
@@ -196,7 +219,7 @@ async function doSyncBeads(kshetra: KshetraConfig): Promise<void> {
   }
 
   try {
-    await g.push('origin', 'main');
+    await g.push('origin', branch);
   } catch (err) {
     console.warn(`[shreni sync:${kshetra.id}] beads push deferred: ${(err as Error).message}`);
   }
