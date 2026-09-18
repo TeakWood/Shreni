@@ -10,7 +10,7 @@ import { loadRegistry } from '../kshetra/registry';
 import { resolveTargetKshetra } from './suthradhara';
 import { logPath, usagePath } from '../sthapathi/activity-log';
 import { readNotifications } from '../sthapathi/notifications';
-import { computeMetrics, type Metrics } from '../sthapathi/metrics';
+import { computeMetrics, computeTurnSeries, type Metrics } from '../sthapathi/metrics';
 import type { LoggedEvent } from '../sthapathi/activity-log';
 import type { UsageEntry } from '../ext/types';
 import type { KshetraConfig } from '../kshetra/config';
@@ -187,12 +187,23 @@ export interface ReportOpts {
   flagKshetra: string | undefined;
   cwd: string;
   kshetras?: KshetraConfig[];
+  // `--turns`: emit the per-turn context series (epic 408/A1) as JSON instead of
+  // the terminal table — the machine-readable input to E1 Figure 1. The default
+  // (unset) text report is unchanged.
+  turns?: boolean;
 }
 
 export function runReport(opts: ReportOpts): void {
   const kshetras = opts.kshetras ?? loadRegistry();
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
   const feeds = readFeeds(kshetra.id);
+  if (opts.turns) {
+    // One JSON object per line (JSONL): streams row-by-row into a plotting/
+    // analysis pipeline without loading the whole array, and matches the JSONL
+    // shape of the feeds it is derived from.
+    for (const row of computeTurnSeries(feeds.events)) console.log(JSON.stringify(row));
+    return;
+  }
   const metrics = computeMetrics(feeds);
   console.log(renderReport(kshetra.id, metrics));
 }

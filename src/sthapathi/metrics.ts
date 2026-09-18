@@ -45,6 +45,53 @@ export interface PerBeadUsage {
   unpricedRuns: number;
 }
 
+// Per-run context-usage metrics (epic 408/A1). Keyed by runId. `peakContext` and
+// `contextWindow` are `null` — NOT 0 — when the run surfaced no measurement, so a
+// reader can tell "no context data" (older data, or codex/gemini which don't emit
+// turn_usage) from a genuine zero.
+//   • peakContext = max over MAIN-THREAD turn_usage of effective_context
+//     (inputTokens + cacheReadTokens + cacheCreationTokens), also max'd with any
+//     context_compacted.preTokens in the same run — the true peak sits just before
+//     a compaction and the last captured turn can understate it. Sidechain turns
+//     are excluded (they live in a different context window).
+//   • turns = count of MAIN-THREAD turn_usage. compactions = count of
+//     context_compacted. contextWindow = the run's model context window (the
+//     denominator peakContext is judged against), from run_usage.
+export interface PerRunContext {
+  runId: string;
+  beadId: string;
+  agent: string | null;
+  peakContext: number | null;
+  turns: number;
+  compactions: number;
+  contextWindow: number | null;
+}
+
+// Per-bead roll-up of the same context metrics. peakContext/contextWindow are the
+// max over the bead's runs (null when no run had a measurement); turns and
+// compactions are summed.
+export interface PerBeadContext {
+  beadId: string;
+  peakContext: number | null;
+  turns: number;
+  compactions: number;
+  contextWindow: number | null;
+}
+
+// One row per model call — the machine-readable input to E1 Figure 1 (epic
+// 408/A1). `effectiveContext` is DERIVED here, not stored on the event.
+// `compactedAfter` marks the main-thread turn immediately before a compaction
+// boundary (context_compacted.turnIndex is that last-before-boundary index).
+export interface TurnContextRow {
+  runId: string;
+  beadId: string;
+  agent: string;
+  turnIndex: number;
+  effectiveContext: number;
+  sidechain: boolean;
+  compactedAfter: boolean;
+}
+
 // The full metrics snapshot. Rates are fractions in [0,1]; a rate whose
 // denominator is 0 (no rounds / no tasks) is defined as 0, never NaN. Raw counts
 // sit beside every rate so the report (g2k.3) can render either without
@@ -74,6 +121,11 @@ export interface Metrics {
   totalTokens: number;
   totalCostUsd: number;
   unpricedRuns: number; // across all beads
+
+  // Context-usage study metrics (epic 408/A1), from the turn_usage /
+  // context_compacted / run_usage streams. Empty arrays when nothing recorded.
+  perRunContext: PerRunContext[];   // sorted by beadId (numeric) then runId
+  perBeadContext: PerBeadContext[]; // sorted by beadId (numeric)
 }
 
 // The three parsed feeds. Any may be empty/omitted — a Kshetra that has run
@@ -168,6 +220,64 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
   const totalCostUsd = roundCost(perBead.reduce((s, b) => s + b.costUsd, 0));
   const unpricedRuns = perBead.reduce((s, b) => s + b.unpricedRuns, 0);
 
+  // --- Context-usage study metrics (epic 408/A1) ---
+  // Group by runId. A run is seeded from ANY of run_usage / turn_usage /
+  // context_compacted, so a metered codex/gemini run (run_usage but no turn_usage)
+  // still appears — with peakContext null, not 0. peakContext stays null until a
+  // MAIN-THREAD turn or a compaction with known preTokens contributes a number.
+  const byRun = new Map<string, PerRunContext>();
+  const ensureRun = (runId: string, beadId: string, agent: string | null): PerRunContext => {
+    let r = byRun.get(runId);
+    if (!r) {
+      r = { runId, beadId, agent, peakContext: null, turns: 0, compactions: 0, contextWindow: null };
+      byRun.set(runId, r);
+    }
+    if (!r.beadId && beadId) r.beadId = beadId;
+    if (r.agent == null && agent != null) r.agent = agent;
+    return r;
+  };
+  for (const ev of events) {
+    if (!ev.runId) continue; // ungrouped events (pre-claim) carry no context series
+    if (ev.type === 'run_usage') {
+      const r = ensureRun(ev.runId, ev.beadId, ev.agent);
+      if (ev.contextWindow != null) r.contextWindow = Math.max(r.contextWindow ?? 0, ev.contextWindow);
+    } else if (ev.type === 'turn_usage') {
+      const r = ensureRun(ev.runId, ev.beadId, ev.agent);
+      if (!ev.sidechain) {
+        // Main thread only: sidechain calls live in a different context window.
+        r.turns++;
+        const eff = ev.inputTokens + ev.cacheReadTokens + ev.cacheCreationTokens;
+        r.peakContext = Math.max(r.peakContext ?? 0, eff);
+      }
+    } else if (ev.type === 'context_compacted') {
+      const r = ensureRun(ev.runId, ev.beadId, ev.agent);
+      r.compactions++;
+      // The true peak sits just before the boundary; fold preTokens in so a
+      // compaction that exceeds every captured turn is reported as the peak. A 0
+      // preTokens (missing compact_metadata) is NOT a measurement — skip it so it
+      // never fabricates a peak of 0 on an otherwise-unmeasured run.
+      if (ev.preTokens > 0) r.peakContext = Math.max(r.peakContext ?? 0, ev.preTokens);
+    }
+  }
+  const byBeadNumeric = (a: { beadId: string }, b: { beadId: string }): number =>
+    a.beadId.localeCompare(b.beadId, 'en', { numeric: true });
+  const perRunContext = [...byRun.values()].sort(
+    (a, b) => byBeadNumeric(a, b) || a.runId.localeCompare(b.runId),
+  );
+  const beadCtx = new Map<string, PerBeadContext>();
+  for (const r of perRunContext) {
+    let b = beadCtx.get(r.beadId);
+    if (!b) {
+      b = { beadId: r.beadId, peakContext: null, turns: 0, compactions: 0, contextWindow: null };
+      beadCtx.set(r.beadId, b);
+    }
+    b.turns += r.turns;
+    b.compactions += r.compactions;
+    if (r.peakContext != null) b.peakContext = Math.max(b.peakContext ?? 0, r.peakContext);
+    if (r.contextWindow != null) b.contextWindow = Math.max(b.contextWindow ?? 0, r.contextWindow);
+  }
+  const perBeadContext = [...beadCtx.values()].sort(byBeadNumeric);
+
   return {
     totalTasks,
     approvedTasks,
@@ -184,5 +294,44 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
     totalTokens,
     totalCostUsd,
     unpricedRuns,
+    perRunContext,
+    perBeadContext,
   };
+}
+
+// The per-turn context series (epic 408/A1) — one row per model call, the input
+// to E1 Figure 1. PURE over the event stream, kept out of computeMetrics so the
+// (potentially large, O(turns)) series is only materialized when explicitly asked
+// for (`shreni report --turns`). Rows preserve stream order so the effective-
+// context curve plots directly. `effectiveContext` is derived here at read time.
+export function computeTurnSeries(events: LoggedEvent[]): TurnContextRow[] {
+  // Which main-thread turnIndexes were immediately followed by a compaction, per
+  // run: context_compacted.turnIndex is the last main-thread turn before the
+  // boundary, so that turn is the one "compacted after".
+  const compactedTurns = new Map<string, Set<number>>();
+  for (const ev of events) {
+    if (ev.type !== 'context_compacted' || !ev.runId) continue;
+    let s = compactedTurns.get(ev.runId);
+    if (!s) {
+      s = new Set<number>();
+      compactedTurns.set(ev.runId, s);
+    }
+    s.add(ev.turnIndex);
+  }
+  const rows: TurnContextRow[] = [];
+  for (const ev of events) {
+    if (ev.type !== 'turn_usage' || !ev.runId) continue;
+    rows.push({
+      runId: ev.runId,
+      beadId: ev.beadId,
+      agent: ev.agent,
+      turnIndex: ev.turnIndex,
+      effectiveContext: ev.inputTokens + ev.cacheReadTokens + ev.cacheCreationTokens,
+      sidechain: ev.sidechain,
+      // Only a main-thread turn can be the last-before-boundary (compaction
+      // turnIndex is a main-thread index); a sidechain turn is never compactedAfter.
+      compactedAfter: !ev.sidechain && (compactedTurns.get(ev.runId)?.has(ev.turnIndex) ?? false),
+    });
+  }
+  return rows;
 }

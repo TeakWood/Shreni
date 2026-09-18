@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeMetrics, ESCALATION_EVENT, STUCK_EVENT } from './metrics.js';
+import { computeMetrics, computeTurnSeries, ESCALATION_EVENT, STUCK_EVENT } from './metrics.js';
 import type { LoggedEvent } from './activity-log.js';
 import type { Notification } from './notifications.js';
 import type { UsageEntry } from '../ext/types.js';
@@ -26,6 +26,110 @@ function usage(beadId: string, over: Partial<UsageEntry> = {}): UsageEntry {
 function notif(event: string): Notification {
   return { ts: '2026-09-15T00:00:00.000Z', event, message: event };
 }
+// --- epic 408/A1 context-metric fixtures ---
+function turn(beadId: string, runId: string, turnIndex: number, effective: number, over: { sidechain?: boolean; agent?: 'silpi' | 'viharapala' | 'parikshaka' } = {}): LoggedEvent {
+  return { type: 'turn_usage', kshetra: K, beadId, agent: over.agent ?? 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6', turnIndex, messageId: `${runId}-${turnIndex}`, inputTokens: effective, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: over.sidechain ?? false, ts: '2026-09-15T00:00:00.000Z', schemaVersion: 1, runId } as LoggedEvent;
+}
+function compacted(beadId: string, runId: string, turnIndex: number, preTokens: number): LoggedEvent {
+  return { type: 'context_compacted', kshetra: K, beadId, agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6', trigger: 'auto', preTokens, turnIndex, ts: '2026-09-15T00:00:00.000Z', schemaVersion: 1, runId } as LoggedEvent;
+}
+function runUsage(beadId: string, runId: string, over: { contextWindow?: number; agent?: 'silpi' | 'viharapala' | 'parikshaka' } = {}): LoggedEvent {
+  return { type: 'run_usage', kshetra: K, beadId, agent: over.agent ?? 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6', inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, outcome: 'ok', ...(over.contextWindow != null ? { contextWindow: over.contextWindow } : {}), ts: '2026-09-15T00:00:00.000Z', schemaVersion: 1, runId } as LoggedEvent;
+}
+
+describe('computeMetrics — context-usage study metrics (epic 408/A1)', () => {
+  it('computes peak_context, turns and compactions per run and rolls them up per bead', () => {
+    const m = computeMetrics({
+      events: [
+        turn('b1', 'run-1', 0, 1000),
+        turn('b1', 'run-1', 1, 5000),
+        turn('b1', 'run-1', 2, 3000),
+        runUsage('b1', 'run-1', { contextWindow: 200000 }),
+      ],
+    });
+    expect(m.perRunContext).toEqual([
+      { runId: 'run-1', beadId: 'b1', agent: 'silpi', peakContext: 5000, turns: 3, compactions: 0, contextWindow: 200000 },
+    ]);
+    expect(m.perBeadContext).toEqual([
+      { beadId: 'b1', peakContext: 5000, turns: 3, compactions: 0, contextWindow: 200000 },
+    ]);
+  });
+
+  it('excludes sidechain turns from peak_context and the turn count', () => {
+    const m = computeMetrics({
+      events: [
+        turn('b1', 'run-1', 0, 1000),
+        turn('b1', 'run-1', 0, 999999, { sidechain: true }), // subagent — different window, excluded
+        turn('b1', 'run-1', 1, 2000),
+      ],
+    });
+    expect(m.perRunContext[0]).toMatchObject({ peakContext: 2000, turns: 2 });
+  });
+
+  it('reports preTokens as the peak when a compaction exceeds every captured turn', () => {
+    const m = computeMetrics({
+      events: [
+        turn('b1', 'run-1', 0, 5000),
+        turn('b1', 'run-1', 1, 8000),
+        compacted('b1', 'run-1', 1, 190000), // the true peak sits just before the boundary
+      ],
+    });
+    expect(m.perRunContext[0]).toMatchObject({ peakContext: 190000, turns: 2, compactions: 1 });
+  });
+
+  it('reports nulls (not zeros) for a metered run that surfaced no turn_usage (codex/gemini/older data)', () => {
+    const m = computeMetrics({ events: [runUsage('b1', 'run-1', { contextWindow: undefined })] });
+    expect(m.perRunContext).toEqual([
+      { runId: 'run-1', beadId: 'b1', agent: 'silpi', peakContext: null, turns: 0, compactions: 0, contextWindow: null },
+    ]);
+    expect(m.perBeadContext[0]).toMatchObject({ peakContext: null, turns: 0 });
+  });
+
+  it('rolls peak_context and window up as the max, turns/compactions as the sum, across a bead\'s runs', () => {
+    const m = computeMetrics({
+      events: [
+        turn('b1', 'run-1', 0, 3000), compacted('b1', 'run-1', 0, 50000),
+        turn('b1', 'run-2', 0, 9000),
+        runUsage('b1', 'run-1', { contextWindow: 200000 }),
+        runUsage('b1', 'run-2', { contextWindow: 1000000 }),
+      ],
+    });
+    expect(m.perBeadContext).toEqual([
+      { beadId: 'b1', peakContext: 50000, turns: 2, compactions: 1, contextWindow: 1000000 },
+    ]);
+  });
+});
+
+describe('computeTurnSeries (epic 408/A1 — E1 Figure 1 input)', () => {
+  it('emits one row per turn (main + sidechain) with effectiveContext derived at read time', () => {
+    const rows = computeTurnSeries([
+      turn('b1', 'run-1', 0, 1000),
+      turn('b1', 'run-1', 0, 300, { sidechain: true }),
+      turn('b1', 'run-1', 1, 2000),
+    ]);
+    expect(rows).toEqual([
+      { runId: 'run-1', beadId: 'b1', agent: 'silpi', turnIndex: 0, effectiveContext: 1000, sidechain: false, compactedAfter: false },
+      { runId: 'run-1', beadId: 'b1', agent: 'silpi', turnIndex: 0, effectiveContext: 300, sidechain: true, compactedAfter: false },
+      { runId: 'run-1', beadId: 'b1', agent: 'silpi', turnIndex: 1, effectiveContext: 2000, sidechain: false, compactedAfter: false },
+    ]);
+  });
+
+  it('sums the three input-side lanes into effectiveContext', () => {
+    const t = { ...turn('b1', 'run-1', 0, 0) } as Extract<LoggedEvent, { type: 'turn_usage' }>;
+    t.inputTokens = 1000; t.cacheReadTokens = 40000; t.cacheCreationTokens = 200;
+    expect(computeTurnSeries([t])[0].effectiveContext).toBe(41200);
+  });
+
+  it('marks the main-thread turn immediately before a compaction as compactedAfter', () => {
+    const rows = computeTurnSeries([
+      turn('b1', 'run-1', 0, 1000),
+      turn('b1', 'run-1', 1, 2000),
+      compacted('b1', 'run-1', 1, 190000),
+      turn('b1', 'run-1', 2, 500),
+    ]);
+    expect(rows.map(r => r.compactedAfter)).toEqual([false, true, false]);
+  });
+});
 
 describe('computeMetrics — empty log', () => {
   it('yields a zeroed snapshot, no NaN, for no input at all', () => {
@@ -36,6 +140,7 @@ describe('computeMetrics — empty log', () => {
       avgRoundsToApprove: 0, roundsToApproveDistribution: {},
       escalations: 0, escalationRate: 0, stuckEvents: 0, stuckRate: 0,
       perBead: [], totalTokens: 0, totalCostUsd: 0, unpricedRuns: 0,
+      perRunContext: [], perBeadContext: [],
     });
   });
 

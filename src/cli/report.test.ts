@@ -161,4 +161,29 @@ describe('runReport', () => {
       runReport({ args: ['@nope'], flagKshetra: undefined, cwd: '/tmp', kshetras: [KSHETRA] }),
     ).toThrow(/Kshetra not found: nope/);
   });
+
+  it('with turns:true emits the per-turn series as JSONL, not the table (epic 408/A1)', () => {
+    const turnLine = (turnIndex: number, input: number, sidechain: boolean) => JSON.stringify({
+      ...ev({
+        type: 'turn_usage', kshetra: K, beadId: 'b1', agent: 'silpi', provider: 'anthropic', model: 'm',
+        turnIndex, messageId: `m${turnIndex}`, inputTokens: input, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain,
+      } as unknown as Omit<LoggedEvent, 'ts' | 'schemaVersion'>),
+      runId: 'run-1', // computeTurnSeries groups by runId; a row without one is skipped
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path.endsWith('activity.jsonl')) return `${turnLine(0, 1000, false)}\n${turnLine(1, 2000, false)}\n`;
+      const e = new Error('ENOENT') as NodeJS.ErrnoException;
+      e.code = 'ENOENT';
+      throw e;
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    runReport({ args: ['@myapp'], flagKshetra: undefined, cwd: '/tmp', kshetras: [KSHETRA], turns: true });
+    const printed = log.mock.calls.map(c => c[0]);
+    log.mockRestore();
+    // One JSON row per turn; NOT the terminal table.
+    expect(printed).toHaveLength(2);
+    expect(JSON.parse(printed[0] as string)).toMatchObject({ turnIndex: 0, effectiveContext: 1000, sidechain: false });
+    expect(JSON.parse(printed[1] as string)).toMatchObject({ turnIndex: 1, effectiveContext: 2000 });
+    expect(printed.join('\n')).not.toContain('Run metrics');
+  });
 });
