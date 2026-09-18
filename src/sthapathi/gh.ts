@@ -204,6 +204,19 @@ export function gh(repoPath: string) {
       }
     },
 
+    // Origin's default branch (e.g. "main") via the GitHub API. Returns null on
+    // any failure (gh missing/unauthenticated, repo not on GitHub, malformed
+    // JSON) so callers can fall back to another resolution strategy.
+    async defaultBranch(): Promise<string | null> {
+      try {
+        const raw = await run(['repo', 'view', '--json', 'defaultBranchRef'], repoPath);
+        const parsed = JSON.parse(raw) as { defaultBranchRef?: { name?: string } | null };
+        return parsed.defaultBranchRef?.name ?? null;
+      } catch {
+        return null;
+      }
+    },
+
     // Post a top-level comment on the PR for a head branch (the drafted reply to
     // a reviewer). Only Sthapathi calls this — agents produce reply text, they
     // never write to GitHub. Never resolves review threads. Returns the comment

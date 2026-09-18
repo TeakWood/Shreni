@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { Task } from './types.js';
 import type { KshetraConfig } from '../kshetra/config.js';
+import { gh } from './gh.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -249,6 +250,60 @@ export function git(kshetraOrPath: KshetraConfig | string) {
     async commitFile(filePath: string, message: string): Promise<void> {
       await run(['add', filePath], repoPath);
       await this.commit(message);
+    },
+
+    // Whether <branch> exists on ORIGIN (not just locally). Matches the
+    // FULLY-QUALIFIED `refs/heads/<branch>` — a bare `<branch>` pattern is
+    // suffix-matched by ls-remote, so `main` would spuriously match
+    // `refs/heads/feature/main`. Empty output means the branch is absent on
+    // origin. Throws (via run) if origin is unreachable; a reachable origin with
+    // no such branch is the false case, not an error.
+    async remoteBranchExists(branch: string): Promise<boolean> {
+      const { stdout } = await run(
+        ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+        repoPath,
+      );
+      return stdout.trim().length > 0;
+    },
+
+    // Origin's default branch (the branch a fresh clone checks out), used as a
+    // predictable, always-present base for newly-created branches. Resolves in
+    // order: the local mirror ref `refs/remotes/origin/HEAD` (a clone sets this
+    // automatically), then the GitHub API via `gh`, then the literal 'main'.
+    async originDefaultBranch(): Promise<string> {
+      try {
+        // --short yields e.g. "origin/main"; strip the remote prefix.
+        const { stdout } = await run(
+          ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+          repoPath,
+        );
+        const ref = stdout.trim();
+        if (ref) return ref.replace(/^origin\//, '');
+      } catch {
+        /* origin/HEAD unset (common right after a bare-mirror fetch) — try gh */
+      }
+      const viaGh = await gh(repoPath).defaultBranch();
+      return viaGh ?? 'main';
+    },
+
+    // Create <name> from origin/<base> and push it to origin, so the configured
+    // base branch exists remotely. Fetches origin/<base>, then pushes that exact
+    // fetched tip (FETCH_HEAD) straight to the new remote branch — no local
+    // branch is created or consulted, so a stale local branch of the same name
+    // can never be pushed by mistake (design: base branches are cut from origin,
+    // never local HEAD, which the daemon can't trust). Idempotent for the
+    // out-of-band-creation race: a push rejected because origin already has
+    // <name> (already-exists / non-fast-forward / "fetch first") is treated as
+    // success — the branch existing on origin is the whole goal.
+    async createBaseBranch(name: string, base: string): Promise<void> {
+      await run(['fetch', 'origin', base], repoPath);
+      try {
+        await run(['push', 'origin', `FETCH_HEAD:refs/heads/${name}`], repoPath);
+      } catch (err) {
+        const msg = (err as GitError).message ?? '';
+        if (/already exists|non-fast-forward|fetch first|\[rejected\]/i.test(msg)) return;
+        throw err;
+      }
     },
 
     async deleteBranch(

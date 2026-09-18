@@ -34,6 +34,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   rmSync(repoDir, { recursive: true, force: true });
+  rmSync(`${repoDir}-origin.git`, { recursive: true, force: true });
 });
 
 describe('git() helper', () => {
@@ -243,6 +244,111 @@ describe('git() helper', () => {
     await g.checkout('main');
     await g.deleteBranch('unmerged', { force: true });
     expect(await g.branchExists('unmerged')).toBe(false);
+  });
+
+  // --- remote base-branch primitives (Shreni-beads-uvu.1) ---
+
+  // Stand up a bare repo as `origin`, push the working repo's `main`, and (when
+  // asked) create/point a distinct default branch. Returns the bare repo path.
+  async function addOrigin(opts: { defaultBranch?: string } = {}): Promise<string> {
+    const bare = `${repoDir}-origin.git`;
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare]);
+    await execFileAsync('git', ['remote', 'add', 'origin', bare], { cwd: repoDir });
+    await execFileAsync('git', ['push', 'origin', 'main'], { cwd: repoDir });
+    if (opts.defaultBranch && opts.defaultBranch !== 'main') {
+      await execFileAsync('git', ['branch', opts.defaultBranch], { cwd: repoDir });
+      await execFileAsync('git', ['push', 'origin', opts.defaultBranch], { cwd: repoDir });
+      // Point the bare repo's HEAD at the distinct default, then mirror it locally.
+      await execFileAsync('git', ['symbolic-ref', 'HEAD', `refs/heads/${opts.defaultBranch}`], { cwd: bare });
+    }
+    await execFileAsync('git', ['remote', 'set-head', 'origin', '-a'], { cwd: repoDir });
+    return bare;
+  }
+
+  it('remoteBranchExists() reflects branch presence on origin', async () => {
+    await addOrigin();
+    const g = git(repoDir);
+    expect(await g.remoteBranchExists('main')).toBe(true);
+    expect(await g.remoteBranchExists('no-such-branch')).toBe(false);
+  });
+
+  it('remoteBranchExists() does not suffix-match a nested branch', async () => {
+    const bare = await addOrigin();
+    const g = git(repoDir);
+    // push feature/trunk but NOT a top-level trunk — a bare `trunk` ls-remote
+    // pattern would spuriously match refs/heads/feature/trunk.
+    await execFileAsync('git', ['branch', 'feature/trunk'], { cwd: repoDir });
+    await execFileAsync('git', ['push', 'origin', 'feature/trunk'], { cwd: repoDir });
+    expect(await g.remoteBranchExists('trunk')).toBe(false);
+    expect(await g.remoteBranchExists('feature/trunk')).toBe(true);
+    expect(bare).toContain('-origin.git');
+  });
+
+  it('originDefaultBranch() resolves via symbolic-ref', async () => {
+    await addOrigin({ defaultBranch: 'trunk' });
+    const g = git(repoDir);
+    expect(await g.originDefaultBranch()).toBe('trunk');
+  });
+
+  it('originDefaultBranch() falls back to main with no origin/HEAD and no gh', async () => {
+    // no remote at all → symbolic-ref fails, gh repo view fails → literal 'main'
+    const g = git(repoDir);
+    expect(await g.originDefaultBranch()).toBe('main');
+  });
+
+  it('createBaseBranch() cuts from origin default and pushes', async () => {
+    const bare = await addOrigin();
+    const g = git(repoDir);
+    await g.createBaseBranch('release', 'main');
+    const heads = await execFileAsync('git', ['ls-remote', '--heads', bare, 'release']);
+    expect(heads.stdout.trim().length).toBeGreaterThan(0);
+    // cut from origin/main → same tip
+    const mainSha = await gitCmd('rev-parse', 'origin/main');
+    const { stdout } = await execFileAsync('git', ['ls-remote', '--heads', bare, 'release']);
+    expect(stdout).toContain(mainSha);
+  });
+
+  it('createBaseBranch() is idempotent when the branch already exists on origin', async () => {
+    await addOrigin();
+    const g = git(repoDir);
+    await g.createBaseBranch('release', 'main'); // first create + push
+    // second call: remote branch already exists → must not throw
+    await expect(g.createBaseBranch('release', 'main')).resolves.toBeUndefined();
+  });
+
+  it('createBaseBranch() cuts from origin, not a stale same-named local branch', async () => {
+    const bare = await addOrigin();
+    const g = git(repoDir);
+    // a local `release` pointing at a DIFFERENT commit that was never pushed —
+    // the branch-that-exists-locally-but-not-on-origin scenario the epic targets
+    await execFileAsync('git', ['checkout', '-b', 'release'], { cwd: repoDir });
+    writeFileSync(join(repoDir, 'stale.txt'), 'stale');
+    await g.add('-A');
+    await g.commit('stale local commit');
+    const staleSha = await gitCmd('rev-parse', 'release');
+    await g.checkout('main');
+
+    await g.createBaseBranch('release', 'main');
+    const { stdout } = await execFileAsync('git', ['ls-remote', '--heads', bare, 'release']);
+    const mainSha = await gitCmd('rev-parse', 'origin/main');
+    expect(stdout).toContain(mainSha); // origin/main tip, NOT the stale local commit
+    expect(stdout).not.toContain(staleSha);
+  });
+
+  it('createBaseBranch() treats an out-of-band remote branch as success', async () => {
+    const bare = await addOrigin();
+    const g = git(repoDir);
+    // someone else creates origin/release at a DIVERGENT commit between our
+    // check and our push → our push is rejected; we must treat it as success.
+    await execFileAsync('git', ['checkout', '-b', 'release'], { cwd: repoDir });
+    writeFileSync(join(repoDir, 'other.txt'), 'other');
+    await g.add('-A');
+    await g.commit('divergent out-of-band commit');
+    await execFileAsync('git', ['push', 'origin', 'release'], { cwd: repoDir });
+    await g.checkout('main');
+
+    await expect(g.createBaseBranch('release', 'main')).resolves.toBeUndefined();
+    expect(bare).toContain('-origin.git');
   });
 
   it('throws GitError on invalid git commands', async () => {
