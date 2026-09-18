@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { statSync, openSync, readSync, closeSync } from 'fs';
 import { logPath } from '../sthapathi/activity-log.js';
 import { loadRegistry } from '../kshetra/registry.js';
 
@@ -186,25 +186,111 @@ export function foldPlanningSessions(kshetraId: string, lines: string[]): Planni
   return [...byId.values()];
 }
 
+// Decide, ONCE at ingest, whether to retain a line (fnd.8). A cheap substring
+// gate first skips the executor per-token bulk without parsing; then a single
+// parse keeps ONLY the lines foldPlanningSessions actually uses — the
+// suthradhara_* lifecycle events and suthradhara-agent run_usage. Crucially this
+// also drops EXECUTOR run_usage (one per run, O(runs)): retaining it would make
+// the retained set — and the re-fold cost on every poll — grow without bound on a
+// busy fleet, undercutting the point of tailing. The retained set is thus bounded
+// by planning activity, not by execution volume. foldPlanningSessions re-parses
+// (harmlessly) and re-applies its own filter, so its semantics are unchanged.
+function isRetainablePlanningLine(line: string): boolean {
+  if (!line.includes('suthradhara') && !line.includes('run_usage')) return false;
+  let ev: { type?: unknown; agent?: unknown };
+  try {
+    ev = JSON.parse(line) as { type?: unknown; agent?: unknown };
+  } catch {
+    return false; // a half-written/corrupt line — foldPlanningSessions would skip it too
+  }
+  const type = typeof ev.type === 'string' ? ev.type : '';
+  if (type.startsWith('suthradhara_')) return true;
+  if (type === 'run_usage') return ev.agent === 'suthradhara';
+  return false;
+}
+
+// Per-Kshetra incremental tail state (fnd.8). `offset` is the byte count consumed
+// so far; `partial` carries a trailing partial line across calls (a line still
+// being appended when we read); `relevant` retains only the planning-relevant
+// lines seen so far. Module-scoped: the Phalaka process is long-lived, so this
+// survives across dashboard polls.
+interface PlanningTail {
+  offset: number;
+  partial: string;
+  relevant: string[];
+}
+const planningTails = new Map<string, PlanningTail>();
+
+// Reset the incremental tail cache. Test-only seam so cases don't leak retained
+// state into one another; the live process never calls it.
+export function resetPlanningTailsForTest(): void {
+  planningTails.clear();
+}
+
+// Return a Kshetra's planning-relevant activity lines, reading ONLY the bytes
+// appended since the last call (fnd.8) rather than the whole activity.jsonl. This
+// is what keeps /api/planning-sessions from scaling with the multi-MB per-token
+// bulk of the log: after the first read, per-call work is O(new bytes) + O(the
+// retained planning/run_usage lines), independent of total file size. Mirrors the
+// byte-offset tail in stream.ts (offset + partial-line carry + truncation reset).
+function planningRelevantLines(id: string): string[] {
+  const path = logPath(id);
+  let tail = planningTails.get(id);
+  if (!tail) {
+    tail = { offset: 0, partial: '', relevant: [] };
+    planningTails.set(id, tail);
+  }
+
+  let size: number;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return tail.relevant; // no activity file (yet) — keep whatever we have
+  }
+  if (size < tail.offset) {
+    // Truncated or rotated — restart from the top so we don't read past EOF.
+    tail.offset = 0;
+    tail.partial = '';
+    tail.relevant = [];
+  }
+  if (size > tail.offset) {
+    let chunk: string;
+    try {
+      const fd = openSync(path, 'r');
+      try {
+        const buf = Buffer.alloc(size - tail.offset);
+        readSync(fd, buf, 0, buf.length, tail.offset);
+        chunk = buf.toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return tail.relevant; // transient read failure — degrade to what we have
+    }
+    tail.offset = size;
+    // Prepend the carried partial; the last split element is the new trailing
+    // partial (or '' when the chunk ended on a newline). Only whole lines are
+    // ingested — the partial is re-read next call once completed.
+    const lines = (tail.partial + chunk).split('\n');
+    tail.partial = lines.pop() ?? '';
+    for (const line of lines) {
+      if (isRetainablePlanningLine(line)) tail.relevant.push(line);
+    }
+  }
+  return tail.relevant;
+}
+
 // Read + fold the planning sessions for the given Kshetras (default: all
 // registered). Newest first (a just-ended or live session sorts to the top), so
 // the dashboard shows the current planning unit without the client sorting.
-// NOTE (scaling): this reads each Kshetra's FULL activity.jsonl per call. The
-// string pre-filter in foldPlanningSessions avoids JSON.parsing the executor
-// per-token events that dominate the file, but not the full read+split. Fine for
-// an MVP dashboard poll; an execution-heavy Kshetra with a multi-MB log wants a
-// suthradhara-scoped log or a byte-offset index instead (tracked separately).
+// Scaling (fnd.8): each Kshetra's activity.jsonl is tailed incrementally by byte
+// offset — only bytes appended since the last call are read, and only planning-
+// relevant lines are retained — so this no longer scales with the full log size.
 export function readPlanningSessions(kshetraIds?: string[]): PlanningSessionSnapshot[] {
   const ids = kshetraIds ?? loadRegistry().map(k => k.id);
   const sessions: PlanningSessionSnapshot[] = [];
   for (const id of ids) {
-    let raw: string;
-    try {
-      raw = readFileSync(logPath(id), 'utf8');
-    } catch {
-      continue; // no activity yet for this Kshetra
-    }
-    sessions.push(...foldPlanningSessions(id, raw.split('\n')));
+    sessions.push(...foldPlanningSessions(id, planningRelevantLines(id)));
   }
   // A running session (no endedAt) sorts above ended ones; within each group, most
   // recent timestamp first. Sessions with no timestamps sink to the bottom.

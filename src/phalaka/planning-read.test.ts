@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { foldPlanningSessions } from './planning-read.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { appendFileSync, mkdirSync, writeFileSync } from 'fs';
+import { dirname } from 'path';
+import { foldPlanningSessions, readPlanningSessions, resetPlanningTailsForTest } from './planning-read.js';
+import { logPath } from '../sthapathi/activity-log.js';
 
 // Build an activity.jsonl line the way emit() does: the event body plus a ts
 // envelope field. Only the fields the fold reads matter.
@@ -122,5 +125,102 @@ describe('foldPlanningSessions', () => {
     expect(s.phase).toBe('ended');
     // ...but its payload (epicId) is still captured.
     expect(s.epicId).toBe('e-1');
+  });
+});
+
+// The incremental byte-offset reader (fnd.8). test-setup redirects HOME to a
+// throwaway dir, so logPath(id) writes there. Unique kshetra ids per test keep
+// the module-level tail cache from bleeding, and resetPlanningTailsForTest()
+// clears it defensively before each case.
+describe('readPlanningSessions incremental read (fnd.8)', () => {
+  beforeEach(() => resetPlanningTailsForTest());
+
+  const writeLog = (id: string, contents: string): void => {
+    const p = logPath(id);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, contents, 'utf8');
+  };
+  const appendLog = (id: string, contents: string): void => appendFileSync(logPath(id), contents, 'utf8');
+
+  it('folds new appends across successive calls WITHOUT re-reading the whole file', () => {
+    const id = 'fnd8-incremental';
+    writeLog(id, line({ type: 'suthradhara_launched', kshetra: id, sessionId: 's1', ts: 't0', resume: false }) + '\n');
+    let out = readPlanningSessions([id]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ sessionId: 's1', phase: 'launched', running: true });
+
+    // Append later lifecycle events; the next call reads ONLY the appended bytes
+    // but the fold reflects the full history (retained lines + new).
+    appendLog(id, line({ type: 'suthradhara_plan_filed', kshetra: id, sessionId: 's1', epicId: 'e-1', docPath: 'd.md', summary: 'x' }) + '\n');
+    appendLog(id, line({ type: 'suthradhara_session_ended', kshetra: id, sessionId: 's1', epicId: 'e-1', ts: 't1' }) + '\n');
+    out = readPlanningSessions([id]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ sessionId: 's1', phase: 'ended', running: false, epicId: 'e-1' });
+  });
+
+  it('ignores the executor per-token bulk — only planning-relevant lines are retained/folded', () => {
+    const id = 'fnd8-bulk';
+    const noise = Array.from({ length: 500 }, (_, i) =>
+      line({ type: 'agent_text', kshetra: id, beadId: 'b1', agent: 'silpi', text: `token ${i}` })).join('\n') + '\n';
+    writeLog(id, noise + line({ type: 'suthradhara_launched', kshetra: id, sessionId: 's1', ts: 't0' }) + '\n');
+    const out = readPlanningSessions([id]);
+    expect(out).toHaveLength(1);
+    expect(out[0].sessionId).toBe('s1');
+  });
+
+  it('attaches a suthradhara run_usage (matched by epicId) even when it arrives in a later append', () => {
+    const id = 'fnd8-usage';
+    writeLog(id,
+      line({ type: 'suthradhara_launched', kshetra: id, sessionId: 's1', ts: 't0' }) + '\n' +
+      line({ type: 'suthradhara_plan_filed', kshetra: id, sessionId: 's1', epicId: 'e-1', docPath: 'd.md', summary: 'x' }) + '\n');
+    readPlanningSessions([id]);
+    // A run_usage for the filed epic lands in a later poll's bytes.
+    appendLog(id, line({ type: 'run_usage', kshetra: id, beadId: 'e-1', agent: 'suthradhara', provider: 'anthropic', model: 'm', inputTokens: 120, outputTokens: 30, costUsd: 0.5, priced: true, outcome: 'ok' }) + '\n');
+    const out = readPlanningSessions([id]);
+    expect(out[0]).toMatchObject({ epicId: 'e-1', inputTokens: 120, outputTokens: 30, costUsd: 0.5, usageRecorded: true });
+  });
+
+  it('does not retain executor run_usage (only suthradhara-agent usage is kept — bounded growth)', () => {
+    const id = 'fnd8-exec-usage';
+    writeLog(id,
+      line({ type: 'suthradhara_launched', kshetra: id, sessionId: 's1', ts: 't0' }) + '\n' +
+      line({ type: 'suthradhara_plan_filed', kshetra: id, sessionId: 's1', epicId: 'e-1', docPath: 'd.md', summary: 'x' }) + '\n' +
+      // An executor run_usage keyed to the SAME id must NOT be folded into the session.
+      line({ type: 'run_usage', kshetra: id, beadId: 'e-1', agent: 'silpi', provider: 'anthropic', model: 'm', inputTokens: 999, outputTokens: 111, costUsd: 9, priced: true, outcome: 'ok' }) + '\n');
+    const out = readPlanningSessions([id]);
+    expect(out[0]).toMatchObject({ epicId: 'e-1', inputTokens: 0, outputTokens: 0, usageRecorded: false });
+  });
+
+  it('does not fold a partial (still-being-written) trailing line until it is completed', () => {
+    const id = 'fnd8-partial';
+    writeLog(id, line({ type: 'suthradhara_launched', kshetra: id, sessionId: 's1', ts: 't0' }) + '\n');
+    expect(readPlanningSessions([id])).toHaveLength(1);
+    // A half-written next line (no trailing newline yet) must not be folded…
+    const partial = line({ type: 'suthradhara_plan_filed', kshetra: id, sessionId: 's1', epicId: 'e-1', docPath: 'd.md', summary: 'x' });
+    appendLog(id, partial.slice(0, 20));
+    expect(readPlanningSessions([id])[0].phase).toBe('launched');
+    // …until the rest of the line + newline arrives.
+    appendLog(id, partial.slice(20) + '\n');
+    expect(readPlanningSessions([id])[0].phase).toBe('plan_filed');
+  });
+
+  it('restarts from the top when the log is truncated/rotated (size < offset)', () => {
+    const id = 'fnd8-rotate';
+    // Start with a two-line log so the post-rotation file is strictly smaller —
+    // byte-offset tailing detects a rotation only when size < offset (same
+    // tradeoff as stream.ts; an exactly-equal-size rotation is undetectable).
+    writeLog(id,
+      line({ type: 'suthradhara_launched', kshetra: id, sessionId: 'old1', ts: 't0' }) + '\n' +
+      line({ type: 'suthradhara_session_ended', kshetra: id, sessionId: 'old1', ts: 't1' }) + '\n');
+    expect(readPlanningSessions([id])[0].sessionId).toBe('old1');
+    // Rotate to a fresh, smaller file referencing a new session.
+    writeLog(id, line({ type: 'suthradhara_launched', kshetra: id, sessionId: 'new', ts: 't2' }) + '\n');
+    const out = readPlanningSessions([id]);
+    expect(out).toHaveLength(1);
+    expect(out[0].sessionId).toBe('new');
+  });
+
+  it('returns nothing for a Kshetra with no activity file yet', () => {
+    expect(readPlanningSessions(['fnd8-absent'])).toEqual([]);
   });
 });
