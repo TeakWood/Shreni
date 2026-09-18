@@ -50,6 +50,34 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+## Per-Task Workflow — Code Review Before Push (MANDATORY)
+
+**Whenever you implement a beads task (any `bd` issue), you MUST run the loop
+below. The code review is a HARD GATE: no code from a beads task is pushed until
+a review has run and its findings are resolved.** Work one bead at a time — finish
+this full loop for a bead before starting the next.
+
+1. **Claim** — `bd update <id> --claim`.
+2. **Implement** the change (with tests).
+3. **Quality gates** — `pnpm typecheck` and `pnpm vitest run` must be green (also
+   `pnpm build:web` when the Phalaka frontend under `src/phalaka/web/` changed, so
+   the committed `ui.ts` bundle is regenerated).
+4. **Code review — the gate** — run `/code-review` (high effort) or the
+   code-review subagent over the diff. **Never push an unreviewed beads-task
+   diff.**
+5. **Resolve findings** — fix every confirmed finding, or consciously accept it
+   with a stated reason. Re-run the gates after any fix.
+6. **Push only after the review is clean** — commit and `git push` (per *Session
+   Completion*), then `bd close <id>` with a reason.
+7. **Sync the beads repo** — per *Beads Repository & Sync* below.
+
+**CRITICAL RULES:**
+- The review runs BEFORE the push, not after — a pushed-then-reviewed diff defeats
+  the gate.
+- "Tests pass" is NOT a substitute for the review; run both.
+- If you skip the review because a change is trivial, say so explicitly and why —
+  do not skip it silently.
+
 ## Beads Repository & Sync
 
 **The beads DB is a SEPARATE git repository, not part of this repo.** `.beads/`
