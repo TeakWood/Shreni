@@ -103,6 +103,153 @@ describe('renderShow', () => {
   });
 });
 
+// ── lot manifest header (epic yrk / Study B2, yrk.5) ──────────────────────────
+
+const HDR = { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' } as const;
+
+// A worker_started manifest LedgerEntry (lot-level, beadId ''), with knobs for the
+// fields the multi-lot divergence check reads.
+function manifest(opts: {
+  lotId: string; ts?: string; configHash?: string; commit?: string; dirty?: boolean;
+  entrypoint?: string; labels?: Record<string, string>; extension?: Record<string, unknown>;
+}): LedgerEntry {
+  const {
+    lotId, ts = '2026-09-19T07:40:31.000Z', configHash = 'sha256:9ce70da6de2623c2',
+    commit = '339a18f3', dirty = false, entrypoint = 'worker',
+    labels = { arm: 'A', rep: '2' },
+    extension = { loaded: false, path: null, contentHash: null, overrode: [] },
+  } = opts;
+  return {
+    ts, schemaVersion: 1, kshetra: 'myapp', beadId: '', lotId, kind: 'worker_started',
+    payload: {
+      entrypoint, labels,
+      subject: {
+        repo: { mainBranch: 'main', baseSha: 'abc123def4567890aa', clean: true },
+        beads: { headSha: 'beads1234567', lastDoltCommit: 'dolt123' },
+        config: {
+          resolvedConfigHash: configHash, mergePolicy: null, maxRoundsPerBead: 3,
+          gates: { test: 'block', lint: 'block', coverage: 'warn', diffSize: 'warn' },
+          roles: { silpi: { provider: 'anthropic', model: 'claude-sonnet-4-6' } },
+          budget: null,
+        },
+      },
+      process: {
+        shreni: { version: '0.1.0', commit, dirty, builtAt: '2026-09-19T00:00:00.000Z' },
+        extension,
+        providers: { anthropic: { bin: 'claude', version: '2.1.212 (Claude Code)' } },
+        tools: { bd: { version: 'bd version 1.0.3' }, node: 'v26.4.0' },
+      },
+    },
+  } as LedgerEntry;
+}
+
+// A timeline entry stamped with a lotId (post-B2).
+function lentry(kind: LedgerEntry['kind'], ts: string, lotId: string, payload: Record<string, unknown>): LedgerEntry {
+  return { ...entry(kind, ts, payload), lotId };
+}
+
+describe('renderShow — lot manifest header (yrk.5)', () => {
+  it('prints one manifest header for a bead worked in a single lot', () => {
+    const out = renderShow(
+      HDR,
+      [lentry('task_claimed', '2026-09-19T07:41:00.000Z', 'lot-aaaa1111', { title: 'X' })],
+      new Map([['lot-aaaa1111', manifest({ lotId: 'lot-aaaa1111' })]]),
+    );
+    expect(out).toContain('Lot manifest:');
+    expect(out).toContain('Lot lot-aaaa · 2026-09-19 07:40:31 · worker · labels: arm=A rep=2');
+    expect(out).toContain('base: abc123def456 (clean)');
+    expect(out).toContain('config: sha256:9ce70da6');
+    expect(out).toContain('gates: test=block lint=block coverage=warn diffSize=warn');
+    expect(out).toContain('models: silpi=anthropic/claude-sonnet-4-6');
+    expect(out).toContain('shreni: 0.1.0@339a18f');
+    expect(out).toContain('providers: anthropic=2.1.212 (Claude Code)');
+    expect(out).toContain('extension: none');
+    expect(out).not.toContain('changed between lots');
+  });
+
+  it('renders every lot and flags a configuration change across lots', () => {
+    const out = renderShow(
+      HDR,
+      [
+        lentry('task_claimed', '2026-09-19T07:41:00.000Z', 'lot-1111', { title: 'X' }),
+        lentry('task_done', '2026-09-19T09:00:00.000Z', 'lot-2222', { approved: true, rounds: 2 }),
+      ],
+      new Map([
+        ['lot-1111', manifest({ lotId: 'lot-1111', configHash: 'sha256:1111aaaa1111' })],
+        ['lot-2222', manifest({ lotId: 'lot-2222', configHash: 'sha256:2222bbbb2222', ts: '2026-09-19T08:30:00.000Z' })],
+      ]),
+    );
+    expect(out).toContain('Lot manifests:');
+    expect(out).toContain('Lot lot-1111');
+    expect(out).toContain('Lot lot-2222');
+    expect(out).toContain('⚠ configuration changed between lots');
+  });
+
+  it('flags a Shreni build change across lots', () => {
+    const out = renderShow(
+      HDR,
+      [
+        lentry('task_claimed', '2026-09-19T07:41:00.000Z', 'lot-1111', { title: 'X' }),
+        lentry('task_done', '2026-09-19T09:00:00.000Z', 'lot-2222', { approved: true, rounds: 1 }),
+      ],
+      new Map([
+        ['lot-1111', manifest({ lotId: 'lot-1111', commit: 'aaaaaaa' })],
+        ['lot-2222', manifest({ lotId: 'lot-2222', commit: 'bbbbbbb', ts: '2026-09-19T08:30:00.000Z' })],
+      ]),
+    );
+    expect(out).toContain('⚠ Shreni build changed between lots');
+  });
+
+  it('renders an unknown-lot header for pre-B2 entries with no lotId, timeline intact', () => {
+    const out = renderShow(HDR, [entry('task_claimed', '2026-09-16T00:00:01.000Z', { title: 'X' })], new Map());
+    expect(out).toContain('Lot (unknown) — no manifest (pre-B2 history)');
+    expect(out).toContain('CLAIMED'); // timeline unchanged
+  });
+
+  it('notes a lotId whose worker_started manifest is missing', () => {
+    const out = renderShow(
+      HDR,
+      [lentry('task_claimed', '2026-09-19T07:41:00.000Z', 'lot-orphan', { title: 'X' })],
+      new Map(), // no manifest for lot-orphan
+    );
+    expect(out).toContain('Lot lot-orph — no manifest recorded for this lot');
+  });
+
+  it('renders a loaded extension with its path, hash, and overridden seams', () => {
+    const out = renderShow(
+      HDR,
+      [lentry('task_claimed', '2026-09-19T07:41:00.000Z', 'lot-ext', { title: 'X' })],
+      new Map([['lot-ext', manifest({
+        lotId: 'lot-ext',
+        extension: { loaded: true, path: '/x/node_modules/@shreni/cloud/index.js', contentHash: 'sha256:abcd1234 effff', overrode: ['policySource', 'eventSink'] },
+      })]]),
+    );
+    expect(out).toContain('extension: /x/node_modules/@shreni/cloud/index.js sha256:abcd1234 overrode policySource,eventSink');
+  });
+
+  it('produces stable output (snapshot) for a single-lot bead', () => {
+    const out = renderShow(
+      HDR,
+      [lentry('task_claimed', '2026-09-19T07:41:00.000Z', 'lot-aaaa1111', { title: 'X' })],
+      new Map([['lot-aaaa1111', manifest({ lotId: 'lot-aaaa1111' })]]),
+    );
+    expect(out).toMatchInlineSnapshot(`
+      "Bead b1 — X
+      Status: open · Type: task
+
+      Lot manifest:
+        Lot lot-aaaa · 2026-09-19 07:40:31 · worker · labels: arm=A rep=2
+          base: abc123def456 (clean)   config: sha256:9ce70da6   gates: test=block lint=block coverage=warn diffSize=warn
+          models: silpi=anthropic/claude-sonnet-4-6
+          shreni: 0.1.0@339a18f   providers: anthropic=2.1.212 (Claude Code)   bd: bd version 1.0.3   node: v26.4.0
+          extension: none
+
+      Timeline (1 ledger entry):
+        2026-09-19 07:41:00  CLAIMED   X"
+    `);
+  });
+});
+
 describe('runShow', () => {
   it('joins bd metadata and ledger entries in timestamp order', async () => {
     mockShow.mockResolvedValue(BEAD_JSON);
@@ -122,6 +269,25 @@ describe('runShow', () => {
     // Chronological despite the file being out of order.
     expect(printed.indexOf('CLAIMED')).toBeLessThan(printed.indexOf('USAGE'));
     expect(printed.indexOf('USAGE')).toBeLessThan(printed.indexOf('MERGE'));
+  });
+
+  it('reads the lot manifest from the real ledger and renders it above the timeline (yrk.5)', async () => {
+    mockShow.mockResolvedValue(BEAD_JSON);
+    // A real ledger with a lot-level worker_started (beadId '') plus a bead entry
+    // stamped with that lotId — the full file → parse → readLedger → render chain.
+    writeLedger(
+      manifest({ lotId: 'lot-real-1234' }),
+      lentry('task_claimed', '2026-09-16T00:00:01.000Z', 'lot-real-1234', { title: 'Fix auth' }),
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runShow({ args: ['b1', '@myapp'], flagKshetra: undefined, cwd: '/nowhere', kshetras: [kshetra] });
+    const printed = log.mock.calls.map(c => c[0]).join('\n');
+    log.mockRestore();
+    expect(printed).toContain('Lot manifest:');
+    expect(printed).toContain('Lot lot-real · 2026-09-19 07:40:31 · worker · labels: arm=A rep=2');
+    expect(printed).toContain('config: sha256:9ce70da6');
+    // The worker_started (beadId '') is NOT itself listed as a bead timeline entry.
+    expect(printed).toContain('Timeline (1 ledger entry)');
   });
 
   it('renders bd content with a no-entries line when the ledger is missing', async () => {

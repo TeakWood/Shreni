@@ -68,25 +68,39 @@ function parseBeadHeader(showJson: string): BeadHeader | null {
   };
 }
 
-// Read + parse ledger.jsonl for the Kshetra, then apply the audience gate. This
-// is the only place the file is touched, and it is funnelled straight through
-// parseLedgerLines + readLedger — the CLI never interprets a raw entry itself. A
-// missing ledger (nothing decision-grade has happened yet) is an empty timeline,
-// not an error. `shreni show` is an operator/audit tool, so it reads at the
-// 'audit' clearance — it sees every entry the bead recorded.
-function loadBeadTimeline(kshetra: KshetraConfig, beadId: string): LedgerEntry[] {
+// Read + parse ledger.jsonl for the Kshetra ONCE. This is the only place the file
+// is touched; callers derive the bead timeline and the lot manifests from the
+// parsed entries through readLedger (the gated read path) — the CLI never
+// interprets a raw entry itself. A missing ledger (nothing decision-grade has
+// happened yet) is empty, not an error.
+function loadLedger(kshetra: KshetraConfig): LedgerEntry[] {
   const path = join(kshetra.beads.path, 'ledger.jsonl');
-  let raw: string;
   try {
-    raw = readFileSync(path, 'utf8');
+    return parseLedgerLines(readFileSync(path, 'utf8'));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
-  const entries = readLedger(parseLedgerLines(raw), beadId, { audience: 'audit' });
-  // Chronological: ledger.jsonl is append-order, but a re-sort by ts keeps the
-  // timeline correct even if two sinks or a clock skew interleave lines.
-  return entries.slice().sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+}
+
+// The bead's chronological timeline. `shreni show` is an operator/audit tool, so
+// it reads at 'audit' clearance — it sees every entry the bead recorded. Sorted
+// by ts so a clock skew / interleaved sink lines don't misorder it.
+function beadTimeline(all: LedgerEntry[], beadId: string): LedgerEntry[] {
+  return readLedger(all, beadId, { audience: 'audit' })
+    .slice()
+    .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+}
+
+// The lot manifests (worker_started, epic yrk / Study B2) indexed by lotId. They
+// are lot-level (beadId ''), so they surface via the '' bead query at audit
+// clearance; a bead's timeline entries join to them by their envelope lotId.
+function lotManifests(all: LedgerEntry[]): Map<string, LedgerEntry> {
+  const map = new Map<string, LedgerEntry>();
+  for (const m of readLedger(all, '', { audience: 'audit' })) {
+    if (m.kind === 'worker_started' && m.lotId) map.set(m.lotId, m);
+  }
+  return map;
 }
 
 // ── rendering ────────────────────────────────────────────────────────────────
@@ -156,7 +170,155 @@ function fmtEntry(e: LedgerEntry): string {
   return `  ${fmtTs(e.ts)}  ${body}`;
 }
 
-export function renderShow(header: BeadHeader, entries: LedgerEntry[]): string {
+// ── lot manifest header (epic yrk / Study B2, yrk.5) ─────────────────────────
+
+function obj(v: unknown): Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+// The distinct lots a bead's timeline touched, in first-seen (chronological)
+// order. An entry with no lotId (pre-B2 history) contributes a single `null`
+// "unknown lot" once. So a bead worked across a worker restart lists every lot.
+function distinctLots(entries: LedgerEntry[]): (string | null)[] {
+  const seen = new Set<string>();
+  const out: (string | null)[] = [];
+  let sawUnknown = false;
+  for (const e of entries) {
+    if (e.lotId === undefined) {
+      if (!sawUnknown) { sawUnknown = true; out.push(null); }
+      continue;
+    }
+    if (!seen.has(e.lotId)) { seen.add(e.lotId); out.push(e.lotId); }
+  }
+  return out;
+}
+
+function shortSha(v: unknown): string {
+  return typeof v === 'string' && v.length > 0 ? v.slice(0, 12) : '?';
+}
+// "sha256:9ce70da6de26…" → "sha256:9ce70da6" (short but still discriminating).
+function shortHash(v: unknown): string {
+  if (typeof v !== 'string' || v.length === 0) return '?';
+  const m = /^sha256:([0-9a-f]{8})/.exec(v);
+  return m ? `sha256:${m[1]}` : v.slice(0, 16);
+}
+
+function fmtGates(gates: unknown): string {
+  const g = obj(gates);
+  const parts = Object.keys(g).map(k => `${k}=${text(g[k])}`);
+  return parts.length ? parts.join(' ') : '?';
+}
+
+function fmtRoles(roles: unknown): string {
+  const r = obj(roles);
+  const parts = Object.keys(r).map(role => {
+    const o = obj(r[role]);
+    return `${role}=${text(o.provider) || '?'}/${text(o.model) || '?'}`;
+  });
+  return parts.length ? parts.join(' ') : '?';
+}
+
+function fmtShreni(shreni: unknown): string {
+  const s = obj(shreni);
+  const version = text(s.version) || '?';
+  const commit = typeof s.commit === 'string' && s.commit.length > 0
+    ? (s.commit === 'unknown' ? 'unknown' : s.commit.slice(0, 7))
+    : 'null';
+  return `${version}@${commit}${s.dirty === true ? ' (dirty)' : ''}`;
+}
+
+function fmtProviders(providers: unknown): string {
+  const p = obj(providers);
+  const parts = Object.keys(p).map(name => {
+    const o = obj(p[name]);
+    return `${name}=${o.version != null ? text(o.version) : `(${text(o.error) || 'unknown'})`}`;
+  });
+  return parts.length ? parts.join(' ') : '?';
+}
+
+function fmtTool(tool: unknown): string {
+  const o = obj(tool);
+  return o.version != null ? text(o.version) : '(unknown)';
+}
+
+function fmtExtension(extension: unknown): string {
+  const e = obj(extension);
+  if (e.loaded !== true) return 'none';
+  const overrode = Array.isArray(e.overrode) && e.overrode.length ? ` overrode ${(e.overrode as unknown[]).map(String).join(',')}` : '';
+  return `${text(e.path) || '?'} ${shortHash(e.contentHash)}${overrode}`;
+}
+
+// Render one lot's compact manifest block. `m` undefined means the lot has no
+// worker_started recorded — a pre-B2 entry (lotId null) or a lotId whose manifest
+// is missing; both render a single explanatory line, never an error.
+function fmtLotManifest(lotId: string | null, m: LedgerEntry | undefined): string[] {
+  const short = lotId ? lotId.slice(0, 8) : '(unknown)';
+  if (!m) {
+    return [`  Lot ${short} — ${lotId ? 'no manifest recorded for this lot' : 'no manifest (pre-B2 history)'}`];
+  }
+  const p = m.payload;
+  const subject = obj(p.subject);
+  const proc = obj(p.process);
+  const repo = obj(subject.repo);
+  const config = obj(subject.config);
+  const tools = obj(proc.tools);
+  const labels = obj(p.labels);
+
+  const labelStr = Object.keys(labels).length
+    ? Object.entries(labels).map(([k, v]) => `${k}=${text(v)}`).join(' ')
+    : '(none)';
+  const clean = repo.clean === true ? 'clean' : repo.clean === false ? 'DIRTY' : 'clean?';
+
+  return [
+    `  Lot ${short} · ${fmtTs(m.ts)} · ${text(p.entrypoint) || '?'} · labels: ${labelStr}`,
+    `    base: ${shortSha(repo.baseSha)} (${clean})   config: ${shortHash(config.resolvedConfigHash)}   gates: ${fmtGates(config.gates)}`,
+    `    models: ${fmtRoles(config.roles)}`,
+    `    shreni: ${fmtShreni(proc.shreni)}   providers: ${fmtProviders(proc.providers)}   bd: ${fmtTool(tools.bd)}   node: ${text(tools.node) || '?'}`,
+    `    extension: ${fmtExtension(proc.extension)}`,
+  ];
+}
+
+// Whether the KNOWN manifests a bead spans disagree on the enforced config or the
+// Shreni build — the audit-relevant case a multi-lot bead surfaces (yrk.5).
+function lotDivergence(manifests: LedgerEntry[]): { config: boolean; build: boolean } {
+  const hashes = new Set<string>();
+  const builds = new Set<string>();
+  for (const m of manifests) {
+    const config = obj(obj(m.payload.subject).config);
+    hashes.add(text(config.resolvedConfigHash));
+    const s = obj(obj(m.payload.process).shreni);
+    builds.add(`${text(s.version)}@${text(s.commit)}#${String(s.dirty)}`);
+  }
+  return { config: hashes.size > 1, build: builds.size > 1 };
+}
+
+// The lot-manifest section: one block per lot the bead's timeline touched, plus a
+// divergence marker when it spanned lots that enforced different conditions.
+function renderLotSection(entries: LedgerEntry[], manifests: Map<string, LedgerEntry>): string[] {
+  const lots = distinctLots(entries);
+  if (lots.length === 0) return [];
+  const lines: string[] = [lots.length === 1 ? 'Lot manifest:' : 'Lot manifests:'];
+  const known: LedgerEntry[] = [];
+  for (const lot of lots) {
+    const m = lot ? manifests.get(lot) : undefined;
+    if (m) known.push(m);
+    lines.push(...fmtLotManifest(lot, m));
+  }
+  if (known.length > 1) {
+    const d = lotDivergence(known);
+    // Exact phrasing kept stable for the acceptance/snapshot.
+    if (d.config) lines.push('  ⚠ configuration changed between lots');
+    if (d.build) lines.push('  ⚠ Shreni build changed between lots');
+  }
+  lines.push('');
+  return lines;
+}
+
+export function renderShow(
+  header: BeadHeader,
+  entries: LedgerEntry[],
+  manifests: Map<string, LedgerEntry> = new Map(),
+): string {
   const lines: string[] = [];
   lines.push(`Bead ${header.id}${header.title ? ` — ${header.title}` : ''}`);
   const pr = header.priority === null ? '' : ` · P${header.priority}`;
@@ -167,6 +329,9 @@ export function renderShow(header: BeadHeader, entries: LedgerEntry[]): string {
     for (const line of header.criteria.split('\n')) lines.push(`  ${line}`);
   }
   lines.push('');
+  // The governing lot manifest(s) — the conditions each worker ran this bead
+  // under (epic yrk / Study B2) — as a header above the timeline.
+  lines.push(...renderLotSection(entries, manifests));
   if (entries.length === 0) {
     lines.push('Timeline: no ledger entries for this bead.');
   } else {
@@ -218,7 +383,10 @@ export async function runShow(opts: ShowOpts): Promise<void> {
   if (!header) throw new Error(`Bead not found in ${kshetra.id}: ${beadId}`);
 
   // Join the ledger on the CANONICAL id from the payload, not the raw arg — the
-  // ledger stores canonical ids, so a short-id filter would drop every entry.
-  const entries = loadBeadTimeline(kshetra, header.id);
-  console.log(renderShow(header, entries));
+  // ledger stores canonical ids, so a short-id filter would drop every entry. Read
+  // once, then derive both the timeline and the lot manifests it references.
+  const all = loadLedger(kshetra);
+  const entries = beadTimeline(all, header.id);
+  const manifests = lotManifests(all);
+  console.log(renderShow(header, entries, manifests));
 }
