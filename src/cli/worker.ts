@@ -8,6 +8,7 @@ import { untrackCommittedRepoMap } from '../sthapathi/repo-map-migration';
 import { runWatchdogOnce } from '../sthapathi/watchdog';
 import { branchName } from '../sthapathi/branch';
 import { touchHeartbeat, emitLotManifest } from '../sthapathi/activity-log';
+import { getBuildIdentity } from '../sthapathi/build-info';
 import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '../sthapathi/self-heal';
 import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
@@ -182,7 +183,9 @@ async function startup(): Promise<void> {
   // the ledger sink is registered, so worker_started reaches ledger.jsonl and can
   // later record the extension identity — and BEFORE any other event (sync, recover)
   // is emitted, so every one of them carries this lot's id. One per worker process.
-  emitLotManifest(kshetra!.id, 'worker');
+  // process.shreni is the build identity (yrk.2); yrk.3 adds the remaining subject
+  // and process fields to this collection.
+  emitLotManifest(kshetra!.id, 'worker', {}, { process: { shreni: getBuildIdentity() } });
   await sync();
   const resumable = await recoverKshetra(kshetra!);
   // RECOVER has just reconciled the drift a stuck pause escalated over, so a

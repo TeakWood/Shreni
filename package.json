@@ -7,7 +7,7 @@
     "shreni": "dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/stamp-build-info.mjs",
     "build:web": "node scripts/build-phalaka-web.mjs",
     "typecheck": "tsc --noEmit",
     "certify": "tsx scripts/certify-pack.ts",

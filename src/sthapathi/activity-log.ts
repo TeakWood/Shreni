@@ -236,6 +236,7 @@ export function emitLotManifest(
   kshetraId: string,
   entrypoint: 'worker' | 'run',
   labels: Record<string, string> = {},
+  sections: { subject?: Record<string, unknown>; process?: Record<string, unknown> } = {},
 ): string {
   const lotId = randomUUID();
   currentLotId.set(kshetraId, lotId);
@@ -243,8 +244,12 @@ export function emitLotManifest(
     type: 'worker_started',
     kshetra: kshetraId,
     entrypoint,
-    subject: {},
-    process: {},
+    // Populated by the caller's collectors (build identity in yrk.2, repo/config/
+    // CLI versions in yrk.3). This module stays pure — it does not read git, the
+    // config, or the build stamp itself; it only emits what it is handed, so it
+    // takes on no dependency on KshetraConfig or the filesystem beyond the sink.
+    subject: sections.subject ?? {},
+    process: sections.process ?? {},
     labels,
   });
   return lotId;

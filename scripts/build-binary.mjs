@@ -17,6 +17,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { platform, arch } from 'node:process';
+import { computeBuildInfo } from './build-info-lib.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -51,6 +52,16 @@ async function main() {
 
   // 1. Bundle the whole CLI into one CommonJS file. node: built-ins stay
   //    external automatically under platform:node; the pure-JS deps are inlined.
+  //
+  //    Embed the build identity (epic yrk / Study B2, yrk.2) as a compile-time
+  //    constant: the SEA is one bundled file with no dist/build-info.json beside
+  //    it, so getBuildIdentity()'s runtime file read would miss. esbuild's
+  //    `define` substitutes the __SHRENI_BUILD_INFO__ token the reader checks
+  //    first with the stamped JSON literal, so the binary reports the same
+  //    identity the file build would. Computed here (build time) — the only place
+  //    git is consulted — never at runtime.
+  const buildInfo = computeBuildInfo(ROOT);
+  console.log(`→ embedding build identity (version=${buildInfo.version}, commit=${buildInfo.commit ?? 'null'}, dirty=${buildInfo.dirty ?? 'null'})`);
   console.log('→ bundling with esbuild');
   await build({
     entryPoints: [join(ROOT, 'src/cli/index.ts')],
@@ -61,6 +72,11 @@ async function main() {
     format: 'cjs',
     // Node strips the entry shebang; drop it so the bundle is clean.
     banner: { js: '' },
+    // Replace the build-constant token (a string literal of the JSON) — see
+    // src/sthapathi/build-info.ts. Double JSON.stringify: the inner produces the
+    // JSON string the reader parses; the outer makes `define` emit it as a string
+    // literal rather than raw code.
+    define: { __SHRENI_BUILD_INFO__: JSON.stringify(JSON.stringify(buildInfo)) },
     logLevel: 'info',
   });
 

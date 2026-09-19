@@ -100,6 +100,16 @@ describe('lot manifest (epic yrk / Study B2)', () => {
     expect(readLog(k)[0].lotId).toBeUndefined();
     expect(getCurrentLotId(k)).toBe('');
   });
+
+  it('passes subject/process sections through to worker_started (yrk.2/yrk.3 collectors)', () => {
+    const k = 'yrk-sections';
+    const shreni = { version: '1.0.0', commit: 'deadbeef', dirty: false, builtAt: '2026-01-01T00:00:00.000Z' };
+    emitLotManifest(k, 'worker', { arm: 'A' }, { subject: { baseSha: 'sha1' }, process: { shreni } });
+    const [wev] = readLog(k);
+    expect(wev).toMatchObject({
+      type: 'worker_started', subject: { baseSha: 'sha1' }, process: { shreni }, labels: { arm: 'A' },
+    });
+  });
 });
 
 describe('Suthradhara lifecycle events (fnd.1)', () => {
