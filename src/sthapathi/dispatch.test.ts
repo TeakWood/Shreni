@@ -622,3 +622,20 @@ describe('review ablation (epic 8wi / Study B1)', () => {
     expect(events.some(e => e.type === 'viharapala_done')).toBe(true);
   });
 });
+
+describe('enforcement ablation (epic 8wi / Study B1)', () => {
+  const ABLATED = { ...KSHETRA, ablation: { enforcement: 'off' } } as unknown as KshetraConfig;
+
+  it('does not reject a failing test gate — proceeds to Viharapala with a warn+ablated gate_result', async () => {
+    emitSpy.mockClear();
+    mockMeasureHealth.mockResolvedValue({ green: false, failCount: 3, baseline: 0, sha: 'sha' });
+    await runSilpiViharapalaLoop(ABLATED, TASK, 'bead-proj-42/fix-auth');
+    // Enforcement removed → the failing test gate does not reject; review runs.
+    expect(mockRunViharapala).toHaveBeenCalled();
+    const gateResults = emitSpy.mock.calls
+      .map((c: unknown[]) => c[0] as { type: string; gate?: string; verdict?: string; ablations?: string[] })
+      .filter(e => e.type === 'gate_result');
+    const testGate = gateResults.find(g => g.gate === 'test');
+    expect(testGate).toMatchObject({ verdict: 'warn', ablations: ['enforcement'] });
+  });
+});

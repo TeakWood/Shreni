@@ -46,6 +46,13 @@ vi.mock('./health.js', () => ({
   isHealthBead: (t: Task) => mockIsHealthBead(t),
 }));
 
+// Capture emitted events (epic 8wi: the pickup-health suppression record).
+const { emitSpy } = vi.hoisted(() => ({ emitSpy: vi.fn() }));
+vi.mock('./activity-log.js', async (orig) => {
+  const actual = await (orig() as Promise<Record<string, unknown>>);
+  return { ...actual, emit: emitSpy };
+});
+
 // ── imports after mocks ──────────────────────────────────────────────────────
 
 const { parseReadyOutput, pickNext, preFlightCheck, selectNext, prepareTask, PreFlightError, MISSING_BASE_BRANCH_REASON } =
@@ -460,6 +467,23 @@ describe('prepareTask (the only mutator)', () => {
     expect(result?.id).toBe('proj-123');
     expect(mockClaim).toHaveBeenCalledWith('proj-123');
     expect(mockEnsureHealthBead).not.toHaveBeenCalled();
+  });
+
+  it('under enforcement ablation, claims on a red suite without a health bead, recording the suppression (epic 8wi)', async () => {
+    emitSpy.mockClear();
+    mockCheckHealth.mockResolvedValue({ green: false, failCount: 3, baseline: 0, sha: 'sha' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const ablated = { ...KSHETRA, ablation: { enforcement: 'off' } } as unknown as KshetraConfig;
+    const result = await prepareTask(TASK, ablated);
+    expect(result?.id).toBe('proj-123');                 // claimed despite the red suite
+    expect(mockClaim).toHaveBeenCalledWith('proj-123');
+    expect(mockEnsureHealthBead).not.toHaveBeenCalled(); // no repair bead created
+    // A decision-grade suppression record so the ledger shows work claimed on red.
+    const suppression = emitSpy.mock.calls
+      .map((c: unknown[]) => c[0] as { type: string; gate?: string; verdict?: string; ablations?: string[] })
+      .find(e => e.type === 'gate_result' && e.gate === 'pickup-health');
+    expect(suppression).toMatchObject({ verdict: 'warn', ablations: ['enforcement'] });
+    warn.mockRestore();
   });
 
   it('a health bead bypasses the gate and is claimed even when the suite is red', async () => {

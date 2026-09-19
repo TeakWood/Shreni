@@ -49,7 +49,11 @@ export type ActivityEvent =
   // inside evaluateGates). Attribution-only — never summed into a round total
   // (parallel gates overlap; the round total is silpi_done.gatesElapsedMs).
   // Additive optional; absent on pre-A3 data.
-  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' | 'skip'; durationMs?: number }
+  // `ablations` (epic 8wi / Study B1): the generic marker, present (['enforcement'])
+  // ONLY on a failing gate whose block was downgraded to warn by the enforcement
+  // ablation — so a suppressed blocker is distinguishable from a configured warn.
+  // Consumers (shreni show, computeMetrics) key off it generically.
+  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' | 'skip'; durationMs?: number; ablations?: AblationKey[] }
   // merge_done: approved work landed (or a PR was opened to land it). `sha` is the
   // squash commit for mergePolicy 'push'; `pr` is the PR number for 'pr'.
   // `durationMs` (epic hto / Study A3): monotonic time the merge + push (or PR

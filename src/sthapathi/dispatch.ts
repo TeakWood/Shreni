@@ -262,6 +262,9 @@ export async function runSilpiViharapalaLoop(
         verdict: gateLedgerVerdict(g),
         // Per-gate monotonic duration (epic hto / Study A3) — attribution only.
         durationMs: g.durationMs,
+        // Generic ablation marker (epic 8wi / Study B1): set only on a blocker
+        // downgraded to warn by the enforcement ablation.
+        ...(g.ablations ? { ablations: g.ablations } : {}),
       });
     }
 

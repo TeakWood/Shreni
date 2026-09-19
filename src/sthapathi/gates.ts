@@ -10,6 +10,7 @@ import {
 import type { HealthStatus } from './health.js';
 import type { LintResult } from './lint.js';
 import { timed } from './timing.js';
+import { isAblated, type AblationKey } from '../kshetra/ablation.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +31,11 @@ export interface GateResult {
   // are passed in; coverage/diffSize are measured here. A skipped gate records
   // whatever it spent (usually ~0).
   durationMs: number;
+  // The generic ablation marker (epic 8wi / Study B1): present (['enforcement'])
+  // ONLY on a FAILING gate that WOULD have blocked but was downgraded to warn by
+  // the enforcement ablation — so it is distinguishable from a gate configured as
+  // warn. Absent otherwise.
+  ablations?: AblationKey[];
 }
 
 export interface GatesOutcome {
@@ -103,7 +109,17 @@ export async function measureDiffSize(
 // block (additive-stricter — config may only tighten, never waive). Exported so
 // the lot manifest (epic yrk / Study B2) records the EFFECTIVE gate level a lot
 // enforced — the same clamp, from one source, never re-implemented.
-export function effectiveLevel(gate: GateName, configured: GateLevel): GateLevel {
+//
+// The enforcement ablation (epic 8wi / Study B1) is applied HERE, the ONE place
+// the effective level is decided: when active, EVERY gate is warn (including the
+// test/lint clamp) — enforcement is removed, but gates still run and their
+// failures still surface (dispatch routes warn failures to the bead + next round).
+export function effectiveLevel(
+  gate: GateName,
+  configured: GateLevel,
+  enforcementAblated = false,
+): GateLevel {
+  if (enforcementAblated) return 'warn';
   if (gate === 'test' || gate === 'lint') return 'block';
   return configured;
 }
@@ -126,6 +142,10 @@ export async function evaluateGates(
   timings: { healthMs?: number; lintMs?: number } = {},
 ): Promise<GatesOutcome> {
   const levels = kshetra.gates;
+  // Enforcement ablation (epic 8wi / Study B1): when active, every gate's effective
+  // level is warn — gates still run and failures still surface, only blocking is
+  // removed. Computed once and threaded through effectiveLevel (the one clamp site).
+  const enfAblated = isAblated(kshetra, 'enforcement');
   // Time coverage and diff-size at THEIR sites. They run under Promise.all, so
   // their durations overlap and must never be summed into a round total.
   const [coverageT, diffSizeT] = await Promise.all([
@@ -143,7 +163,7 @@ export async function evaluateGates(
   const results: GateResult[] = [
     {
       gate: 'test',
-      level: effectiveLevel('test', levels.test.level),
+      level: effectiveLevel('test', levels.test.level, enfAblated),
       passed: health.green,
       skipped: false,
       reason: health.green
@@ -154,7 +174,7 @@ export async function evaluateGates(
     },
     {
       gate: 'lint',
-      level: effectiveLevel('lint', levels.lint.level),
+      level: effectiveLevel('lint', levels.lint.level, enfAblated),
       passed: lint.passed,
       skipped: lint.skipped,
       reason: lint.passed
@@ -166,7 +186,7 @@ export async function evaluateGates(
     },
     {
       gate: 'coverage',
-      level: effectiveLevel('coverage', levels.coverage.level),
+      level: effectiveLevel('coverage', levels.coverage.level, enfAblated),
       passed: coverage.passed,
       skipped: coverage.skipped,
       reason: coverage.passed
@@ -178,7 +198,7 @@ export async function evaluateGates(
     },
     {
       gate: 'diffSize',
-      level: effectiveLevel('diffSize', levels.diffSize.level),
+      level: effectiveLevel('diffSize', levels.diffSize.level, enfAblated),
       passed: diffOk,
       skipped: diffSize === null,
       reason: diffOk
@@ -191,6 +211,18 @@ export async function evaluateGates(
       durationMs: diffSizeT.durationMs,
     },
   ];
+
+  // Mark the enforcement-ablated blockers: a FAILING gate that WOULD have blocked
+  // absent the ablation (its non-ablated effective level is 'block') now sits at
+  // warn — tag it with the generic marker so gate_result is distinguishable from a
+  // gate genuinely configured as warn (epic 8wi / Study B1).
+  if (enfAblated) {
+    for (const r of results) {
+      if (!r.passed && !r.skipped && effectiveLevel(r.gate, levels[r.gate].level, false) === 'block') {
+        r.ablations = ['enforcement'];
+      }
+    }
+  }
 
   const failing = results.filter(r => !r.passed);
   const blockers = failing.filter(r => r.level === 'block');

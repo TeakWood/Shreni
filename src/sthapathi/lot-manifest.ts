@@ -14,7 +14,7 @@ import { git } from './git.js';
 import { getBuildIdentity, type BuildIdentity } from './build-info.js';
 import { effectiveLevel, type GateLevel, type GateName } from './gates.js';
 import { AGENT_ROLES, resolveAgentModel, type KshetraConfig } from '../kshetra/config.js';
-import { activeAblations } from '../kshetra/ablation.js';
+import { activeAblations, isAblated } from '../kshetra/ablation.js';
 import { providerBin } from '../agents/providers/registry.js';
 import type { Provider } from '../agents/providers/types.js';
 
@@ -114,8 +114,11 @@ function sortKeys(v: unknown): unknown {
 // digest is stored; the config itself never is.
 export function hashResolvedConfig(kshetra: KshetraConfig): string {
   const clone = structuredClone(kshetra) as KshetraConfig;
+  // Record ENFORCED gate levels: apply the test/lint clamp AND the enforcement
+  // ablation (epic 8wi — every gate warn), so the hash reflects what was enforced.
+  const enfAblated = isAblated(kshetra, 'enforcement');
   for (const g of GATE_NAMES) {
-    clone.gates[g].level = effectiveLevel(g, clone.gates[g].level);
+    clone.gates[g].level = effectiveLevel(g, clone.gates[g].level, enfAblated);
   }
   // Redact credential references: an mcp server's secretEnv names the env var that
   // holds a token. The value never lives in the config, but redact the reference
@@ -133,7 +136,8 @@ export function hashResolvedConfig(kshetra: KshetraConfig): string {
 // (decision 5). Allowlist only — never the whole config.
 export function collectConfig(kshetra: KshetraConfig): Record<string, unknown> {
   const gates: Record<GateName, GateLevel> = {} as Record<GateName, GateLevel>;
-  for (const g of GATE_NAMES) gates[g] = effectiveLevel(g, kshetra.gates[g].level);
+  const enfAblated = isAblated(kshetra, 'enforcement');
+  for (const g of GATE_NAMES) gates[g] = effectiveLevel(g, kshetra.gates[g].level, enfAblated);
 
   const roles: Record<string, { provider: string; model: string }> = {};
   for (const role of AGENT_ROLES) roles[role] = resolveAgentModel(kshetra, role);

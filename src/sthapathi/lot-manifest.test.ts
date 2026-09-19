@@ -55,6 +55,15 @@ describe('collectConfig — inline effective values (epic yrk / Study B2, yrk.3)
     expect(cfg.ablations).toEqual(['review']);
   });
 
+  it('records every gate as warn under enforcement ablation, changing the config hash (epic 8wi)', () => {
+    const normal = collectConfig(ksh());
+    const ablated = collectConfig(ksh({ ablation: { enforcement: 'off' } }));
+    // Every gate is enforced at warn (including the test/lint clamp).
+    expect(ablated.gates).toEqual({ test: 'warn', lint: 'warn', coverage: 'warn', diffSize: 'warn' });
+    // And the enforced-config hash reflects it — an ablated config is distinct.
+    expect(ablated.resolvedConfigHash).not.toBe(normal.resolvedConfigHash);
+  });
+
   it('records the EFFECTIVE (clamped) gate level: a warn on test/lint is block', () => {
     const cfg = collectConfig(ksh({
       gates: {

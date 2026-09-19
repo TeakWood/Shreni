@@ -5,6 +5,8 @@ import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
 import { checkBaseBranch } from './base-branch.js';
 import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
+import { emit } from './activity-log.js';
+import { isAblated } from '../kshetra/ablation.js';
 import { REPO_MAP_RELATIVE_PATH } from '../kshetra/repo-map.js';
 import { loadState, pauseKshetra, recordProgress, recordStall, MISSING_BASE_BRANCH_REASON } from '../kshetra/state.js';
 import { appendNotification } from './notifications.js';
@@ -205,14 +207,32 @@ export async function prepareTask(task: Task, kshetra: KshetraConfig): Promise<T
   if (!isHealthBead(task)) {
     const health = await checkHealth(kshetra);
     if (!health.green) {
-      const created = await ensureHealthBead(kshetra, health.failCount);
-      recordStall(kshetra, 'base suite red');
-      console.warn(
-        `[shreni prepare:${kshetra.id}] base suite red ` +
-          `(${health.failCount} failing > baseline ${health.baseline}); ` +
-          `deferring ${task.id}, ${created ? 'queued' : 'awaiting'} health repair`,
-      );
-      return null;
+      // Enforcement ablation (epic 8wi / Study B1): the pickup health gate is a
+      // blocking point — under the ablation it does NOT defer and does NOT create a
+      // repair bead; it claims on a red suite. Record the suppression (decision-
+      // grade) so the ledger shows work was claimed on a red base — a gate_result
+      // for the synthetic 'pickup-health' gate at warn with the enforcement marker
+      // (round 0 = pre-round / pickup boundary).
+      if (isAblated(kshetra, 'enforcement')) {
+        emit({
+          type: 'gate_result', kshetra: kshetra.id, beadId: task.id, round: 0,
+          gate: 'pickup-health', verdict: 'warn', ablations: ['enforcement'],
+        });
+        console.warn(
+          `[shreni prepare:${kshetra.id}] base suite red ` +
+            `(${health.failCount} failing > baseline ${health.baseline}); ` +
+            `enforcement ablated — claiming ${task.id} on a red base (no repair bead)`,
+        );
+      } else {
+        const created = await ensureHealthBead(kshetra, health.failCount);
+        recordStall(kshetra, 'base suite red');
+        console.warn(
+          `[shreni prepare:${kshetra.id}] base suite red ` +
+            `(${health.failCount} failing > baseline ${health.baseline}); ` +
+            `deferring ${task.id}, ${created ? 'queued' : 'awaiting'} health repair`,
+        );
+        return null;
+      }
     }
   }
 

@@ -10,7 +10,12 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => (mockExecFile as (...a: unknown[]) => void)(...args),
 }));
 
-const { evaluateGates, runCoverageGate } = await import('./gates.js');
+const { evaluateGates, runCoverageGate, effectiveLevel } = await import('./gates.js');
+
+// An enforcement-ablated variant of a config (epic 8wi).
+function ablatedEnforcement(k: KshetraConfig): KshetraConfig {
+  return { ...k, ablation: { enforcement: 'off' } } as unknown as KshetraConfig;
+}
 
 function ksh(
   stack: Partial<KshetraConfig['stack']> & { language: string },
@@ -257,5 +262,50 @@ describe('evaluateGates', () => {
       expect(diff).toBeGreaterThanOrEqual(30);
       expect(wall).toBeLessThan(cov + diff); // parallel, not summed
     });
+  });
+});
+
+describe('effectiveLevel — the single clamp site (epic 8wi / Study B1)', () => {
+  it('clamps test/lint to block normally, and warns everything under enforcement ablation', () => {
+    // Normal: test/lint clamp to block; coverage/diffSize keep configured level.
+    expect(effectiveLevel('test', 'warn')).toBe('block');
+    expect(effectiveLevel('lint', 'warn')).toBe('block');
+    expect(effectiveLevel('coverage', 'warn')).toBe('warn');
+    expect(effectiveLevel('coverage', 'block')).toBe('block');
+    // Enforcement ablated: EVERY gate is warn, including the test/lint clamp.
+    expect(effectiveLevel('test', 'block', true)).toBe('warn');
+    expect(effectiveLevel('lint', 'block', true)).toBe('warn');
+    expect(effectiveLevel('coverage', 'block', true)).toBe('warn');
+  });
+});
+
+describe('evaluateGates under enforcement ablation (epic 8wi / Study B1)', () => {
+  it('turns a failing blocking gate into a warning marked ablated — gates pass overall', async () => {
+    execRoutes();
+    const o = await evaluateGates(ablatedEnforcement(ksh({ language: 'typescript' })), redHealth, cleanLint, 'bead-1/x');
+    expect(o.passed).toBe(true);      // enforcement removed → no blockers
+    expect(o.blockers).toHaveLength(0);
+    const test = o.results.find(r => r.gate === 'test')!;
+    expect(test.level).toBe('warn');
+    expect(test.passed).toBe(false);
+    expect(test.ablations).toEqual(['enforcement']); // distinguishable from a configured warn
+    expect(o.warnings.some(w => w.gate === 'test')).toBe(true);
+  });
+
+  it('does not mark a passing gate as ablated', async () => {
+    execRoutes();
+    const o = await evaluateGates(ablatedEnforcement(ksh({ language: 'typescript' })), greenHealth, cleanLint, 'bead-1/x');
+    const test = o.results.find(r => r.gate === 'test')!;
+    expect(test.passed).toBe(true);
+    expect(test.ablations).toBeUndefined();
+  });
+
+  it('without the ablation, test/lint stay clamped to block (unchanged)', async () => {
+    execRoutes();
+    const o = await evaluateGates(ksh({ language: 'typescript' }), redHealth, cleanLint, 'bead-1/x');
+    const test = o.results.find(r => r.gate === 'test')!;
+    expect(test.level).toBe('block');
+    expect(test.ablations).toBeUndefined();
+    expect(o.passed).toBe(false); // test is a blocker
   });
 });
