@@ -12,6 +12,7 @@ import { resolveTargetKshetra } from './suthradhara';
 import { logPath, usagePath } from '../sthapathi/activity-log';
 import { readNotifications } from '../sthapathi/notifications';
 import { computeMetrics, computeTurnSeries, type Metrics, type BeadInteraction, type LotTimeBreakdown } from '../sthapathi/metrics';
+import { ABLATIONS } from '../kshetra/ablation';
 import type { LoggedEvent } from '../sthapathi/activity-log';
 import type { UsageEntry } from '../ext/types';
 import type { KshetraConfig } from '../kshetra/config';
@@ -197,6 +198,21 @@ export function renderReport(kshetraId: string, m: Metrics): string {
       lines.push(
         `  cost is a LOWER BOUND: ${fmtInt(m.unpricedRuns)} unpriced run${m.unpricedRuns === 1 ? '' : 's'} (no price-table entry)`,
       );
+    }
+  }
+
+  // Ablated work (epic 8wi / Study B1). Only when there IS ablated data, so a
+  // normal report is byte-identical. Its spend is already in the tokens table
+  // above; this section flags that these beads are excluded from the quality
+  // metrics and lists the count per switch (friendly label from the registry when
+  // known, the raw key otherwise — a new switch needs no change here).
+  if (m.ablated.beads.length > 0) {
+    lines.push('');
+    lines.push('Ablated (excluded from reject rate / rounds-to-approve — spend still counted)');
+    lines.push(`  Ablated beads       ${fmtInt(m.ablated.beads.length)}  (${m.ablated.beads.join(', ')})`);
+    for (const [label, count] of Object.entries(m.ablated.byLabel).sort(([a], [b]) => a.localeCompare(b))) {
+      const known = (ABLATIONS as Record<string, { description: string }>)[label];
+      lines.push(`  ${label.padEnd(18)}${fmtInt(count)} bead${count === 1 ? '' : 's'}${known ? `  — ${known.description}` : ''}`);
     }
   }
 

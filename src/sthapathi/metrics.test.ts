@@ -142,6 +142,7 @@ describe('computeMetrics — empty log', () => {
       perBead: [], totalTokens: 0, totalCostUsd: 0, unpricedRuns: 0,
       perRunContext: [], perBeadContext: [],
       lots: [],
+      ablated: { beads: [], byLabel: {} },
     });
   });
 
@@ -396,5 +397,69 @@ describe('computeLotBreakdowns (epic hto / Study A3)', () => {
     const interactions = [{ issue_id: 'b1', created_at: '2026-09-15T05:00:00.000Z', kind: 'field_change', actor: 'human' }];
     const [lot] = computeMetrics({ events, notifications, interactions }).lots;
     expect(lot.waitingOnHumanMs).toBe(30 * 60 * 1000); // 00:30 → 01:00 (lot end), not → 05:00
+  });
+});
+
+// ── ablation exclusion + reporting (epic 8wi / Study B1) ──────────────────────
+
+describe('computeMetrics — ablation exclusion (epic 8wi / Study B1)', () => {
+  it('excludes review-ablated beads from quality metrics, lists them per switch, keeps spend', () => {
+    const m = computeMetrics({
+      events: [
+        // normal bead: rejected once then approved in 2 rounds
+        review('b1', 'REJECT', 1), review('b1', 'APPROVE', 2), taskDone('b1', true, 2),
+        // review-ablated bead: merged without review
+        ev({ type: 'review_ablated', kshetra: K, beadId: 'b2', round: 1, ablations: ['review'] }),
+        taskDone('b2', true, 1),
+      ],
+      usage: [usage('b2', { inputTokens: 100, costUsd: 0.5 })],
+    });
+    // Quality metrics over the NORMAL bead only.
+    expect(m.rejectRate).toBe(0.5);                       // 1/2 rounds (b1); b2 has no review
+    expect(m.avgRoundsToApprove).toBe(2);                // b1's 2 rounds; b2 excluded
+    expect(m.roundsToApproveDistribution).toEqual({ 2: 1 });
+    // Ablated listing.
+    expect(m.ablated.beads).toEqual(['b2']);
+    expect(m.ablated.byLabel).toEqual({ review: 1 });
+    // Raw counts + spend still include the ablated bead.
+    expect(m.totalTasks).toBe(2);
+    expect(m.approvedTasks).toBe(2);
+    expect(m.totalTokens).toBe(100);
+    expect(m.totalCostUsd).toBe(0.5);
+    expect(m.perBead.map(b => b.beadId)).toContain('b2');
+  });
+
+  it('excludes an enforcement-ablated bead\'s review rounds from reject rate', () => {
+    const m = computeMetrics({
+      events: [
+        review('b1', 'REJECT', 1), review('b1', 'APPROVE', 2), taskDone('b1', true, 2), // normal
+        // enforcement-ablated: a warn+ablated gate_result AND a real viharapala_done
+        ev({ type: 'gate_result', kshetra: K, beadId: 'b2', round: 1, gate: 'test', verdict: 'warn', ablations: ['enforcement'] }),
+        review('b2', 'APPROVE', 1), taskDone('b2', true, 1),
+      ],
+    });
+    expect(m.totalRounds).toBe(2);          // b1 only; b2's review round excluded
+    expect(m.rejectRate).toBe(0.5);
+    expect(m.avgRoundsToApprove).toBe(2);   // b1 only
+    expect(m.ablated.beads).toEqual(['b2']);
+    expect(m.ablated.byLabel).toEqual({ enforcement: 1 });
+  });
+
+  it('excludes and labels a hypothetical new switch generically (no metrics code change)', () => {
+    const m = computeMetrics({
+      events: [
+        taskDone('b1', true, 1), // normal
+        { type: 'gate_result', kshetra: K, beadId: 'bx', round: 1, gate: 'test', verdict: 'warn', ablations: ['newswitch'], ts: '2026-09-15T00:00:00.000Z', schemaVersion: 1 } as unknown as LoggedEvent,
+        taskDone('bx', true, 1),
+      ],
+    });
+    expect(m.ablated.beads).toEqual(['bx']);
+    expect(m.ablated.byLabel).toEqual({ newswitch: 1 });
+    expect(m.avgRoundsToApprove).toBe(1); // b1 only (bx excluded)
+  });
+
+  it('reports no ablated data for a normal run', () => {
+    const m = computeMetrics({ events: [taskDone('b1', true, 1)] });
+    expect(m.ablated).toEqual({ beads: [], byLabel: {} });
   });
 });

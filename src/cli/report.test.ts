@@ -237,3 +237,23 @@ describe('runReport --json (epic hto)', () => {
     expect(typeof parsed.lots[0].unexplainedMs).toBe('number');
   });
 });
+
+describe('renderReport — ablated section (epic 8wi / Study B1)', () => {
+  it('lists ablated beads per switch when there is ablated data', () => {
+    const out = renderReport(K, computeMetrics({
+      events: [
+        ev({ type: 'review_ablated', kshetra: K, beadId: 'b2', round: 1, ablations: ['review'] }),
+        taskDone('b2', true, 1),
+      ],
+    }));
+    expect(out).toContain('Ablated (excluded from reject rate');
+    expect(out).toContain('Ablated beads       1');
+    expect(out).toContain('b2');
+    expect(out).toMatch(/review\s+1 bead/);
+  });
+
+  it('omits the ablated section entirely for a normal run (byte-identical)', () => {
+    const out = renderReport(K, computeMetrics({ events: [taskDone('b1', true, 1)] }));
+    expect(out).not.toContain('Ablated');
+  });
+});

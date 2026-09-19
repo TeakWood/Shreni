@@ -186,6 +186,13 @@ export interface Metrics {
   // Per-lot time breakdown (epic hto / Study A3), one entry per worker_started
   // lot, in first-seen order. Empty when no lot manifest was recorded (pre-B2).
   lots: LotTimeBreakdown[];
+
+  // Ablated work (epic 8wi / Study B1). `beads` are the beadIds excluded from the
+  // product-quality metrics above (their spend is still in perBead/totals);
+  // `byLabel` counts ablated beads per switch, keyed off the generic marker so a
+  // new switch appears with no metrics-code change. Empty when nothing was ablated
+  // (the report omits the section, so output is byte-identical to before).
+  ablated: { beads: string[]; byLabel: Record<string, number> };
 }
 
 // The three parsed feeds. Any may be empty/omitted — a Kshetra that has run
@@ -217,28 +224,60 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
   const usage = input.usage ?? [];
   const notifications = input.notifications ?? [];
 
+  // --- Ablated beads (epic 8wi / Study B1) ---
+  // A bead is ablated if ANY of its events carries a non-empty generic `ablations`
+  // marker (review_ablated carries ['review']; a suppressed-blocker gate_result
+  // carries ['enforcement']). Keyed off the marker, NOT switch names, so a new
+  // switch needs no change here. Ablated beads are EXCLUDED from the product-quality
+  // metrics (rejectRate, avgRoundsToApprove, the distribution) so they stay honest,
+  // and reported separately per switch; their token/cost spend is still counted
+  // (it was real — the usage feed is not filtered).
+  const ablatedBeads = new Set<string>();
+  const ablatedByLabel: Record<string, number> = {};
+  const switchBeads = new Map<string, Set<string>>();
+  for (const ev of events) {
+    const abls = (ev as { ablations?: unknown }).ablations;
+    const beadId = (ev as { beadId?: unknown }).beadId;
+    if (typeof beadId !== 'string' || !Array.isArray(abls) || abls.length === 0) continue;
+    ablatedBeads.add(beadId);
+    for (const s of abls) {
+      const label = String(s);
+      let set = switchBeads.get(label);
+      if (!set) { set = new Set<string>(); switchBeads.set(label, set); }
+      set.add(beadId);
+    }
+  }
+  for (const [label, set] of switchBeads) ablatedByLabel[label] = set.size;
+
   // --- Task outcomes + rounds-to-approve (task_done) ---
+  // totalTasks / approvedTasks are raw counts over ALL beads; the AVERAGE and
+  // distribution exclude ablated beads (product-quality metric).
   let totalTasks = 0;
   let approvedTasks = 0;
   const roundsToApproveDistribution: Record<number, number> = {};
   let roundsToApproveSum = 0;
+  let nonAblatedApproved = 0;
   for (const ev of events) {
     if (ev.type !== 'task_done') continue;
     totalTasks++;
     if (ev.approved) {
       approvedTasks++;
-      roundsToApproveSum += ev.rounds;
-      roundsToApproveDistribution[ev.rounds] = (roundsToApproveDistribution[ev.rounds] ?? 0) + 1;
+      if (!ablatedBeads.has(ev.beadId)) {
+        nonAblatedApproved++;
+        roundsToApproveSum += ev.rounds;
+        roundsToApproveDistribution[ev.rounds] = (roundsToApproveDistribution[ev.rounds] ?? 0) + 1;
+      }
     }
   }
   const avgRoundsToApprove =
-    approvedTasks === 0 ? 0 : Math.round((roundsToApproveSum / approvedTasks) * 100) / 100;
+    nonAblatedApproved === 0 ? 0 : Math.round((roundsToApproveSum / nonAblatedApproved) * 100) / 100;
 
-  // --- Reject rate over review rounds (viharapala_done) ---
+  // --- Reject rate over review rounds (viharapala_done), ablated beads excluded ---
   let totalRounds = 0;
   let rejectedRounds = 0;
   for (const ev of events) {
     if (ev.type !== 'viharapala_done') continue;
+    if (ablatedBeads.has(ev.beadId)) continue;
     totalRounds++;
     if (ev.verdict !== 'APPROVE') rejectedRounds++;
   }
@@ -360,6 +399,10 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
     perRunContext,
     perBeadContext,
     lots: computeLotBreakdowns(events, notifications, input.interactions ?? []),
+    ablated: {
+      beads: [...ablatedBeads].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })),
+      byLabel: ablatedByLabel,
+    },
   };
 }
 
