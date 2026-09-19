@@ -6,11 +6,12 @@
 // and the presentation.
 
 import { readFileSync } from 'fs';
+import { join } from 'path';
 import { loadRegistry } from '../kshetra/registry';
 import { resolveTargetKshetra } from './suthradhara';
 import { logPath, usagePath } from '../sthapathi/activity-log';
 import { readNotifications } from '../sthapathi/notifications';
-import { computeMetrics, computeTurnSeries, type Metrics } from '../sthapathi/metrics';
+import { computeMetrics, computeTurnSeries, type Metrics, type BeadInteraction, type LotTimeBreakdown } from '../sthapathi/metrics';
 import type { LoggedEvent } from '../sthapathi/activity-log';
 import type { UsageEntry } from '../ext/types';
 import type { KshetraConfig } from '../kshetra/config';
@@ -40,16 +41,22 @@ function readJsonl<T>(path: string): T[] {
   return out;
 }
 
-// Gather the three feeds for a Kshetra into the aggregator's input shape.
-export function readFeeds(kshetraId: string): {
+// Gather the feeds for a Kshetra into the aggregator's input shape. The three
+// per-Kshetra feeds live under ~/.shreni/kshetra/<id>/; interactions.jsonl lives
+// in the BEADS repo (git-tracked since 4a2.7), so it takes the beads path — the
+// waiting-on-human derivation (epic hto) reads it. beads path optional so callers
+// with only an id (older tests) still work — interactions default to [].
+export function readFeeds(kshetraId: string, beadsPath?: string): {
   events: LoggedEvent[];
   usage: UsageEntry[];
   notifications: ReturnType<typeof readNotifications>;
+  interactions: BeadInteraction[];
 } {
   return {
     events: readJsonl<LoggedEvent>(logPath(kshetraId)),
     usage: readJsonl<UsageEntry>(usagePath(kshetraId)),
     notifications: readNotifications(kshetraId),
+    interactions: beadsPath ? readJsonl<BeadInteraction>(join(beadsPath, 'interactions.jsonl')) : [],
   };
 }
 
@@ -68,6 +75,22 @@ function fmtPct(rate: number): string {
 // USD with four decimals — small per-run costs would round to $0.00 at two.
 function fmtCost(usd: number): string {
   return `$${usd.toFixed(4)}`;
+}
+
+// A monotonic duration in ms → a compact, stable, locale-free string:
+// "1h 4m", "44m 12s", "2.3s", "180ms". null → "unknown" (pre-A3 data, epic hto) —
+// never silently rendered as 0.
+function fmtDuration(ms: number | null): string {
+  if (ms === null) return 'unknown';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSec = ms / 1000;
+  if (totalSec < 60) return `${totalSec.toFixed(1)}s`;
+  const s = Math.round(totalSec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${sec}s`;
 }
 
 // Render the rounds-to-approve distribution as "1×7, 2×3" (rounds×count),
@@ -177,7 +200,42 @@ export function renderReport(kshetraId: string, m: Metrics): string {
     }
   }
 
+  // Time breakdown per lot (epic hto / Study A3). Added section — the existing
+  // report above is unchanged, so old snapshots pass apart from this addition.
+  if (m.lots.length > 0) {
+    lines.push('');
+    lines.push('Time breakdown (per lot)');
+    for (const lot of m.lots) lines.push(...renderLotTime(lot));
+  }
+
   return lines.join('\n');
+}
+
+// One lot's time breakdown block. Shreni elapsed on top, then where it went, with
+// the unexplained residual (and its %) as the instrumentation's validity check.
+function renderLotTime(lot: LotTimeBreakdown): string[] {
+  const short = lot.lotId.slice(0, 8);
+  const lines: string[] = [
+    `  Lot ${short}${lot.entrypoint ? ` · ${lot.entrypoint}` : ''} · elapsed ${fmtDuration(lot.shreniElapsedMs)}`,
+  ];
+  const sessionsDetail = lot.roles.length
+    ? lot.roles.map(r => `${r.agent} ${fmtDuration(r.durationMs)} (${r.sessions})${r.unknownSessions ? ` +${r.unknownSessions} unknown` : ''}`).join(', ')
+    : '';
+  lines.push(`    agent sessions    ${fmtDuration(lot.sessionsMs)}${sessionsDetail ? `   ${sessionsDetail}` : ''}`);
+  const gatesDetail = lot.gates.length
+    ? lot.gates.map(g => `${g.gate} ${fmtDuration(g.durationMs)} (${g.runs})`).join(', ')
+    : '';
+  lines.push(`    gates             ${fmtDuration(lot.gatesMs)}${gatesDetail ? `   ${gatesDetail}` : ''}`);
+  lines.push(`    merge + sync      ${fmtDuration(lot.mergeMs)} + ${fmtDuration(lot.syncMs)}`);
+  lines.push(`    select / prepare  ${fmtDuration(lot.selectMs)} / ${fmtDuration(lot.prepareMs)}`);
+  lines.push(`    idle (poll)       ${fmtDuration(lot.idleMs)}`);
+  lines.push(`    waiting on human  ${fmtDuration(lot.waitingOnHumanMs)}`);
+  const pct = lot.unexplainedPct === null ? '' : `  (${fmtPct(lot.unexplainedPct)})`;
+  lines.push(`    unexplained       ${fmtDuration(lot.unexplainedMs)}${pct}`);
+  if (lot.hasUnknownDurations) {
+    lines.push('    (some durations are pre-A3 unknown and fall into unexplained)');
+  }
+  return lines;
 }
 
 // ── command entry ────────────────────────────────────────────────────────────
@@ -191,12 +249,16 @@ export interface ReportOpts {
   // the terminal table — the machine-readable input to E1 Figure 1. The default
   // (unset) text report is unchanged.
   turns?: boolean;
+  // `--json`: emit the full computed metrics (incl. the per-lot time breakdown
+  // with shreniElapsedMs and every field, epic hto / Study A3) as one JSON object,
+  // so the study driver can read Shreni elapsed and compute driver-wall − elapsed.
+  json?: boolean;
 }
 
 export function runReport(opts: ReportOpts): void {
   const kshetras = opts.kshetras ?? loadRegistry();
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
-  const feeds = readFeeds(kshetra.id);
+  const feeds = readFeeds(kshetra.id, kshetra.beads.path);
   if (opts.turns) {
     // One JSON object per line (JSONL): streams row-by-row into a plotting/
     // analysis pipeline without loading the whole array, and matches the JSONL
@@ -205,5 +267,11 @@ export function runReport(opts: ReportOpts): void {
     return;
   }
   const metrics = computeMetrics(feeds);
+  if (opts.json) {
+    // Machine-readable: the whole metrics snapshot, so the driver reads
+    // lots[].shreniElapsedMs and every breakdown field without scraping the table.
+    console.log(JSON.stringify({ kshetra: kshetra.id, ...metrics }, null, 2));
+    return;
+  }
   console.log(renderReport(kshetra.id, metrics));
 }

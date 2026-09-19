@@ -400,15 +400,18 @@ export const COMMANDS: Command[] = [
   {
     name: 'report',
     summary: 'Print a terminal table of run metrics (tasks, review quality, tokens, cost) for a kshetra',
-    usage: '[@<id> | --kshetra <id>] [--turns]',
+    usage: '[@<id> | --kshetra <id>] [--turns] [--json]',
     run(ctx) {
       return runReport({
         args: ctx.args,
         flagKshetra: ctx.flag('--kshetra'),
         cwd: process.cwd(),
         // --turns: emit the per-turn context series as JSONL (epic 408/A1) instead
-        // of the table. --json is accepted alongside it for discoverability.
+        // of the table. Takes precedence over --json.
         turns: ctx.has('--turns'),
+        // --json: emit the full metrics (incl. the per-lot time breakdown, epic hto)
+        // as one JSON object for the study driver.
+        json: ctx.has('--json'),
       });
     },
   },

@@ -141,6 +141,7 @@ describe('computeMetrics — empty log', () => {
       escalations: 0, escalationRate: 0, stuckEvents: 0, stuckRate: 0,
       perBead: [], totalTokens: 0, totalCostUsd: 0, unpricedRuns: 0,
       perRunContext: [], perBeadContext: [],
+      lots: [],
     });
   });
 
@@ -272,5 +273,128 @@ describe('computeMetrics — tokens & cost per bead', () => {
     });
     // Lexicographic would give myapp-1, myapp-10, myapp-2; natural gives 1, 2, 10.
     expect(m.perBead.map(b => b.beadId)).toEqual(['myapp-1', 'myapp-2', 'myapp-10']);
+  });
+});
+
+// ── per-lot time breakdown (epic hto / Study A3) ──────────────────────────────
+
+describe('computeLotBreakdowns (epic hto / Study A3)', () => {
+  const LOT = 'lot-aaaa1111';
+  // A lot-scoped event with an explicit ts (for the elapsed span) and lotId envelope.
+  function le(type: string, ts: string, over: Record<string, unknown> = {}): LoggedEvent {
+    return { type, kshetra: K, lotId: LOT, ts, schemaVersion: 1, ...over } as LoggedEvent;
+  }
+
+  it('breaks a lot into parts whose sum plus unexplained equals Shreni elapsed exactly', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      le('run_usage', '2026-09-15T00:01:00.000Z', { beadId: 'b1', agent: 'silpi', provider: 'anthropic', model: 'm', inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, outcome: 'ok', durationMs: 120000 }),
+      le('silpi_done', '2026-09-15T00:02:00.000Z', { beadId: 'b1', round: 1, summary: '', confidence: 1, files: [], lintPassed: true, testsPassed: true, gatesElapsedMs: 50000 }),
+      le('gate_result', '2026-09-15T00:02:00.000Z', { beadId: 'b1', round: 1, gate: 'test', verdict: 'pass', durationMs: 44000 }),
+      le('gate_result', '2026-09-15T00:02:00.000Z', { beadId: 'b1', round: 1, gate: 'coverage', verdict: 'pass', durationMs: 30000 }),
+      le('merge_done', '2026-09-15T00:03:00.000Z', { beadId: 'b1', mergePolicy: 'push', durationMs: 8000 }),
+      le('beads_synced', '2026-09-15T00:03:10.000Z', { durationMs: 2000 }),
+      le('phase_changed', '2026-09-15T00:03:20.000Z', { from: 'SELECTING', to: 'PREPARING', heldMs: 1000 }),
+      le('phase_changed', '2026-09-15T00:03:21.000Z', { from: 'PREPARING', to: 'WORKING', heldMs: 3000 }),
+      le('phase_changed', '2026-09-15T00:03:22.000Z', { from: 'IDLE', to: 'SELECTING', heldMs: 10000 }),
+      le('task_done', '2026-09-15T00:05:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.shreniElapsedMs).toBe(300000); // 00:00:00 → 00:05:00
+    expect(lot.sessionsMs).toBe(120000);
+    expect(lot.gatesMs).toBe(50000);
+    expect(lot.mergeMs).toBe(8000);
+    expect(lot.syncMs).toBe(2000);
+    expect(lot.selectMs).toBe(1000);
+    expect(lot.prepareMs).toBe(3000);
+    expect(lot.idleMs).toBe(10000);
+    expect(lot.waitingOnHumanMs).toBe(0);
+    expect(lot.unexplainedMs).toBe(106000); // 300000 − (120000+50000+8000+2000+1000+3000+10000)
+    // Identity: every part plus unexplained equals elapsed, exactly.
+    const sum = lot.sessionsMs + lot.gatesMs + lot.mergeMs + lot.syncMs + lot.selectMs +
+      lot.prepareMs + lot.idleMs + lot.waitingOnHumanMs + (lot.unexplainedMs ?? 0);
+    expect(sum).toBe(lot.shreniElapsedMs);
+  });
+
+  it('does not double-count parallel gates — the round total is not the per-gate sum', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      le('silpi_done', '2026-09-15T00:01:00.000Z', { beadId: 'b1', round: 1, summary: '', confidence: 1, files: [], lintPassed: true, testsPassed: true, gatesElapsedMs: 50000 }),
+      le('gate_result', '2026-09-15T00:01:00.000Z', { beadId: 'b1', round: 1, gate: 'coverage', verdict: 'pass', durationMs: 40000 }),
+      le('gate_result', '2026-09-15T00:01:00.000Z', { beadId: 'b1', round: 1, gate: 'diffSize', verdict: 'pass', durationMs: 40000 }),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    // Round total is the measured block elapsed, strictly less than the per-gate sum.
+    expect(lot.gatesMs).toBe(50000);
+    const perGateSum = lot.gates.reduce((s, g) => s + g.durationMs, 0);
+    expect(perGateSum).toBe(80000);
+    expect(lot.gatesMs).toBeLessThan(perGateSum);
+  });
+
+  it('attributes an escalation wait to waiting-on-human, not idle, ending at the human interaction', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      // 2h of idle polling accrued while the worker was paused, awaiting a human.
+      le('phase_changed', '2026-09-15T02:10:00.000Z', { from: 'IDLE', to: 'SELECTING', heldMs: 7200000, polls: 240 }),
+      le('task_done', '2026-09-15T02:10:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
+    ];
+    const notifications: Notification[] = [
+      { ts: '2026-09-15T00:10:00.000Z', event: ESCALATION_EVENT, beadId: 'b1', message: 'escalated' },
+    ];
+    // The human acted 2h after the escalation.
+    const interactions = [{ issue_id: 'b1', created_at: '2026-09-15T02:10:00.000Z', kind: 'field_change', actor: 'human' }];
+    const [lot] = computeMetrics({ events, notifications, interactions }).lots;
+    expect(lot.waitingOnHumanMs).toBe(7200000); // 2h attributed to waiting…
+    expect(lot.idleMs).toBe(0);                  // …and subtracted from idle, not double-counted
+  });
+
+  it('shows missing durations as unknown and folds their time into unexplained, never zero', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      // run_usage WITHOUT durationMs (pre-A3 data).
+      le('run_usage', '2026-09-15T00:01:00.000Z', { beadId: 'b1', agent: 'silpi', provider: 'anthropic', model: 'm', inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, outcome: 'ok' }),
+      le('task_done', '2026-09-15T00:05:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.hasUnknownDurations).toBe(true);
+    expect(lot.sessionsMs).toBe(0); // not summed as a real 0…
+    expect(lot.roles[0]).toMatchObject({ agent: 'silpi', sessions: 1, unknownSessions: 1 });
+    // …the unrecorded session time lands in unexplained (≈ the full elapsed).
+    expect(lot.unexplainedMs).toBe(300000);
+  });
+
+  it('reports no lots for pre-B2 events that carry no lotId', () => {
+    const m = computeMetrics({ events: [taskDone('b1', true, 1)] }); // no lotId
+    expect(m.lots).toEqual([]);
+  });
+
+  it('merges overlapping escalation windows so a shared resolution is counted once', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      le('task_done', '2026-09-15T03:00:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
+    ];
+    // Two escalations on the same bead 30m apart, both resolved by ONE interaction
+    // at 02:00. Windows [00:30,02:00] and [01:00,02:00] overlap → union is 90m, not 150m.
+    const notifications: Notification[] = [
+      { ts: '2026-09-15T00:30:00.000Z', event: ESCALATION_EVENT, beadId: 'b1', message: 'e1' },
+      { ts: '2026-09-15T01:00:00.000Z', event: STUCK_EVENT, beadId: 'b1', message: 'e2' },
+    ];
+    const interactions = [{ issue_id: 'b1', created_at: '2026-09-15T02:00:00.000Z', kind: 'field_change', actor: 'human' }];
+    const [lot] = computeMetrics({ events, notifications, interactions }).lots;
+    expect(lot.waitingOnHumanMs).toBe(90 * 60 * 1000); // union of the two windows, not the sum
+  });
+
+  it('clips a waiting window to the lot end when the human resolves after the lot', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      le('task_done', '2026-09-15T01:00:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
+    ];
+    const notifications: Notification[] = [
+      { ts: '2026-09-15T00:30:00.000Z', event: ESCALATION_EVENT, beadId: 'b1', message: 'e1' },
+    ];
+    // Human resolved at 05:00 — long after the lot ended at 01:00.
+    const interactions = [{ issue_id: 'b1', created_at: '2026-09-15T05:00:00.000Z', kind: 'field_change', actor: 'human' }];
+    const [lot] = computeMetrics({ events, notifications, interactions }).lots;
+    expect(lot.waitingOnHumanMs).toBe(30 * 60 * 1000); // 00:30 → 01:00 (lot end), not → 05:00
   });
 });

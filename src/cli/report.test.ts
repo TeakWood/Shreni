@@ -187,3 +187,53 @@ describe('runReport', () => {
     expect(printed.join('\n')).not.toContain('Run metrics');
   });
 });
+
+// ── time breakdown (epic hto / Study A3) ──────────────────────────────────────
+
+function le(type: string, ts: string, over: Record<string, unknown> = {}): LoggedEvent {
+  return { type, kshetra: K, lotId: 'lot-aaaa1111', ts, schemaVersion: 1, ...over } as LoggedEvent;
+}
+const LOT_EVENTS: LoggedEvent[] = [
+  le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+  le('run_usage', '2026-09-15T00:01:00.000Z', { beadId: 'b1', agent: 'silpi', provider: 'anthropic', model: 'm', inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, outcome: 'ok', durationMs: 120000 }),
+  le('silpi_done', '2026-09-15T00:02:00.000Z', { beadId: 'b1', round: 1, summary: '', confidence: 1, files: [], lintPassed: true, testsPassed: true, gatesElapsedMs: 50000 }),
+  le('task_done', '2026-09-15T00:05:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
+];
+
+describe('renderReport — time breakdown (epic hto)', () => {
+  it('renders a per-lot breakdown with elapsed, sessions, and the unexplained residual', () => {
+    const out = renderReport(K, computeMetrics({ events: LOT_EVENTS }));
+    expect(out).toContain('Time breakdown (per lot)');
+    expect(out).toContain('Lot lot-aaaa · worker · elapsed 5m 0s');
+    expect(out).toContain('agent sessions    2m 0s');
+    expect(out).toContain('gates             50.0s');
+    expect(out).toContain('unexplained');
+  });
+
+  it('omits the breakdown for pre-B2 data (no lots)', () => {
+    const out = renderReport(K, computeMetrics({ events: [taskDone('b1', true, 1)] }));
+    expect(out).not.toContain('Time breakdown');
+  });
+});
+
+describe('runReport --json (epic hto)', () => {
+  it('emits the full metrics incl. per-lot shreniElapsedMs and breakdown fields', () => {
+    mockLoadRegistry.mockReturnValue([KSHETRA]);
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path.endsWith('activity.jsonl')) return LOT_EVENTS.map(e => JSON.stringify(e)).join('\n') + '\n';
+      const e = new Error('ENOENT') as NodeJS.ErrnoException;
+      e.code = 'ENOENT';
+      throw e;
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
+    const printed = log.mock.calls.map(c => c[0]).join('\n');
+    log.mockRestore();
+    const parsed = JSON.parse(printed) as { kshetra: string; lots: Array<{ shreniElapsedMs: number; sessionsMs: number; unexplainedMs: number }> };
+    expect(parsed.kshetra).toBe(K);
+    expect(parsed.lots).toHaveLength(1);
+    expect(parsed.lots[0].shreniElapsedMs).toBe(300000);
+    expect(parsed.lots[0].sessionsMs).toBe(120000);
+    expect(typeof parsed.lots[0].unexplainedMs).toBe('number');
+  });
+});
