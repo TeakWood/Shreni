@@ -10,7 +10,7 @@ import { branchName } from '../sthapathi/branch';
 import { touchHeartbeat, emitLotManifest } from '../sthapathi/activity-log';
 import { collectLotManifest } from '../sthapathi/lot-manifest';
 import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '../sthapathi/self-heal';
-import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase } from '../kshetra/state';
+import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase, setAblations } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
 import { reconcilePullRequests } from '../sthapathi/merge';
 import { selectFollowup } from '../sthapathi/pr-followup';
@@ -20,6 +20,7 @@ import { extensionCore, getPolicySource, makeBudgetPolicy, makeLedgerSink, exten
 import { join } from 'path';
 import { findRoleCredentialGaps } from './provider-preflight';
 import { parseLabels } from './labels';
+import { ablationGuardError, ablationBanner, activeAblations } from '../kshetra/ablation';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -45,6 +46,16 @@ if (!kshetra) {
 // `--label key=value` args after the kshetra id. Already shape-validated by the
 // `start` command before spawning; re-parsed here so they reach the lot manifest.
 const labels = parseLabels(process.argv.slice(3));
+
+// Ablation guard (epic 8wi / Study B1): `shreni start` already refused an ablated
+// Kshetra without --allow-ablation, but __worker can be invoked directly — gate
+// defensively so a copied config can never silently weaken a real repo.
+const allowAblation = process.argv.includes('--allow-ablation');
+const ablationErr = ablationGuardError(kshetra, allowAblation);
+if (ablationErr) {
+  console.error(`[shreni worker:${kshetraId}] ${ablationErr}`);
+  process.exit(1);
+}
 
 // Credential preflight (b0f.3): with per-role providers a worker may drive
 // several providers at once. Verify every role's provider has credentials NOW —
@@ -171,6 +182,11 @@ async function startup(): Promise<void> {
   // loop arms, so a registered extension's sinks/meter are in place from the very
   // first event. Fail-open: a missing/throwing extension degrades to the local
   // defaults with one log line (extension-points.md §"Loading an extension").
+  // Loud ablation banner (epic 8wi / Study B1): one line per active switch, so an
+  // operator watching the worker log can never miss that the harness is weakened.
+  // Also persist the active switches so `shreni status` / Phalaka flag them.
+  for (const line of ablationBanner(kshetra!)) console.log(`[shreni worker:${kshetraId}] ${line}`);
+  setAblations(kshetra!, activeAblations(kshetra!));
   const extensionLoaded = await loadExtension({ log: msg => console.log(`[shreni worker:${kshetraId}] ${msg}`) });
   // Snapshot which seams the extension overrode (epic yrk / Study B2) RIGHT NOW —
   // before we compose our own budget policy / register the ledger sink below, which
@@ -197,7 +213,7 @@ async function startup(): Promise<void> {
   // Collection is bounded (parallel probes with timeouts) so it never stalls start.
   const sections = await collectLotManifest(kshetra!, {
     loaded: extensionLoaded, moduleId: extensionModuleId, seams: extensionSeams,
-  });
+  }, { allowAblation });
   emitLotManifest(kshetra!.id, 'worker', labels, sections);
   await sync();
   const resumable = await recoverKshetra(kshetra!);

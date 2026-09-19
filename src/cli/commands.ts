@@ -31,18 +31,22 @@ import { runShow } from './show';
 import { runInit } from './init';
 import { runTelemetry } from './telemetry';
 import { parseLabels } from './labels';
+import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
 
 export const COMMANDS: Command[] = [
   {
     name: 'start',
     summary: 'Start worker daemons (and the phalaka dashboard) for registered kshetras',
-    usage: '[--kshetra <id>] [--label key=value ...]',
+    usage: '[--kshetra <id>] [--label key=value ...] [--allow-ablation]',
     run(ctx) {
       const id = ctx.flag('--kshetra');
       // Parse opaque run labels (epic yrk / Study B2) up front so a malformed or
       // duplicate --label fails fast, before any worker is spawned.
       const labels = parseLabels(ctx.args);
+      // Ablation guard (epic 8wi / Study B1): a Kshetra with active ablations must
+      // not start without --allow-ablation, so a copied config can't silently weaken.
+      const allowAblation = ctx.has('--allow-ablation');
       const registry = loadRegistry();
       const targets = id ? registry.filter(k => k.id === id) : registry;
       if (registry.length === 0) {
@@ -52,7 +56,11 @@ export const COMMANDS: Command[] = [
         throw new Error(`Kshetra not found: ${id}`);
       }
       for (const k of targets) {
-        const result = startWorker(k.id, labels);
+        const ablationErr = ablationGuardError(k, allowAblation);
+        if (ablationErr) throw new Error(`${k.id}: ${ablationErr}`);
+      }
+      for (const k of targets) {
+        const result = startWorker(k.id, labels, allowAblation);
         if (result.status === 'already_running') {
           console.log(`${k.id}: already running (pid ${result.pid})`);
         } else {
@@ -200,13 +208,15 @@ export const COMMANDS: Command[] = [
   {
     name: 'run',
     summary: 'Run a single manual work cycle for a kshetra',
-    usage: '--kshetra <id> [--label key=value ...]',
+    usage: '--kshetra <id> [--label key=value ...] [--allow-ablation]',
     run(ctx) {
       const id = ctx.flag('--kshetra');
       if (!id) throw new Error('Usage: shreni run --kshetra <id> [--label key=value ...]');
       // Opaque run labels (epic yrk / Study B2); malformed --label fails fast here.
       const labels = parseLabels(ctx.args);
-      return runRun(id, labels);
+      // Ablation guard (epic 8wi) is enforced inside runManualCycle, which has the
+      // resolved config; thread the flag through.
+      return runRun(id, labels, ctx.has('--allow-ablation'));
     },
   },
   {

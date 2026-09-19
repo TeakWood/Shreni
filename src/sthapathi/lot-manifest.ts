@@ -14,6 +14,7 @@ import { git } from './git.js';
 import { getBuildIdentity, type BuildIdentity } from './build-info.js';
 import { effectiveLevel, type GateLevel, type GateName } from './gates.js';
 import { AGENT_ROLES, resolveAgentModel, type KshetraConfig } from '../kshetra/config.js';
+import { activeAblations } from '../kshetra/ablation.js';
 import { providerBin } from '../agents/providers/registry.js';
 import type { Provider } from '../agents/providers/types.js';
 
@@ -144,6 +145,10 @@ export function collectConfig(kshetra: KshetraConfig): Record<string, unknown> {
     gates,
     roles,
     budget: kshetra.budget ?? null,
+    // Active ablation switches (epic 8wi / Study B1). Also in the resolved-config
+    // hash; inlined so a reader sees which capabilities were removed without
+    // reversing the hash.
+    ablations: activeAblations(kshetra),
   };
 }
 
@@ -218,6 +223,7 @@ export async function collectProviders(
 async function collectProcess(
   kshetra: KshetraConfig,
   ext: ExtensionIdentityInput,
+  opts: LotManifestOpts,
 ): Promise<Record<string, unknown>> {
   const [providers, bd] = await Promise.all([
     collectProviders(kshetra),
@@ -228,7 +234,15 @@ async function collectProcess(
     extension: collectExtensionIdentity(ext),
     providers,
     tools: { bd, node: process.version },
+    // Whether --allow-ablation was passed (epic 8wi / Study B1) — recorded so an
+    // audit sees the flag that let an ablated Kshetra run.
+    allowAblation: opts.allowAblation ?? false,
   };
+}
+
+// Invocation facts for the manifest that are not config- or repo-derived.
+export interface LotManifestOpts {
+  allowAblation?: boolean;
 }
 
 // Collect both manifest sections. Subject and process are gathered concurrently;
@@ -239,10 +253,11 @@ async function collectProcess(
 export async function collectLotManifest(
   kshetra: KshetraConfig,
   ext: ExtensionIdentityInput,
+  opts: LotManifestOpts = {},
 ): Promise<LotManifestSections> {
   const [subject, proc] = await Promise.all([
     safe(() => collectSubject(kshetra)),
-    safe(() => collectProcess(kshetra, ext)),
+    safe(() => collectProcess(kshetra, ext, opts)),
   ]);
   return { subject: subject ?? {}, process: proc ?? {} };
 }

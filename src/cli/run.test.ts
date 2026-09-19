@@ -69,6 +69,16 @@ describe('runManualCycle', () => {
     expect(mockRunCycle).toHaveBeenCalledOnce();
   });
 
+  it('refuses an ablated kshetra without --allow-ablation, but runs with it (epic 8wi)', async () => {
+    const ablated = { ...KSHETRA, ablation: { review: 'off' } } as unknown as KshetraConfig;
+    mockLoadRegistry.mockReturnValue([ablated]);
+    await expect(runManualCycle('myapp')).rejects.toThrow(/ablation/i);
+    expect(mockRunCycle).not.toHaveBeenCalled();
+    // With the flag it proceeds past the guard to the cycle.
+    await runManualCycle('myapp', {}, true);
+    expect(mockRunCycle).toHaveBeenCalledOnce();
+  });
+
   it('passes a selectNext hook that returns null when kshetra is manually paused', async () => {
     mockIsKshetraManuallyPaused.mockReturnValue(true);
 

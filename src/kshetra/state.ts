@@ -36,6 +36,10 @@ interface KshetraState {
   // Current worker lifecycle phase (IDLE/SELECTING/PREPARING/WORKING), persisted
   // by the scheduler so `shreni status` / Phalaka can show it cross-process.
   phase?: string;
+  // Active ablation switches for this worker's session (epic 8wi / Study B1), set
+  // once at worker startup so `shreni status` / Phalaka can flag a weakened
+  // harness. Empty/absent = none (the normal case).
+  ablations?: string[];
 }
 
 interface State {
@@ -133,6 +137,16 @@ export function setPhase(kshetra: KshetraConfig, phase: string): void {
   const state = loadState();
   const current = state.kshetras[kshetra.id] ?? { paused: false };
   state.kshetras[kshetra.id] = { ...current, phase };
+  saveState(state);
+}
+
+// Persist the session's active ablation switches (epic 8wi / Study B1) so
+// `shreni status` / Phalaka can flag a weakened harness cross-process. Set once
+// at worker startup.
+export function setAblations(kshetra: KshetraConfig, ablations: string[]): void {
+  const state = loadState();
+  const current = state.kshetras[kshetra.id] ?? { paused: false };
+  state.kshetras[kshetra.id] = { ...current, ablations };
   saveState(state);
 }
 

@@ -49,6 +49,12 @@ describe('collectConfig — inline effective values (epic yrk / Study B2, yrk.3)
     expect(cfg.resolvedConfigHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
+  it('inlines active ablation switches (epic 8wi / Study B1)', () => {
+    expect((collectConfig(ksh()).ablations)).toEqual([]);
+    const cfg = collectConfig(ksh({ ablation: { review: 'off' } }));
+    expect(cfg.ablations).toEqual(['review']);
+  });
+
   it('records the EFFECTIVE (clamped) gate level: a warn on test/lint is block', () => {
     const cfg = collectConfig(ksh({
       gates: {
@@ -159,6 +165,15 @@ describe('collectProviders (yrk.3)', () => {
     expect(result.nope.bin).toBeNull();
     expect(result.nope.version).toBeNull();
     expect(typeof result.nope.error).toBe('string');
+  });
+});
+
+describe('collectLotManifest — allowAblation in process (epic 8wi)', () => {
+  it('records the allowAblation flag', async () => {
+    const on = await collectLotManifest(ksh(), { loaded: false, moduleId: '', seams: [] }, { allowAblation: true });
+    expect((on.process as Record<string, unknown>).allowAblation).toBe(true);
+    const off = await collectLotManifest(ksh(), { loaded: false, moduleId: '', seams: [] });
+    expect((off.process as Record<string, unknown>).allowAblation).toBe(false);
   });
 });
 

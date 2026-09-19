@@ -78,6 +78,22 @@ describe('loadKshetraConfig', () => {
     expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
   });
 
+  it('leaves ablation undefined when omitted, and parses an ablation block (epic 8wi)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML);
+    expect(loadKshetraConfig(path).ablation).toBeUndefined();
+    writeFileSync(path, VALID_YAML + '\nablation:\n  review: off\n');
+    expect(loadKshetraConfig(path).ablation).toEqual({ review: 'off' });
+  });
+
+  it('rejects an unknown ablation key at config load, naming the bad key and valid keys (epic 8wi)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    // YAML `off` is the boolean false unless quoted, so use the quoted string form.
+    writeFileSync(path, VALID_YAML + "\nablation:\n  reveiw: 'off'\n");
+    expect(() => loadKshetraConfig(path)).toThrow(/reveiw/);
+    expect(() => loadKshetraConfig(path)).toThrow(/review, enforcement/);
+  });
+
   it('fills in default values when optional sections are omitted', () => {
     const minimal = `
 id: minimal

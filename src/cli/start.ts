@@ -13,10 +13,17 @@ export function startWorker(
   // Opaque run labels (epic yrk / Study B2) threaded to the worker as repeatable
   // `--label key=value` args; the worker re-parses them into the lot manifest.
   labels: Record<string, string> = {},
+  // Whether --allow-ablation was passed (epic 8wi / Study B1) — threaded to the
+  // worker so its defensive ablation guard passes and it records the flag.
+  allowAblation = false,
   // Defaults to re-invoking this CLI with the hidden `__worker` subcommand so it
   // works both under node (spawns `node dist/cli/index.js __worker <id> …`) and as
   // a standalone SEA binary (spawns `<binary> __worker <id> …`). Injectable for tests.
-  launch: Launch = selfExec('__worker', [kshetraId, ...labelsToArgs(labels)]),
+  launch: Launch = selfExec('__worker', [
+    kshetraId,
+    ...labelsToArgs(labels),
+    ...(allowAblation ? ['--allow-ablation'] : []),
+  ]),
 ): StartResult {
   const existing = readPid(kshetraId);
   if (existing !== null && isAlive(existing)) {

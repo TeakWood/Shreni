@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import * as yaml from 'js-yaml';
 import { resolve } from 'path';
 import { providerDefaultModel } from '../agents/providers/registry.js';
+import { AblationConfigSchema } from './ablation.js';
 
 // Single source of truth for the default agent model. Codex/Gemini have no
 // bakeable default (providerDefaultModel returns null, OQ1), so the schema
@@ -279,6 +280,11 @@ export const KshetraConfigSchema = z.object({
   // grants under agents.<role>.mcp reference server names defined here; the
   // superRefine below rejects a grant naming an undefined server.
   mcp: McpConfigSchema.optional(),
+  // Ablation switches (epic 8wi / Study B1). Optional, absent by default (today's
+  // behaviour, byte-identical). Registry-driven + strict (ablation.ts): an unknown
+  // key fails load. Part of the resolved config, so the lot manifest's
+  // resolved-config hash (Shreni-beads-yrk) records it with no extra work.
+  ablation: AblationConfigSchema.optional(),
 }).superRefine((config, ctx) => {
   const definedServers = new Set(Object.keys(config.mcp?.servers ?? {}));
   for (const role of AGENT_ROLES) {
