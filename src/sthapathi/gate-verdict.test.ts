@@ -3,7 +3,7 @@ import { gateLedgerVerdict } from './dispatch.js';
 import type { GateResult } from './gates.js';
 
 function gate(overrides: Partial<GateResult>): GateResult {
-  return { gate: 'coverage', level: 'warn', passed: true, skipped: false, reason: '', ...overrides };
+  return { gate: 'coverage', level: 'warn', passed: true, skipped: false, reason: '', durationMs: 0, ...overrides };
 }
 
 describe('gateLedgerVerdict (4a2.10)', () => {

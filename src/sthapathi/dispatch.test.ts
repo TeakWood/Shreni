@@ -84,6 +84,14 @@ vi.mock('fs/promises', () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Capture emitted events (epic hto timing assertions) while keeping the rest of
+// activity-log real.
+const { emitSpy } = vi.hoisted(() => ({ emitSpy: vi.fn() }));
+vi.mock('./activity-log.js', async (orig) => {
+  const actual = await (orig() as Promise<Record<string, unknown>>);
+  return { ...actual, emit: emitSpy };
+});
+
 // ── imports after mocks ──────────────────────────────────────────────────────
 
 const { buildAgentContext, runSilpiViharapalaLoop } = await import('./dispatch.js');
@@ -280,6 +288,17 @@ describe('runSilpiViharapalaLoop', () => {
     await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
     expect(mockRunSilpi).toHaveBeenCalledOnce();
     expect(mockRunViharapala).toHaveBeenCalledOnce();
+  });
+
+  it('records gatesElapsedMs on silpi_done and durationMs on each gate_result (epic hto)', async () => {
+    emitSpy.mockClear();
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    const events = emitSpy.mock.calls.map((c: unknown[]) => c[0] as { type: string; [k: string]: unknown });
+    const silpiDone = events.find(e => e.type === 'silpi_done');
+    expect(silpiDone?.gatesElapsedMs).toEqual(expect.any(Number));
+    const gateResults = events.filter(e => e.type === 'gate_result');
+    expect(gateResults.length).toBeGreaterThan(0);
+    for (const g of gateResults) expect(g.durationMs).toEqual(expect.any(Number));
   });
 
   it('squash-merges on approval under the default push policy', async () => {

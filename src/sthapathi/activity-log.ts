@@ -9,10 +9,17 @@ export type ActivityEvent =
   | { type: 'round_start';      kshetra: string; beadId: string; round: number; agent: 'silpi' | 'viharapala' }
   | { type: 'agent_text';       kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; text: string }
   | { type: 'agent_tool_call';  kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; tool: string; detail: string }
-  | { type: 'silpi_done';       kshetra: string; beadId: string; round: number; summary: string; confidence: number; files: string[]; lintPassed: boolean; testsPassed: boolean }
+  // `gatesElapsedMs` (epic hto / Study A3): the round-level elapsed time of the
+  // whole gate block (measureHealth start → evaluateGates resolved), the value
+  // totals use — per-gate durations (on gate_result) are attribution-only and must
+  // NOT be summed, since parallel gates overlap. Additive optional; absent on the
+  // PR-followup path (no gate block) and on pre-A3 data.
+  | { type: 'silpi_done';       kshetra: string; beadId: string; round: number; summary: string; confidence: number; files: string[]; lintPassed: boolean; testsPassed: boolean; gatesElapsedMs?: number }
   | { type: 'viharapala_done';  kshetra: string; beadId: string; round: number; verdict: 'APPROVE' | 'REJECT'; score: number; mustFix: string[] }
   | { type: 'task_done';        kshetra: string; beadId: string; title: string; approved: boolean; rounds: number }
-  | { type: 'beads_synced';     kshetra: string }
+  // `durationMs` (epic hto / Study A3): monotonic time spent in the sync,
+  // measured at the site (beads.ts). Additive optional — absent on pre-A3 data.
+  | { type: 'beads_synced';     kshetra: string; durationMs?: number }
   | { type: 'error';            kshetra: string; beadId?: string; message: string }
   // Decision-grade kinds the ledger needs (epic 4a2.2). Purely ADDITIVE — every
   // existing consumer (tail, report, phalaka, metrics) switches on the type
@@ -35,10 +42,18 @@ export type ActivityEvent =
   // is distinct from 'pass' (4a2.10): a gate with no configured command (coverage,
   // lint) or an unmeasurable one (diffSize) DID NOT RUN — recording it as a
   // genuine pass would mislead a reader of the git-tracked ledger years later.
-  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' | 'skip' }
+  // `durationMs` (epic hto / Study A3): monotonic time this ONE gate's work took,
+  // measured at its site (test=measureHealth, lint=runLintGate, coverage/diffSize
+  // inside evaluateGates). Attribution-only — never summed into a round total
+  // (parallel gates overlap; the round total is silpi_done.gatesElapsedMs).
+  // Additive optional; absent on pre-A3 data.
+  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' | 'skip'; durationMs?: number }
   // merge_done: approved work landed (or a PR was opened to land it). `sha` is the
   // squash commit for mergePolicy 'push'; `pr` is the PR number for 'pr'.
-  | { type: 'merge_done';       kshetra: string; beadId: string; mergePolicy: 'push' | 'pr'; sha?: string; pr?: number }
+  // `durationMs` (epic hto / Study A3): monotonic time the merge + push (or PR
+  // open) took, measured at the site (merge.ts). Additive optional; absent on
+  // pre-A3 data.
+  | { type: 'merge_done';       kshetra: string; beadId: string; mergePolicy: 'push' | 'pr'; sha?: string; pr?: number; durationMs?: number }
   // run_usage: a per-run token/cost SUMMARY folded from the UsageEntry the meter
   // writes to usage.jsonl (epic 4a2.5). Carries the headline totals + cost, not
   // the full record — the cache/tool breakdown stays in usage.jsonl, referenced
@@ -53,7 +68,11 @@ export type ActivityEvent =
   // carries peak_context's denominator. Additive OPTIONAL — absent when unknown
   // (non-claude adapter, or no unambiguous main-loop-model entry); readers treat
   // absent as unknown, so no SCHEMA_VERSION bump is needed.
-  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error'; contextWindow?: number }
+  // `durationMs` (epic hto / Study A3): monotonic time the provider subprocess ran
+  // for this attempt (spawn → exit), measured at the site (runner.ts) on BOTH the
+  // ok and errored path — a failed session still consumed real time. Additive
+  // optional; absent on pre-A3 data.
+  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error'; contextWindow?: number; durationMs?: number }
   // turn_usage (RUN-LOG, epic 408/A1): per-MODEL-CALL context usage, the raw input
   // to Figure 1 (effective_context vs. assistant-turn index). It is O(turns) —
   // strictly run-log, activity.jsonl only, NOT decision-grade and NOT usage.jsonl

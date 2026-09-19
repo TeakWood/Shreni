@@ -14,6 +14,7 @@ import { squashMergeAndClose, openPrAndDefer, resolveMergePolicy } from './merge
 import { isHealthBead, measureHealth } from './health.js';
 import { runLintGate } from './lint.js';
 import { evaluateGates, type GateResult } from './gates.js';
+import { nowMs, elapsedMs, timed } from './timing.js';
 import { recordProgress, setHealthBaseline } from '../kshetra/state.js';
 import { loadRepoMap } from '../kshetra/repo-map.js';
 import { AgentAbortedError } from './errors.js';
@@ -214,15 +215,21 @@ export async function runSilpiViharapalaLoop(
     // reject an otherwise clean diff. A task that ADDS failures (failCount >
     // baseline) makes health.green false and still rejects, so real regressions
     // are not let through. silpiOut.testsPassed is kept for logging only.
-    const health = await measureHealth(kshetra);
+    // Time each gate at its own site (epic hto / Study A3), and the whole block
+    // once (gatesElapsedMs) — the latter is what report totals use, since the
+    // per-gate durations overlap (coverage/diffSize run in parallel) and must not
+    // be summed.
+    const gatesStart = nowMs();
+    const { result: health, durationMs: healthMs } = await timed(() => measureHealth(kshetra));
     // Enforced lint gate: run stack.lintCommand ourselves rather than trusting
     // Silpi's self-reported lintPassed (the toolchain design §3.3). When no lint gate
     // is configured, runLintGate skips-and-logs and reports passed=true.
-    const lint = await runLintGate(kshetra);
+    const { result: lint, durationMs: lintMs } = await timed(() => runLintGate(kshetra));
     // Configurable gates (kshetra.yaml gates:): evaluated at this same decision
     // point, commands delegate to the toolchain single-source. test/lint stay
     // hard-blocking (level clamped); coverage honours its configured level.
-    const gates = await evaluateGates(kshetra, health, lint, branch);
+    const gates = await evaluateGates(kshetra, health, lint, branch, { healthMs, lintMs });
+    const gatesElapsedMs = elapsedMs(gatesStart);
 
     emit({
       type: 'silpi_done',
@@ -234,6 +241,7 @@ export async function runSilpiViharapalaLoop(
       files: silpiOut.filesChanged.map(f => f.path),
       lintPassed: lint.passed,
       testsPassed: health.green,
+      gatesElapsedMs,
     });
 
     // Decision-grade (4a2.2): one gate_result per gate at the point the gate
@@ -251,6 +259,8 @@ export async function runSilpiViharapalaLoop(
         round,
         gate: g.gate,
         verdict: gateLedgerVerdict(g),
+        // Per-gate monotonic duration (epic hto / Study A3) — attribution only.
+        durationMs: g.durationMs,
       });
     }
 

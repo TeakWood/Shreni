@@ -5,6 +5,10 @@ import type { KshetraConfig } from '../kshetra/config.js';
 const execFileMock = vi.fn();
 vi.mock('child_process', () => ({ execFile: execFileMock }));
 
+// Capture emitted events so the beads_synced timing (epic hto) is assertable.
+const { emitMock } = vi.hoisted(() => ({ emitMock: vi.fn() }));
+vi.mock('./activity-log.js', () => ({ emit: emitMock }));
+
 const { bd, syncBeads, BeadsError, parseAcceptanceCriteria } = await import('./beads.js');
 
 const KSHETRA: KshetraConfig = {
@@ -277,6 +281,14 @@ describe('syncBeads', () => {
     expect(calls[2]).toEqual(['rev-parse', '--abbrev-ref', 'HEAD']);
     expect(calls[3]).toEqual(['pull', '--rebase', 'origin', 'main']);
     expect(calls[4]).toEqual(['push', 'origin', 'main']);
+  });
+
+  it('emits beads_synced with a monotonic durationMs after a successful sync (epic hto)', async () => {
+    emitMock.mockClear();
+    gitMockBranch('main');
+    await syncBeads(KSHETRA);
+    const synced = emitMock.mock.calls.map((c: unknown[]) => c[0]).find((e: { type: string }) => e.type === 'beads_synced');
+    expect(synced).toMatchObject({ type: 'beads_synced', kshetra: 'myapp', durationMs: expect.any(Number) });
   });
 
   it('pulls/pushes a NON-main beads branch, not a literal main (4b2)', async () => {

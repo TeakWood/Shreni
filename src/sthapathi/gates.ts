@@ -9,6 +9,7 @@ import {
 } from '../kshetra/toolchain.js';
 import type { HealthStatus } from './health.js';
 import type { LintResult } from './lint.js';
+import { timed } from './timing.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +24,12 @@ export interface GateResult {
   // Structured, per-gate explanation routed back to Silpi on a block failure
   // (or surfaced as a warning), including the exact command to reproduce.
   reason: string;
+  // Monotonic time this gate's work took (epic hto / Study A3). Attribution-only
+  // — carried through to gate_result.durationMs; never summed into a round total
+  // (parallel gates overlap). test/lint run before evaluateGates so their timings
+  // are passed in; coverage/diffSize are measured here. A skipped gate records
+  // whatever it spent (usually ~0).
+  durationMs: number;
 }
 
 export interface GatesOutcome {
@@ -112,12 +119,21 @@ export async function evaluateGates(
   health: HealthStatus,
   lint: LintResult,
   branch: string,
+  // Monotonic durations of the test (measureHealth) and lint (runLintGate) gates,
+  // which run in dispatch.ts BEFORE this call (epic hto / Study A3). Attribution-
+  // only; carried onto the corresponding GateResult.durationMs. Optional so
+  // callers/tests that don't time them get 0.
+  timings: { healthMs?: number; lintMs?: number } = {},
 ): Promise<GatesOutcome> {
   const levels = kshetra.gates;
-  const [coverage, diffSize] = await Promise.all([
-    runCoverageGate(kshetra),
-    measureDiffSize(kshetra, branch),
+  // Time coverage and diff-size at THEIR sites. They run under Promise.all, so
+  // their durations overlap and must never be summed into a round total.
+  const [coverageT, diffSizeT] = await Promise.all([
+    timed(() => runCoverageGate(kshetra)),
+    timed(() => measureDiffSize(kshetra, branch)),
   ]);
+  const coverage = coverageT.result;
+  const diffSize = diffSizeT.result;
   const { maxFiles, maxLines } = levels.diffSize;
   const diffOk =
     diffSize === null || (diffSize.files <= maxFiles && diffSize.lines <= maxLines);
@@ -134,6 +150,7 @@ export async function evaluateGates(
         ? 'tests green'
         : `Test gate failed (${failCountLabel}, accepted baseline ${health.baseline}) — ` +
           `run \`${resolveTestCommand(kshetra)}\` and fix the failures.`,
+      durationMs: timings.healthMs ?? 0,
     },
     {
       gate: 'lint',
@@ -145,6 +162,7 @@ export async function evaluateGates(
           ? 'lint skipped (no command configured)'
           : 'lint clean'
         : `Lint gate failed — run \`${resolveLintCommand(kshetra)}\` and fix the reported problems.`,
+      durationMs: timings.lintMs ?? 0,
     },
     {
       gate: 'coverage',
@@ -156,6 +174,7 @@ export async function evaluateGates(
           ? 'coverage skipped (no command configured)'
           : 'coverage passed'
         : `Coverage gate failed — run \`${resolveCoverageCommand(kshetra)}\` and address the shortfall.`,
+      durationMs: coverageT.durationMs,
     },
     {
       gate: 'diffSize',
@@ -169,6 +188,7 @@ export async function evaluateGates(
         : `Diff size gate failed — ${diffSize!.files} files / ${diffSize!.lines} changed lines ` +
           `exceeds the limit (${maxFiles} files / ${maxLines} lines). Reduce the diff to the ` +
           `minimal change for this task; split unrelated work out.`,
+      durationMs: diffSizeT.durationMs,
     },
   ];
 

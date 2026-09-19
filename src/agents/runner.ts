@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { emit, touchHeartbeat, getCurrentRunId } from '../sthapathi/activity-log.js';
+import { nowMs, elapsedMs } from '../sthapathi/timing.js';
 import { AgentAbortedError, RunNotPermittedError } from '../sthapathi/errors.js';
 import { getUsageMeter, getPolicySource, costFor } from '../ext/index.js';
 import type { ModelSelection, UsageRecord } from '../ext/index.js';
@@ -139,9 +140,13 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
   let lastErr = new Error(`${runOpts.agentName}: no attempt made`);
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Time the provider subprocess for THIS attempt (spawn → exit), at the site,
+    // with a monotonic clock (epic hto / Study A3). Captured on both the ok and
+    // error path — a failed session still consumed real time.
+    const attemptStart = nowMs();
     try {
       const result = await runAttempt(runOpts);
-      reportUsage(runOpts, 'ok', result.usage, result.toolCallCount);
+      reportUsage(runOpts, 'ok', result.usage, result.toolCallCount, elapsedMs(attemptStart));
       return result;
     } catch (err) {
       lastErr = err as Error;
@@ -150,7 +155,7 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
       // that are about to be retried — so discarded-retry spend is captured too.
       // Aborts/spawn failures/no-result exits carry no usage and record nothing.
       if (lastErr instanceof AgentRunError && lastErr.usage) {
-        reportUsage(runOpts, 'error', lastErr.usage, lastErr.toolCallCount);
+        reportUsage(runOpts, 'error', lastErr.usage, lastErr.toolCallCount, elapsedMs(attemptStart));
       }
       // A self-heal abort is terminal — never retry it (the run is being
       // cancelled on purpose so the worker can RECOVER).
@@ -190,6 +195,8 @@ function reportUsage(
   outcome: 'ok' | 'error',
   usage: TokenUsage | undefined,
   toolCallCount: number,
+  // Monotonic ms this attempt's provider subprocess ran (epic hto / Study A3).
+  durationMs: number,
 ): void {
   const record: UsageRecord = {
     kshetra: opts.kshetraId,
@@ -245,6 +252,8 @@ function reportUsage(
       // peak_context/contextWindow can be evaluated at read time. Additive
       // optional field; omitted when unknown.
       ...(record.contextWindow !== undefined ? { contextWindow: record.contextWindow } : {}),
+      // Session duration for time attribution (epic hto / Study A3).
+      durationMs,
     });
   } catch {
     // A ledger-fold failure must never fail an otherwise-successful agent run.

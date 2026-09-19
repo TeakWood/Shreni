@@ -140,6 +140,8 @@ describe('runAgent usage metering', () => {
     expect(usageEvents[0]).toMatchObject({
       kshetra: 'myapp', beadId: 'bd-1', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
       inputTokens: 100, outputTokens: 20, costUsd: 0.12, priced: true, outcome: 'ok',
+      // Session duration recorded at the site (epic hto / Study A3).
+      durationMs: expect.any(Number),
     });
     // The cache/tool breakdown stays in usage.jsonl — not duplicated into the ledger.
     expect(usageEvents[0]).not.toHaveProperty('cacheReadTokens');
@@ -161,7 +163,8 @@ describe('runAgent usage metering', () => {
     await expect(runAgent(OPTS())).rejects.toBeInstanceOf(AgentRunError);
     const usageEvents = mockEmitted.filter(e => e.type === 'run_usage');
     expect(usageEvents).toHaveLength(1);
-    expect(usageEvents[0]).toMatchObject({ inputTokens: 50, outputTokens: 10, outcome: 'error' });
+    // A failed session still consumed real time — durationMs is recorded (epic hto).
+    expect(usageEvents[0]).toMatchObject({ inputTokens: 50, outputTokens: 10, outcome: 'error', durationMs: expect.any(Number) });
   });
 
   it('records zero token counts when the provider surfaced no usage', async () => {

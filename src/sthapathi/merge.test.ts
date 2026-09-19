@@ -118,13 +118,15 @@ describe('squashMergeAndClose', () => {
 
   it('emits a merge_done ledger event with the push policy and squash SHA (4a2.2)', async () => {
     await squashMergeAndClose(TASK, KSHETRA, OUTPUT);
-    expect(mockEmit).toHaveBeenCalledWith({
+    // durationMs (epic hto) is a monotonic value — assert its shape, not an exact ms.
+    expect(mockEmit).toHaveBeenCalledWith(expect.objectContaining({
       type: 'merge_done',
       kshetra: 'myapp',
       beadId: 'proj-42',
       mergePolicy: 'push',
       sha: 'deadbeefcafe',
-    });
+      durationMs: expect.any(Number),
+    }));
   });
 
   it('commits after merging', async () => {
@@ -146,7 +148,7 @@ describe('squashMergeAndClose', () => {
     expect(mockDeleteBranch).toHaveBeenCalledWith('bead-proj-42/fix-auth', { force: true });
     // merge_done still recorded the merge, degraded to no SHA.
     const mergeDone = mockEmit.mock.calls.map(c => c[0]).find((e: { type: string }) => e.type === 'merge_done');
-    expect(mergeDone).toEqual({ type: 'merge_done', kshetra: 'myapp', beadId: 'proj-42', mergePolicy: 'push' });
+    expect(mergeDone).toEqual({ type: 'merge_done', kshetra: 'myapp', beadId: 'proj-42', mergePolicy: 'push', durationMs: expect.any(Number) });
   });
 
   it('does not reject when the merge_done emit itself throws (4a2.9)', async () => {

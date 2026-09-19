@@ -4,6 +4,8 @@ import { existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import type { KshetraConfig } from '../kshetra/config.js';
 import { git } from './git.js';
+import { emit } from './activity-log.js';
+import { nowMs, elapsedMs } from './timing.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -149,7 +151,17 @@ export function syncBeads(kshetra: KshetraConfig): Promise<void> {
   const existing = syncInFlight.get(key);
   if (existing) return existing;
 
-  const promise = doSyncBeads(kshetra).finally(() => syncInFlight.delete(key));
+  // Time the sync at the site and emit beads_synced with its duration (epic hto /
+  // Study A3) once per ACTUAL sync — callers sharing the in-flight promise do not
+  // each emit. Run-log tier (operator audience), so it lands in activity.jsonl
+  // only, never the ledger. A failed/throwing sync emits nothing (no .then).
+  const start = nowMs();
+  const promise = doSyncBeads(kshetra)
+    .then(result => {
+      emit({ type: 'beads_synced', kshetra: kshetra.id, durationMs: elapsedMs(start) });
+      return result;
+    })
+    .finally(() => syncInFlight.delete(key));
   syncInFlight.set(key, promise);
   return promise;
 }

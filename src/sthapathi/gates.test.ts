@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { performance } from 'perf_hooks';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { HealthStatus } from './health.js';
 import type { LintResult } from './lint.js';
@@ -218,6 +219,43 @@ describe('evaluateGates', () => {
       expect(ds?.skipped).toBe(true);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('diffSize gate skipped'));
       warn.mockRestore();
+    });
+  });
+
+  describe('per-gate durationMs (epic hto / Study A3)', () => {
+    it('carries the passed test/lint timings and measures coverage/diffSize at their sites', async () => {
+      execRoutes();
+      const o = await evaluateGates(
+        ksh({ language: 'typescript' }), greenHealth, cleanLint, 'bead-1/x',
+        { healthMs: 4200, lintMs: 120 },
+      );
+      const by = Object.fromEntries(o.results.map(r => [r.gate, r.durationMs]));
+      expect(by.test).toBe(4200);   // passed through from dispatch (measureHealth)
+      expect(by.lint).toBe(120);    // passed through from dispatch (runLintGate)
+      expect(typeof by.coverage).toBe('number'); // measured here
+      expect(typeof by.diffSize).toBe('number'); // measured here
+    });
+
+    it('defaults test/lint durations to 0 when no timings are supplied', async () => {
+      const o = await evaluateGates(ksh({ language: 'typescript' }), greenHealth, cleanLint, 'bead-1/x');
+      const test = o.results.find(r => r.gate === 'test');
+      expect(test?.durationMs).toBe(0);
+    });
+
+    it('runs coverage and diffSize in parallel — their durations are not summed into the block time', async () => {
+      // Both probes take ~40ms; under Promise.all the block wall time is ~max(40,40),
+      // strictly less than the per-gate sum (~80ms). Real timers, generous margin.
+      mockExecFile.mockImplementation((_cmd: string, _args: unknown, _opts: unknown, cb: (e: unknown, r?: unknown) => void) => {
+        setTimeout(() => cb(null, { stdout: '', stderr: '' }), 40);
+      });
+      const start = performance.now();
+      const o = await evaluateGates(ksh({ language: 'typescript' }), greenHealth, cleanLint, 'bead-1/x', { healthMs: 0, lintMs: 0 });
+      const wall = performance.now() - start;
+      const cov = o.results.find(r => r.gate === 'coverage')!.durationMs;
+      const diff = o.results.find(r => r.gate === 'diffSize')!.durationMs;
+      expect(cov).toBeGreaterThanOrEqual(30);
+      expect(diff).toBeGreaterThanOrEqual(30);
+      expect(wall).toBeLessThan(cov + diff); // parallel, not summed
     });
   });
 });

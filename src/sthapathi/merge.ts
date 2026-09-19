@@ -11,6 +11,7 @@ import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
 import { regenerateRepoMapAsync } from '../kshetra/repo-map.js';
 import { getEntitlements } from '../ext/index.js';
 import { emit } from './activity-log.js';
+import { nowMs, elapsedMs } from './timing.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 import {
   resolvePrFollowup,
@@ -214,10 +215,13 @@ export async function squashMergeAndClose(
   const main = kshetra.repo.mainBranch;
   const branch = branchName(task);
 
+  // Time the merge + push at the site (epic hto / Study A3).
+  const mergeStart = nowMs();
   await g.checkout(main);
   await g.merge('--squash', branch);
   await g.commit(buildCommitMessage(task, output));
   await g.push('origin', main);
+  const mergeDurationMs = elapsedMs(mergeStart);
 
   // Decision-grade (4a2.2): the approved work landed on main. Record the merge
   // policy used and the squash commit SHA — the provenance of what was merged and
@@ -237,7 +241,7 @@ export async function squashMergeAndClose(
     } catch {
       // record the merge happened even if we couldn't read the SHA
     }
-    emit({ type: 'merge_done', kshetra: kshetra.id, beadId: task.id, mergePolicy: 'push', ...(sha ? { sha } : {}) });
+    emit({ type: 'merge_done', kshetra: kshetra.id, beadId: task.id, mergePolicy: 'push', ...(sha ? { sha } : {}), durationMs: mergeDurationMs });
   } catch {
     // A merge_done ledger-fold failure must never fail an already-pushed merge.
   }
@@ -293,6 +297,8 @@ export async function openPrAndDefer(
   const branch = branchName(task);
   const bdClient = bd(kshetra);
 
+  // Time the branch push + PR open at the site (epic hto / Study A3).
+  const openStart = nowMs();
   // Publish the bead branch so the PR has a head to compare against main.
   await g.push('origin', branch);
 
@@ -302,6 +308,7 @@ export async function openPrAndDefer(
     title: `${task.title} (${task.id})`,
     body: buildPrBody(task, output, feedback, taskDetails),
   });
+  const openDurationMs = elapsedMs(openStart);
 
   await bdClient.addNote(task.id, `PR opened (awaiting merge): ${url}`);
   await bdClient.addLabel(task.id, AWAITING_MERGE_LABEL);
@@ -317,6 +324,7 @@ export async function openPrAndDefer(
     beadId: task.id,
     mergePolicy: 'pr',
     ...(Number.isInteger(prNumber) ? { pr: prNumber } : {}),
+    durationMs: openDurationMs,
   });
 
   await syncBeads(kshetra);
