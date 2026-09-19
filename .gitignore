@@ -156,3 +156,6 @@ supabase/.branches/
 
 # Standalone binary build output (Shreni-beads-lbx)
 build/
+
+# macOS Finder metadata
+.DS_Store
