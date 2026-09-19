@@ -8,7 +8,7 @@ import { branchName } from '../sthapathi/branch';
 import { selectFollowup } from '../sthapathi/pr-followup';
 import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
 import { emitLotManifest } from '../sthapathi/activity-log';
-import { getBuildIdentity } from '../sthapathi/build-info';
+import { collectLotManifest } from '../sthapathi/lot-manifest';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -16,12 +16,13 @@ export async function runManualCycle(kshetraId: string): Promise<void> {
   const kshetra = loadRegistry().find((k: KshetraConfig) => k.id === kshetraId);
   if (!kshetra) throw new Error(`Kshetra not found: ${kshetraId}`);
 
-  // Emit the lot manifest (epic yrk / Study B2) at the start of the manual cycle,
-  // so every event this cycle emits carries the lot's id. The manual-cycle path
-  // registers no ledger sink (consistent with `shreni run` not writing the ledger),
-  // so this lands in activity.jsonl only. process.shreni is the build identity
-  // (yrk.2); yrk.3 adds the remaining subject/process fields regardless of sink.
-  emitLotManifest(kshetraId, 'run', {}, { process: { shreni: getBuildIdentity() } });
+  // Collect + emit the lot manifest (epic yrk / Study B2) at the start of the
+  // manual cycle, so every event this cycle emits carries the lot's id. The
+  // manual-cycle path loads no extension and registers no ledger sink (consistent
+  // with `shreni run` not writing the ledger), so this lands in activity.jsonl only
+  // and the extension section is recorded as not-loaded.
+  const sections = await collectLotManifest(kshetra, { loaded: false, moduleId: '', seams: [] });
+  emitLotManifest(kshetraId, 'run', {}, sections);
 
   const scheduler = createScheduler();
 

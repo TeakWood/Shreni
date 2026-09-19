@@ -8,15 +8,15 @@ import { untrackCommittedRepoMap } from '../sthapathi/repo-map-migration';
 import { runWatchdogOnce } from '../sthapathi/watchdog';
 import { branchName } from '../sthapathi/branch';
 import { touchHeartbeat, emitLotManifest } from '../sthapathi/activity-log';
-import { getBuildIdentity } from '../sthapathi/build-info';
+import { collectLotManifest } from '../sthapathi/lot-manifest';
 import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '../sthapathi/self-heal';
 import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
 import { reconcilePullRequests } from '../sthapathi/merge';
 import { selectFollowup } from '../sthapathi/pr-followup';
 import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
-import { loadExtension } from '../ext/loader';
-import { extensionCore, getPolicySource, makeBudgetPolicy, makeLedgerSink } from '../ext/index';
+import { loadExtension, DEFAULT_EXT_MODULE } from '../ext/loader';
+import { extensionCore, getPolicySource, makeBudgetPolicy, makeLedgerSink, extensionSeamsSnapshot } from '../ext/index';
 import { join } from 'path';
 import { findRoleCredentialGaps } from './provider-preflight';
 import type { KshetraConfig } from '../kshetra/config';
@@ -165,7 +165,12 @@ async function startup(): Promise<void> {
   // loop arms, so a registered extension's sinks/meter are in place from the very
   // first event. Fail-open: a missing/throwing extension degrades to the local
   // defaults with one log line (extension-points.md §"Loading an extension").
-  await loadExtension({ log: msg => console.log(`[shreni worker:${kshetraId}] ${msg}`) });
+  const extensionLoaded = await loadExtension({ log: msg => console.log(`[shreni worker:${kshetraId}] ${msg}`) });
+  // Snapshot which seams the extension overrode (epic yrk / Study B2) RIGHT NOW —
+  // before we compose our own budget policy / register the ledger sink below, which
+  // would otherwise read as extension overrides. moduleId mirrors loader.ts.
+  const extensionSeams = extensionSeamsSnapshot();
+  const extensionModuleId = process.env.SHRENI_EXT?.trim() || DEFAULT_EXT_MODULE;
   // Register the decision ledger sink (4a2.3) beside localFileSink and any sink
   // the extension just added. It writes decision-grade events to ledger.jsonl in
   // the beads repo — the only git-tracked, pushed store; syncBeads (4a2.4) commits
@@ -179,13 +184,15 @@ async function startup(): Promise<void> {
   // Composed last so the caps always apply; the inner policy keeps its model
   // selection and can still deny for its own reasons.
   extensionCore.setPolicySource(makeBudgetPolicy(getPolicySource()));
-  // Emit the lot manifest (epic yrk / Study B2) NOW — after loadExtension and after
-  // the ledger sink is registered, so worker_started reaches ledger.jsonl and can
-  // later record the extension identity — and BEFORE any other event (sync, recover)
+  // Collect + emit the lot manifest (epic yrk / Study B2) NOW — after loadExtension
+  // and after the ledger sink is registered, so worker_started reaches ledger.jsonl
+  // and records the extension identity — and BEFORE any other event (sync, recover)
   // is emitted, so every one of them carries this lot's id. One per worker process.
-  // process.shreni is the build identity (yrk.2); yrk.3 adds the remaining subject
-  // and process fields to this collection.
-  emitLotManifest(kshetra!.id, 'worker', {}, { process: { shreni: getBuildIdentity() } });
+  // Collection is bounded (parallel probes with timeouts) so it never stalls start.
+  const sections = await collectLotManifest(kshetra!, {
+    loaded: extensionLoaded, moduleId: extensionModuleId, seams: extensionSeams,
+  });
+  emitLotManifest(kshetra!.id, 'worker', {}, sections);
   await sync();
   const resumable = await recoverKshetra(kshetra!);
   // RECOVER has just reconciled the drift a stuck pause escalated over, so a

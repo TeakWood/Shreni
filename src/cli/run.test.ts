@@ -27,6 +27,13 @@ vi.mock('../sthapathi/index', () => ({
   createScheduler: () => ({ runCycle: mockRunCycle }),
 }));
 
+// The lot manifest (epic yrk) does real git/CLI probing at cycle start; this unit
+// test only exercises hook wiring, so stub the collector. emitLotManifest itself
+// stays real (cheap; writes to the test-redirected HOME).
+vi.mock('../sthapathi/lot-manifest', () => ({
+  collectLotManifest: vi.fn().mockResolvedValue({ subject: {}, process: {} }),
+}));
+
 // ── imports after mocks ───────────────────────────────────────────────────────
 
 const { runManualCycle } = await import('./run');

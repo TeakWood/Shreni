@@ -93,8 +93,10 @@ export async function measureDiffSize(
 }
 
 // Hard gates cannot be softened: gates.test/lint at 'warn' is clamped back to
-// block (additive-stricter — config may only tighten, never waive).
-function effectiveLevel(gate: GateName, configured: GateLevel): GateLevel {
+// block (additive-stricter — config may only tighten, never waive). Exported so
+// the lot manifest (epic yrk / Study B2) records the EFFECTIVE gate level a lot
+// enforced — the same clamp, from one source, never re-implemented.
+export function effectiveLevel(gate: GateName, configured: GateLevel): GateLevel {
   if (gate === 'test' || gate === 'lint') return 'block';
   return configured;
 }

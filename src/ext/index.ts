@@ -72,6 +72,23 @@ export function getEntitlements(): Entitlements {
   return entitlements;
 }
 
+// Which extension seams currently differ from the local defaults (epic yrk /
+// Study B2). An extension is the only thing that can change these at worker
+// startup, so — called RIGHT AFTER loadExtension and BEFORE the worker registers
+// its own budget policy / ledger sink — this reports exactly what the extension
+// overrode. Order matters: once the worker composes makeBudgetPolicy / adds the
+// ledger sink, policySource and the sink list no longer reflect the extension
+// alone. The lot manifest snapshots it at that precise moment.
+export function extensionSeamsSnapshot(): string[] {
+  const seams: string[] = [];
+  if (policySource !== staticPolicySource) seams.push('policySource');
+  if (usageMeter !== fileUsageMeter) seams.push('usageMeter');
+  if (entitlements !== allEnabledEntitlements) seams.push('entitlements');
+  // localFileSink is the sole default; any additional sink is the extension's.
+  if (sinkRegistry.list().length > 1) seams.push('eventSink');
+  return seams;
+}
+
 // The handle passed to an extension's register(core). Additive: an extension may
 // append sinks and swap the meter/policy/entitlements, but cannot remove the
 // local defaults.
