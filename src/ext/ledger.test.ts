@@ -54,6 +54,10 @@ describe('isDecisionGrade', () => {
     expect(isDecisionGrade(ev({ type: 'suthradhara_launched' } as LoggedEvent))).toBe(false);
     expect(isDecisionGrade(ev({ type: 'suthradhara_session_ended' } as LoggedEvent))).toBe(false);
   });
+
+  it('accepts the lot manifest worker_started (epic yrk / Study B2)', () => {
+    expect(isDecisionGrade(ev({ type: 'worker_started', entrypoint: 'worker', subject: {}, process: {}, labels: {} } as unknown as LoggedEvent))).toBe(true);
+  });
 });
 
 describe('audienceFor', () => {
@@ -81,6 +85,56 @@ describe('audienceFor', () => {
     // the agent's own memory loss and must not be folded into an agent prompt.
     expect(audienceFor('turn_usage')).toBe<LedgerAudience>('audit');
     expect(audienceFor('context_compacted')).toBe<LedgerAudience>('audit');
+  });
+
+  it('classifies the lot manifest worker_started as audit (epic yrk / Study B2)', () => {
+    // Provenance about the machinery, never the task — must not reach an agent.
+    expect(audienceFor('worker_started')).toBe<LedgerAudience>('audit');
+  });
+});
+
+describe('lot manifest worker_started ledger mapping (epic yrk / Study B2)', () => {
+  const manifest = (over: Partial<LoggedEvent> = {}): LoggedEvent =>
+    ev({
+      type: 'worker_started', lotId: 'lot-1', entrypoint: 'worker',
+      subject: {}, process: {}, labels: { arm: 'A' }, ...over,
+    } as unknown as LoggedEvent);
+
+  it('lifts lotId to the envelope and defaults the missing beadId to ""', () => {
+    const entry = toLedgerEntry(manifest());
+    expect(entry.beadId).toBe('');
+    expect(entry.lotId).toBe('lot-1');
+    expect(entry.kind).toBe('worker_started');
+    expect(entry.payload).toEqual({ entrypoint: 'worker', subject: {}, process: {}, labels: { arm: 'A' } });
+    // Neither the lifted lotId nor a beadId leaks back into the payload.
+    expect('lotId' in entry.payload).toBe(false);
+    expect('beadId' in entry.payload).toBe(false);
+  });
+
+  it('is never returned to an agent- or operator-clearance reader, but is to audit', () => {
+    const entries = [toLedgerEntry(manifest())];
+    // worker_started has beadId '' — query it directly to prove the audience gate,
+    // not the bead filter, is what withholds it.
+    expect(readLedger(entries, '', { audience: 'agent' })).toEqual([]);
+    expect(readLedger(entries, '', { audience: 'operator' })).toEqual([]);
+    expect(readLedger(entries, '', { audience: 'audit' })).toHaveLength(1);
+  });
+});
+
+describe('toLedgerEntry lifts lotId alongside runId (epic yrk / Study B2)', () => {
+  it('lifts both correlation ids out of a normal event envelope', () => {
+    const entry = toLedgerEntry(
+      ev({ type: 'merge_done', beadId: 'b1', mergePolicy: 'push', sha: 'abc', runId: 'r1', lotId: 'lot-1' } as unknown as LoggedEvent),
+    );
+    expect(entry).toMatchObject({ beadId: 'b1', runId: 'r1', lotId: 'lot-1', kind: 'merge_done' });
+    expect(entry.payload).toEqual({ mergePolicy: 'push', sha: 'abc' });
+  });
+
+  it('parses a pre-B2 ledger line that carries no lotId', () => {
+    const raw = JSON.stringify({ ts: 'x', schemaVersion: 1, kshetra: 'k', beadId: 'b1', kind: 'merge_done', payload: {} }) + '\n';
+    const [entry] = parseLedgerLines(raw);
+    expect(entry.beadId).toBe('b1');
+    expect(entry.lotId).toBeUndefined();
   });
 });
 

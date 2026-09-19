@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
-import { emit, getCurrentRunId, logPath, SCHEMA_VERSION, type LoggedEvent } from './activity-log.js';
+import { emit, emitLotManifest, getCurrentRunId, getCurrentLotId, logPath, SCHEMA_VERSION, type LoggedEvent } from './activity-log.js';
 
 // test-setup.ts redirects HOME to a throwaway dir, so emit()'s default
 // localFileSink writes activity.jsonl there. Each test uses a unique kshetra id
@@ -50,6 +50,55 @@ describe('emit envelope', () => {
     emit({ type: 'beads_synced', kshetra: k });
     expect(readLog(k)[0].runId).toBeUndefined();
     expect(getCurrentRunId(k)).toBe('');
+  });
+});
+
+describe('lot manifest (epic yrk / Study B2)', () => {
+  it('emits exactly one worker_started with an envelope lotId, no beadId, no pre-claim runId', () => {
+    const k = 'yrk-manifest';
+    const lotId = emitLotManifest(k, 'worker', { arm: 'A' });
+    const log = readLog(k);
+    expect(log).toHaveLength(1);
+    const [wev] = log;
+    expect(wev.type).toBe('worker_started');
+    expect(wev.lotId).toBe(lotId);
+    expect(wev.runId).toBeUndefined(); // no task claimed yet
+    // worker_started is lot-level — it carries no beadId at all.
+    expect((wev as Record<string, unknown>).beadId).toBeUndefined();
+    expect(wev).toMatchObject({ entrypoint: 'worker', subject: {}, process: {}, labels: { arm: 'A' } });
+    expect(getCurrentLotId(k)).toBe(lotId);
+  });
+
+  it('stamps the same lotId on every subsequent event in the process', () => {
+    const k = 'yrk-stamp';
+    const lotId = emitLotManifest(k, 'worker');
+    emit({ type: 'beads_synced', kshetra: k });
+    emit({ type: 'task_claimed', kshetra: k, beadId: 'b-1', title: 'T' });
+    const log = readLog(k);
+    expect(log).toHaveLength(3);
+    expect(log.every(e => e.lotId === lotId)).toBe(true);
+  });
+
+  it('defaults labels to {} and supports entrypoint "run"', () => {
+    const k = 'yrk-run';
+    emitLotManifest(k, 'run');
+    const [wev] = readLog(k);
+    expect(wev).toMatchObject({ type: 'worker_started', entrypoint: 'run', labels: {} });
+  });
+
+  it('mints a distinct lotId per worker start', () => {
+    const k = 'yrk-distinct';
+    const first = emitLotManifest(k, 'worker');
+    const second = emitLotManifest(k, 'worker');
+    expect(second).not.toBe(first);
+    expect(getCurrentLotId(k)).toBe(second);
+  });
+
+  it('stamps no lotId on events emitted before any worker_started', () => {
+    const k = 'yrk-prelot';
+    emit({ type: 'beads_synced', kshetra: k });
+    expect(readLog(k)[0].lotId).toBeUndefined();
+    expect(getCurrentLotId(k)).toBe('');
   });
 });
 

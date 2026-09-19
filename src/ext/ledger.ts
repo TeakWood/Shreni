@@ -52,8 +52,18 @@ export interface LedgerEntry {
   ts: string;
   schemaVersion: number;
   kshetra: string;
+  // The bead this decision belongs to. Empty string for a lot-level entry with no
+  // governing bead — today only worker_started (epic yrk / Study B2), which
+  // records the conditions a whole worker process ran under, not a single task.
+  // Kept a required string (not optional) so readLedger's `entry.beadId === …`
+  // stays a safe comparison; a bead query simply never matches ''.
   beadId: string;
   runId?: string;
+  // The governing lot manifest's id (epic yrk / Study B2), lifted from the
+  // envelope the same way runId is. Every entry written after a worker_started
+  // carries it, joining that entry to the manifest that recorded the conditions it
+  // ran under. Absent on entries written before B2 (readers tolerate its absence).
+  lotId?: string;
   kind: LoggedEvent['type'];
   payload: Record<string, unknown>;
 }
@@ -83,6 +93,10 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     // context_compacted is decision-grade (epic 408 decision 5): rare, audit-
     // relevant, goes to the ledger. turn_usage is NOT — it is O(turns) run-log.
     case 'context_compacted':
+    // worker_started is the lot manifest (epic yrk / Study B2 decision 3): O(1)
+    // per worker start, audit-relevant provenance of the conditions in force. It
+    // goes to the ledger — the only git-tracked, shared store.
+    case 'worker_started':
       return true;
     case 'round_start':
     case 'agent_text':
@@ -139,6 +153,11 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     // not task context. 'audit' is the most restrictive audience, so it is never
     // folded into an agent prompt.
     case 'context_compacted':
+    // worker_started is the lot manifest (epic yrk / Study B2): audit-relevant
+    // provenance about the machinery a lot ran under, NOT about the task. It must
+    // never be folded into an agent prompt, so it takes the most restrictive
+    // audience — 'audit' — which also keeps it out of readLedger({audience:'agent'}).
+    case 'worker_started':
       return 'audit';
     // Non-decision kinds. They never reach ledger.jsonl (isDecisionGrade filters
     // them at the sink), but are classified so this switch stays exhaustive over
@@ -247,17 +266,22 @@ export function toLedgerEntry(ev: LoggedEvent): LedgerEntry {
     ts,
     kshetra,
     runId,
+    lotId,
     type,
     schemaVersion: _activityVersion,
     beadId,
     ...payload
-  } = ev as LoggedEvent & { beadId: string };
+  } = ev as LoggedEvent & { beadId?: string };
   return {
     ts,
     schemaVersion: LEDGER_SCHEMA_VERSION,
     kshetra,
-    beadId,
+    // Most decision-grade kinds carry a beadId; the lot manifest (worker_started,
+    // epic yrk) does not — it is lot-level. Default to '' so LedgerEntry.beadId
+    // stays a required string and a bead query simply never matches it.
+    beadId: beadId ?? '',
     ...(runId ? { runId } : {}),
+    ...(lotId ? { lotId } : {}),
     kind: type,
     payload,
   };

@@ -81,6 +81,22 @@ export type ActivityEvent =
   // visible to the 'agent' audience — it describes the agent's own memory loss,
   // not task context. Provider-neutral; only the Claude adapter populates it (408.3).
   | { type: 'context_compacted'; kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; trigger: 'auto' | 'manual' | 'unknown'; preTokens: number; turnIndex: number }
+  // worker_started — the LOT MANIFEST (epic yrk / Study B2): one entry per worker
+  // process (or `shreni run` manual cycle) start, recording everything in force
+  // for that lot. A lot is the set of work produced under identical conditions —
+  // one worker process with its once-loaded config — and is ORTHOGONAL to the bead
+  // hierarchy (a lot spans many beads; a bead can span lots on restart). So this
+  // event carries NO beadId: it is lot-level, not task-level. Its `lotId` is NOT a
+  // field here — it rides the envelope like `runId` (see emit / getCurrentLotId),
+  // so EVERY subsequent ledger/activity entry in the process joins back to this
+  // manifest by lotId. `entrypoint` distinguishes the long-lived worker from a
+  // manual run. `subject` (what was changed: repo, base SHA, resolved config) and
+  // `process` (what did the changing: build identity, CLI versions) start EMPTY
+  // here (yrk.1 plumbing) and are populated by the collectors in yrk.2/yrk.3.
+  // `labels` are opaque operator tags (--label k=v, yrk.4), recorded verbatim —
+  // Shreni never branches on them. Decision-grade → ledger (isDecisionGrade);
+  // audience 'audit' (about the machinery, never folded into an agent prompt).
+  | { type: 'worker_started';   kshetra: string; entrypoint: 'worker' | 'run'; subject: Record<string, unknown>; process: Record<string, unknown>; labels: Record<string, string> }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are
@@ -107,6 +123,12 @@ export type LoggedEvent = ActivityEvent & {
   ts: string;
   schemaVersion: number;
   runId?: string;
+  // `lotId` is the governing lot manifest's id (epic yrk / Study B2), stamped on
+  // every envelope the same way `runId` is — minted once per worker process at its
+  // worker_started, then read by emit() for all subsequent events. Absent only for
+  // events emitted before the process's worker_started (there are none in the
+  // worker/run entrypoints, which emit it first) or by a build predating B2.
+  lotId?: string;
 };
 
 function kshetraDir(kshetraId: string): string {
@@ -183,6 +205,51 @@ export function getCurrentRunId(kshetraId: string): string {
   return currentRunId.get(kshetraId) ?? '';
 }
 
+// The governing lot id per kshetra (epic yrk / Study B2). One lot = one worker
+// process and its once-loaded configuration, so this is minted ONCE per process
+// per kshetra by emitLotManifest at worker/run start, then read by emit() to stamp
+// every subsequent envelope. Never overwritten within a process: a worker drives
+// exactly one kshetra for its lifetime, so a second worker_started for the same
+// kshetra would mean a genuinely new process (and a fresh map).
+const currentLotId = new Map<string, string>();
+
+// The governing lot id for a kshetra, or empty string before its worker_started.
+// Mirrors getCurrentRunId. Read by tests and by any code that needs to correlate
+// out-of-band records (e.g. usage) to the lot the activity events carry.
+export function getCurrentLotId(kshetraId: string): string {
+  return currentLotId.get(kshetraId) ?? '';
+}
+
+// Emit the lot manifest (epic yrk / Study B2) — the SINGLE shared entrypoint for
+// both `shreni worker` startup and `shreni run`'s manual cycle. It mints a fresh
+// lotId, records it so emit() stamps it on this and every later envelope, then
+// emits one worker_started carrying the (initially empty) subject/process sections
+// and the opaque labels. Returns the minted lotId.
+//
+// Must be called AFTER the ledger sink is registered in the worker path so the
+// manifest reaches ledger.jsonl; in the `shreni run` path no ledger sink is
+// registered (consistent with the manual cycle not writing the ledger today), so
+// the manifest lands in activity.jsonl only. Subject/process are populated by the
+// collectors (yrk.2/yrk.3); this foundation emits them empty so the plumbing —
+// envelope stamping, decision-grade routing, no-bead handling — is testable first.
+export function emitLotManifest(
+  kshetraId: string,
+  entrypoint: 'worker' | 'run',
+  labels: Record<string, string> = {},
+): string {
+  const lotId = randomUUID();
+  currentLotId.set(kshetraId, lotId);
+  emit({
+    type: 'worker_started',
+    kshetra: kshetraId,
+    entrypoint,
+    subject: {},
+    process: {},
+    labels,
+  });
+  return lotId;
+}
+
 // Publish a lifecycle/activity event. Stamps the envelope (ts + schemaVersion +
 // runId) and fans it out through the EventSink registry. The default registry is
 // [localFileSink], which appends to activity.jsonl exactly as before — so with no
@@ -190,11 +257,13 @@ export function getCurrentRunId(kshetraId: string): string {
 // fields. Never throws: the registry isolates every sink.
 export function emit(event: ActivityEvent): void {
   const runId = runIdFor(event);
+  const lotId = currentLotId.get(event.kshetra);
   const entry: LoggedEvent = {
     ...event,
     ts: new Date().toISOString(),
     schemaVersion: SCHEMA_VERSION,
     ...(runId ? { runId } : {}),
+    ...(lotId ? { lotId } : {}),
   };
   getSinkRegistry().handle(entry);
 }

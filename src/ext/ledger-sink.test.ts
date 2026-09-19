@@ -45,6 +45,18 @@ describe('makeLedgerSink', () => {
     expect(entries[0].payload).toEqual({ agent: 'silpi', provider: 'claude', model: 'claude-opus-4-8', trigger: 'auto', preTokens: 187000, turnIndex: 12 });
   });
 
+  it('folds the lot manifest worker_started into ledger.jsonl, lotId lifted, beadId "" (epic yrk)', () => {
+    const sink = makeLedgerSink({ kshetraId: 'k1', ledgerPath });
+    sink.handle(ev({
+      type: 'worker_started', lotId: 'lot-1', entrypoint: 'worker',
+      subject: {}, process: {}, labels: { arm: 'A' },
+    } as unknown as LoggedEvent));
+    const entries = parseLedgerLines(readFileSync(ledgerPath, 'utf8'));
+    expect(entries.map(e => e.kind)).toEqual(['worker_started']);
+    expect(entries[0]).toMatchObject({ kshetra: 'k1', beadId: '', lotId: 'lot-1' });
+    expect(entries[0].payload).toEqual({ entrypoint: 'worker', subject: {}, process: {}, labels: { arm: 'A' } });
+  });
+
   it('drops the run-log tier turn_usage — it stays local, out of git (epic 408/A1)', () => {
     const sink = makeLedgerSink({ kshetraId: 'k1', ledgerPath });
     sink.handle(ev({

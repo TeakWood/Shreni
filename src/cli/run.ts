@@ -7,12 +7,20 @@ import { handleCycleError } from '../sthapathi/errors';
 import { branchName } from '../sthapathi/branch';
 import { selectFollowup } from '../sthapathi/pr-followup';
 import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
+import { emitLotManifest } from '../sthapathi/activity-log';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
 export async function runManualCycle(kshetraId: string): Promise<void> {
   const kshetra = loadRegistry().find((k: KshetraConfig) => k.id === kshetraId);
   if (!kshetra) throw new Error(`Kshetra not found: ${kshetraId}`);
+
+  // Emit the lot manifest (epic yrk / Study B2) at the start of the manual cycle,
+  // so every event this cycle emits carries the lot's id. The manual-cycle path
+  // registers no ledger sink (consistent with `shreni run` not writing the ledger),
+  // so this lands in activity.jsonl only; the collectors (yrk.2/yrk.3) populate its
+  // sections regardless of sink.
+  emitLotManifest(kshetraId, 'run');
 
   const scheduler = createScheduler();
 

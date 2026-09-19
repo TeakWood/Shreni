@@ -7,7 +7,7 @@ import { recoverKshetra, scheduleResume } from '../sthapathi/recover';
 import { untrackCommittedRepoMap } from '../sthapathi/repo-map-migration';
 import { runWatchdogOnce } from '../sthapathi/watchdog';
 import { branchName } from '../sthapathi/branch';
-import { touchHeartbeat } from '../sthapathi/activity-log';
+import { touchHeartbeat, emitLotManifest } from '../sthapathi/activity-log';
 import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '../sthapathi/self-heal';
 import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
@@ -178,6 +178,11 @@ async function startup(): Promise<void> {
   // Composed last so the caps always apply; the inner policy keeps its model
   // selection and can still deny for its own reasons.
   extensionCore.setPolicySource(makeBudgetPolicy(getPolicySource()));
+  // Emit the lot manifest (epic yrk / Study B2) NOW — after loadExtension and after
+  // the ledger sink is registered, so worker_started reaches ledger.jsonl and can
+  // later record the extension identity — and BEFORE any other event (sync, recover)
+  // is emitted, so every one of them carries this lot's id. One per worker process.
+  emitLotManifest(kshetra!.id, 'worker');
   await sync();
   const resumable = await recoverKshetra(kshetra!);
   // RECOVER has just reconciled the drift a stuck pause escalated over, so a
