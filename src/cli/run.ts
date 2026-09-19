@@ -12,7 +12,10 @@ import { collectLotManifest } from '../sthapathi/lot-manifest';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
-export async function runManualCycle(kshetraId: string): Promise<void> {
+export async function runManualCycle(
+  kshetraId: string,
+  labels: Record<string, string> = {},
+): Promise<void> {
   const kshetra = loadRegistry().find((k: KshetraConfig) => k.id === kshetraId);
   if (!kshetra) throw new Error(`Kshetra not found: ${kshetraId}`);
 
@@ -22,7 +25,7 @@ export async function runManualCycle(kshetraId: string): Promise<void> {
   // with `shreni run` not writing the ledger), so this lands in activity.jsonl only
   // and the extension section is recorded as not-loaded.
   const sections = await collectLotManifest(kshetra, { loaded: false, moduleId: '', seams: [] });
-  emitLotManifest(kshetraId, 'run', {}, sections);
+  emitLotManifest(kshetraId, 'run', labels, sections);
 
   const scheduler = createScheduler();
 
@@ -47,8 +50,11 @@ export async function runManualCycle(kshetraId: string): Promise<void> {
   await scheduler.runCycle(kshetra, hooks);
 }
 
-export async function runRun(kshetraId: string): Promise<void> {
+export async function runRun(
+  kshetraId: string,
+  labels: Record<string, string> = {},
+): Promise<void> {
   console.log(`Running immediate cycle for kshetra "${kshetraId}"...`);
-  await runManualCycle(kshetraId);
+  await runManualCycle(kshetraId, labels);
   console.log('Cycle complete.');
 }

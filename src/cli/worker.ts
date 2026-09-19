@@ -19,6 +19,7 @@ import { loadExtension, DEFAULT_EXT_MODULE } from '../ext/loader';
 import { extensionCore, getPolicySource, makeBudgetPolicy, makeLedgerSink, extensionSeamsSnapshot } from '../ext/index';
 import { join } from 'path';
 import { findRoleCredentialGaps } from './provider-preflight';
+import { parseLabels } from './labels';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -39,6 +40,11 @@ if (!kshetra) {
   console.error(`[shreni worker] kshetra not registered: ${kshetraId}`);
   process.exit(1);
 }
+
+// Opaque run labels (epic yrk / Study B2), threaded from `shreni start` as
+// `--label key=value` args after the kshetra id. Already shape-validated by the
+// `start` command before spawning; re-parsed here so they reach the lot manifest.
+const labels = parseLabels(process.argv.slice(3));
 
 // Credential preflight (b0f.3): with per-role providers a worker may drive
 // several providers at once. Verify every role's provider has credentials NOW —
@@ -192,7 +198,7 @@ async function startup(): Promise<void> {
   const sections = await collectLotManifest(kshetra!, {
     loaded: extensionLoaded, moduleId: extensionModuleId, seams: extensionSeams,
   });
-  emitLotManifest(kshetra!.id, 'worker', {}, sections);
+  emitLotManifest(kshetra!.id, 'worker', labels, sections);
   await sync();
   const resumable = await recoverKshetra(kshetra!);
   // RECOVER has just reconciled the drift a stuck pause escalated over, so a

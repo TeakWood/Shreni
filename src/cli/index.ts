@@ -11,9 +11,10 @@ const [sub, ...subArgs] = args;
 // `node phalaka-server.js`, since a SEA binary has no sibling scripts on disk.
 // They are NOT registered in COMMANDS, so they never appear in `shreni help`.
 if (sub === '__worker') {
-  // worker.ts reads the kshetra id from process.argv[2]; normalize argv so it
-  // lands there regardless of the node-vs-binary launch offset.
-  process.argv = [process.argv[0], process.argv[1] ?? '', subArgs[0] ?? ''];
+  // worker.ts reads the kshetra id from process.argv[2] and any `--label key=value`
+  // from argv[3+]; normalize argv so the id lands at [2] and the labels follow,
+  // regardless of the node-vs-binary launch offset.
+  process.argv = [process.argv[0], process.argv[1] ?? '', ...subArgs];
   require('./worker');
 } else if (sub === '__phalaka-server') {
   require('./phalaka-server'); // reads PHALAKA_PORT from the environment

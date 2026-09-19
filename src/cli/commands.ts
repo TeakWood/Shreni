@@ -30,15 +30,19 @@ import { runReport } from './report';
 import { runShow } from './show';
 import { runInit } from './init';
 import { runTelemetry } from './telemetry';
+import { parseLabels } from './labels';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
 
 export const COMMANDS: Command[] = [
   {
     name: 'start',
     summary: 'Start worker daemons (and the phalaka dashboard) for registered kshetras',
-    usage: '[--kshetra <id>]',
+    usage: '[--kshetra <id>] [--label key=value ...]',
     run(ctx) {
       const id = ctx.flag('--kshetra');
+      // Parse opaque run labels (epic yrk / Study B2) up front so a malformed or
+      // duplicate --label fails fast, before any worker is spawned.
+      const labels = parseLabels(ctx.args);
       const registry = loadRegistry();
       const targets = id ? registry.filter(k => k.id === id) : registry;
       if (registry.length === 0) {
@@ -48,7 +52,7 @@ export const COMMANDS: Command[] = [
         throw new Error(`Kshetra not found: ${id}`);
       }
       for (const k of targets) {
-        const result = startWorker(k.id);
+        const result = startWorker(k.id, labels);
         if (result.status === 'already_running') {
           console.log(`${k.id}: already running (pid ${result.pid})`);
         } else {
@@ -196,11 +200,13 @@ export const COMMANDS: Command[] = [
   {
     name: 'run',
     summary: 'Run a single manual work cycle for a kshetra',
-    usage: '--kshetra <id>',
+    usage: '--kshetra <id> [--label key=value ...]',
     run(ctx) {
       const id = ctx.flag('--kshetra');
-      if (!id) throw new Error('Usage: shreni run --kshetra <id>');
-      return runRun(id);
+      if (!id) throw new Error('Usage: shreni run --kshetra <id> [--label key=value ...]');
+      // Opaque run labels (epic yrk / Study B2); malformed --label fails fast here.
+      const labels = parseLabels(ctx.args);
+      return runRun(id, labels);
     },
   },
   {
