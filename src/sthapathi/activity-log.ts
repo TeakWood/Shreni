@@ -3,6 +3,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { getSinkRegistry } from '../ext/index.js';
+import type { Phase } from './lifecycle.js';
 
 export type ActivityEvent =
   | { type: 'task_claimed';     kshetra: string; beadId: string; title: string }
@@ -116,6 +117,17 @@ export type ActivityEvent =
   // Shreni never branches on them. Decision-grade → ledger (isDecisionGrade);
   // audience 'audit' (about the machinery, never folded into an agent prompt).
   | { type: 'worker_started';   kshetra: string; entrypoint: 'worker' | 'run'; subject: Record<string, unknown>; process: Record<string, unknown>; labels: Record<string, string> }
+  // phase_changed (RUN-LOG, epic hto / Study A3): one scheduler phase transition,
+  // with `heldMs` = the monotonic time spent in `from` before moving to `to`. It
+  // is how the report attributes select/prepare overhead and idle (poll) time,
+  // which state.json (overwrite-only) cannot recover. It is O(ticks) — strictly
+  // run-log (activity.jsonl only), operator audience, NEVER the ledger. To keep an
+  // idle worker from appending ~2 events every poll forever, CONSECUTIVE empty
+  // polls (IDLE→SELECTING→IDLE, no work) are coalesced into ONE summary emitted
+  // when work next appears or on shutdown: `polls` is the number of empty polls
+  // folded in and `heldMs` their total idle time, so idle between claims is still
+  // recoverable exactly. `beadId` is optional (unset for the pre-claim phases).
+  | { type: 'phase_changed';    kshetra: string; from: Phase; to: Phase; beadId?: string; heldMs: number; polls?: number }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are

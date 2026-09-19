@@ -66,6 +66,12 @@ describe('makeLedgerSink', () => {
     expect(existsSync(ledgerPath)).toBe(false);
   });
 
+  it('drops phase_changed run-log — never reaches the git-tracked ledger (epic hto)', () => {
+    const sink = makeLedgerSink({ kshetraId: 'k1', ledgerPath });
+    sink.handle(ev({ type: 'phase_changed', from: 'IDLE', to: 'SELECTING', heldMs: 30000, polls: 5 } as unknown as LoggedEvent));
+    expect(existsSync(ledgerPath)).toBe(false);
+  });
+
   it('drops the high-volume run-log tier (agent_text / agent_tool_call)', () => {
     const sink = makeLedgerSink({ kshetraId: 'k1', ledgerPath });
     sink.handle(ev({ type: 'agent_text', beadId: 'b1', agent: 'silpi', text: 'hi' } as LoggedEvent));

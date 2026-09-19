@@ -293,6 +293,9 @@ const resumeWatchTimer = setInterval(() => {
 
 function shutdown(): void {
   stop?.();
+  // Flush any coalesced idle-poll time as a final phase_changed (epic hto) so idle
+  // accumulated since the last real cycle is recorded before we exit.
+  scheduler.flushPhase(kshetra!.id);
   clearInterval(syncTimer);
   clearInterval(reconcileTimer);
   clearInterval(watchdogTimer);

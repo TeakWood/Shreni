@@ -58,6 +58,10 @@ describe('isDecisionGrade', () => {
   it('accepts the lot manifest worker_started (epic yrk / Study B2)', () => {
     expect(isDecisionGrade(ev({ type: 'worker_started', entrypoint: 'worker', subject: {}, process: {}, labels: {} } as unknown as LoggedEvent))).toBe(true);
   });
+
+  it('rejects phase_changed run-log (epic hto / Study A3)', () => {
+    expect(isDecisionGrade(ev({ type: 'phase_changed', from: 'IDLE', to: 'SELECTING', heldMs: 10 } as unknown as LoggedEvent))).toBe(false);
+  });
 });
 
 describe('audienceFor', () => {
@@ -90,6 +94,10 @@ describe('audienceFor', () => {
   it('classifies the lot manifest worker_started as audit (epic yrk / Study B2)', () => {
     // Provenance about the machinery, never the task — must not reach an agent.
     expect(audienceFor('worker_started')).toBe<LedgerAudience>('audit');
+  });
+
+  it('classifies phase_changed as operator (epic hto / Study A3)', () => {
+    expect(audienceFor('phase_changed')).toBe<LedgerAudience>('operator');
   });
 });
 

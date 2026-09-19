@@ -1,6 +1,8 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import { canTransition, type Phase } from './lifecycle.js';
+import { emit } from './activity-log.js';
+import { nowMs, elapsedMs } from './timing.js';
 
 // Worker lifecycle phase. One task at a time is enforced structurally: a cycle
 // only starts from IDLE (see runCycle). The legal transitions are formalized in
@@ -24,6 +26,10 @@ export interface Scheduler {
   start(kshetras: KshetraConfig[], hooks: SchedulerHooks, intervalMs?: number): () => void;
   getActive(kshetraId: string): Task | undefined;
   getPhase(kshetraId: string): Phase;
+  // Flush any coalesced idle-poll time as a final phase_changed summary (epic hto /
+  // Study A3). Called on worker shutdown so idle accumulated since the last real
+  // cycle is still recorded exactly.
+  flushPhase(kshetraId: string): void;
 }
 
 export const DEFAULT_INTERVAL_MS = 30_000;
@@ -31,9 +37,62 @@ export const DEFAULT_INTERVAL_MS = 30_000;
 export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Phase) => void } = {}): Scheduler {
   const active = new Map<string, Task>();
   const phase = new Map<string, Phase>();
+  // Phase-timing state (epic hto / Study A3). `enteredAt` is the monotonic time
+  // the current phase began. Empty polls (IDLE→SELECTING→IDLE, no work) are
+  // coalesced: `pendingIdleMs` buffers a just-started poll's idle time until we
+  // know whether it found work, and `idleAccum` sums the idle of consecutive empty
+  // polls until a real cycle (or shutdown) flushes them as ONE phase_changed.
+  const enteredAt = new Map<string, number>();
+  const pendingIdleMs = new Map<string, number>();
+  const idleAccum = new Map<string, { idleMs: number; polls: number }>();
 
   function getPhase(kshetraId: string): Phase {
     return phase.get(kshetraId) ?? 'IDLE';
+  }
+
+  function emitPhase(kshetraId: string, from: Phase, to: Phase, heldMs: number, polls?: number): void {
+    emit({ type: 'phase_changed', kshetra: kshetraId, from, to, heldMs, ...(polls !== undefined ? { polls } : {}) });
+  }
+
+  // Emit the coalesced empty-poll idle (if any) as one summary phase_changed. The
+  // `polls` count says how many empty polls it folds in; `heldMs` their total idle.
+  function flushPhase(kshetraId: string): void {
+    const acc = idleAccum.get(kshetraId);
+    if (acc && acc.polls > 0) {
+      emitPhase(kshetraId, 'IDLE', 'SELECTING', acc.idleMs, acc.polls);
+      idleAccum.delete(kshetraId);
+    }
+  }
+
+  // Record a phase transition as a phase_changed run-log event, coalescing the
+  // high-volume empty-poll cycles. `heldMs` is the monotonic time spent in `from`.
+  function recordPhaseChange(kshetraId: string, from: Phase, to: Phase, heldMs: number): void {
+    // A poll begins: its heldMs is idle time, but we don't yet know if it will
+    // find work — buffer it rather than emit.
+    if (from === 'IDLE' && to === 'SELECTING') {
+      pendingIdleMs.set(kshetraId, heldMs);
+      return;
+    }
+    // Empty poll (found nothing): coalesce the buffered idle into the accumulator
+    // instead of emitting; the trailing ~0ms select time isn't worth a per-tick event.
+    if (from === 'SELECTING' && to === 'IDLE') {
+      const acc = idleAccum.get(kshetraId) ?? { idleMs: 0, polls: 0 };
+      acc.idleMs += pendingIdleMs.get(kshetraId) ?? 0;
+      acc.polls += 1;
+      idleAccum.set(kshetraId, acc);
+      pendingIdleMs.delete(kshetraId);
+      return;
+    }
+    // Any other transition is real activity. Flush coalesced empty-poll idle, then
+    // (if this is the SELECTING→PREPARING that found work) emit the buffered
+    // IDLE→SELECTING for THIS cycle, then this transition.
+    flushPhase(kshetraId);
+    const buffered = pendingIdleMs.get(kshetraId);
+    if (buffered !== undefined && from === 'SELECTING') {
+      emitPhase(kshetraId, 'IDLE', 'SELECTING', buffered);
+      pendingIdleMs.delete(kshetraId);
+    }
+    emitPhase(kshetraId, from, to, heldMs);
   }
 
   // Set the in-memory phase and notify the optional observer (the worker persists
@@ -45,11 +104,17 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
   // tripwire (yds.10), not a second gate that could wedge the loop.
   function setPhase(kshetraId: string, p: Phase): void {
     const prev = getPhase(kshetraId);
+    // Monotonic time held in the phase we're leaving (epic hto). First set for a
+    // kshetra has no start marker → 0.
+    const heldMs = enteredAt.has(kshetraId) ? elapsedMs(enteredAt.get(kshetraId)!) : 0;
     if (!canTransition(prev, p)) {
       console.warn(`[sthapathi] illegal phase transition for "${kshetraId}": ${prev} -> ${p}`);
     }
     phase.set(kshetraId, p);
+    enteredAt.set(kshetraId, nowMs());
     opts.onPhase?.(kshetraId, p);
+    // Emit AFTER the state is updated so a sink observing the phase sees it settled.
+    if (prev !== p) recordPhaseChange(kshetraId, prev, p, heldMs);
   }
 
   // One task at a time is a STRUCTURAL invariant, not an emergent property of
@@ -119,5 +184,5 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
     return active.get(kshetraId);
   }
 
-  return { runCycle, scheduleLoop, start, getActive, getPhase };
+  return { runCycle, scheduleLoop, start, getActive, getPhase, flushPhase };
 }

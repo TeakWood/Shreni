@@ -1,8 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Capture phase_changed emits (epic hto) while keeping the rest of activity-log real.
+const { emitSpy } = vi.hoisted(() => ({ emitSpy: vi.fn() }));
+vi.mock('./activity-log.js', async (orig) => {
+  const actual = await (orig() as Promise<Record<string, unknown>>);
+  return { ...actual, emit: emitSpy };
+});
+
 import { createScheduler, DEFAULT_INTERVAL_MS } from './index.js';
 import type { SchedulerHooks } from './index.js';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
+
+type PhaseEvent = { type: string; from: string; to: string; heldMs: number; polls?: number };
+function phaseEvents(): PhaseEvent[] {
+  return emitSpy.mock.calls.map((c: unknown[]) => c[0] as PhaseEvent).filter(e => e.type === 'phase_changed');
+}
+function phaseEdges(): string[] {
+  return phaseEvents().map(e => `${e.from}->${e.to}`);
+}
 
 const KSHETRA: KshetraConfig = {
   id: 'myapp',
@@ -338,5 +354,63 @@ describe('start', () => {
     stopA();
     stopB();
     consoleSpy.mockRestore();
+  });
+});
+describe('phase_changed timing (epic hto / Study A3)', () => {
+  beforeEach(() => emitSpy.mockClear());
+
+  it('emits one phase_changed per transition of a completed cycle, each with heldMs', async () => {
+    const scheduler = createScheduler();
+    const hooks = makeHooks({ selectNext: vi.fn().mockResolvedValue(P2_TASK) });
+    await scheduler.runCycle(KSHETRA, hooks);
+    expect(phaseEdges()).toEqual([
+      'IDLE->SELECTING', 'SELECTING->PREPARING', 'PREPARING->WORKING', 'WORKING->IDLE',
+    ]);
+    for (const e of phaseEvents()) expect(e.heldMs).toEqual(expect.any(Number));
+  });
+
+  it('coalesces consecutive empty polls — emits nothing per poll, one summary when work appears', async () => {
+    const scheduler = createScheduler();
+    const empty = makeHooks(); // selectNext → null
+    await scheduler.runCycle(KSHETRA, empty);
+    await scheduler.runCycle(KSHETRA, empty);
+    await scheduler.runCycle(KSHETRA, empty);
+    // Three empty polls, zero events so far (all coalesced) — not ~6.
+    expect(phaseEvents()).toHaveLength(0);
+
+    const work = makeHooks({ selectNext: vi.fn().mockResolvedValue(P2_TASK) });
+    await scheduler.runCycle(KSHETRA, work);
+    const events = phaseEvents();
+    // One coalesced idle summary (polls=3), then the real cycle's four transitions.
+    expect(events[0]).toMatchObject({ from: 'IDLE', to: 'SELECTING', polls: 3 });
+    expect(events[0].heldMs).toEqual(expect.any(Number));
+    expect(phaseEdges().slice(1)).toEqual([
+      'IDLE->SELECTING', 'SELECTING->PREPARING', 'PREPARING->WORKING', 'WORKING->IDLE',
+    ]);
+  });
+
+  it('flushPhase emits the coalesced idle summary (shutdown path), recovering total idle', async () => {
+    const scheduler = createScheduler();
+    const empty = makeHooks();
+    await scheduler.runCycle(KSHETRA, empty);
+    await scheduler.runCycle(KSHETRA, empty);
+    expect(phaseEvents()).toHaveLength(0); // still coalescing
+    scheduler.flushPhase(KSHETRA.id);
+    const events = phaseEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ from: 'IDLE', to: 'SELECTING', polls: 2 });
+    // Idempotent: a second flush emits nothing (accumulator cleared).
+    scheduler.flushPhase(KSHETRA.id);
+    expect(phaseEvents()).toHaveLength(1);
+  });
+
+  it('does not coalesce a prepare-rejected cycle — it did real prepare work', async () => {
+    const scheduler = createScheduler();
+    const hooks = makeHooks({
+      selectNext: vi.fn().mockResolvedValue(P2_TASK),
+      prepareTask: vi.fn().mockResolvedValue(null), // rejected in PREPARE
+    });
+    await scheduler.runCycle(KSHETRA, hooks);
+    expect(phaseEdges()).toEqual(['IDLE->SELECTING', 'SELECTING->PREPARING', 'PREPARING->IDLE']);
   });
 });

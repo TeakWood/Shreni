@@ -104,6 +104,9 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     // turn_usage is the high-volume per-model-call run-log tier (epic 408): it
     // stays in activity.jsonl and must never grow the git-tracked ledger.
     case 'turn_usage':
+    // phase_changed is O(ticks) run-log (epic hto): scheduler phase timing that
+    // must never reach the git-tracked ledger.
+    case 'phase_changed':
     case 'beads_synced':
     case 'error':
     case 'suthradhara_launched':
@@ -144,6 +147,10 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     case 'policy_decision':
     case 'gate_result':
     case 'run_usage':
+    // phase_changed is operator-facing execution detail (epic hto) — scheduler
+    // phase timing for the console/report. Not decision-grade, so it never reaches
+    // the ledger; classified here only to keep this switch exhaustive.
+    case 'phase_changed':
       return 'operator';
     // Pure provenance — what landed on main and how. An accountability record.
     case 'merge_done':
