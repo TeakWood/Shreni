@@ -15,6 +15,7 @@ import { isHealthBead, measureHealth } from './health.js';
 import { runLintGate } from './lint.js';
 import { evaluateGates, type GateResult } from './gates.js';
 import { nowMs, elapsedMs, timed } from './timing.js';
+import { isAblated } from '../kshetra/ablation.js';
 import { recordProgress, setHealthBaseline } from '../kshetra/state.js';
 import { loadRepoMap } from '../kshetra/repo-map.js';
 import { AgentAbortedError } from './errors.js';
@@ -290,6 +291,34 @@ export async function runSilpiViharapalaLoop(
         insights: [],
       };
       continue;
+    }
+
+    // Review ablation (epic 8wi / Study B1): gates passed, but the `review` switch
+    // removes Viharapala. Record review_ablated (NEVER an APPROVE — decision 8: the
+    // ledger must not make a skipped review look like a real one), treat the round
+    // as approved, and merge exactly as an approval would. No round_start /
+    // viharapala_done is emitted. Everything else (merge, Parikshaka backfill via
+    // squashMergeAndClose, round cap) is unchanged.
+    if (isAblated(kshetra, 'review')) {
+      // Honor a mid-round self-heal abort before merging, matching the normal
+      // path's pre-review throwIfAborted.
+      throwIfAborted(signal);
+      await bdClient.addNote(task.id, `Round ${round}: merged WITHOUT review (ablation: review)`);
+      emit({ type: 'review_ablated', kshetra: kshetra.id, beadId: task.id, round, ablations: ['review'] });
+      emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
+      recordProgress(kshetra);
+      if (resolveMergePolicy(kshetra) === 'pr') {
+        // A PR body still needs a ViharapalaOutput; synthesize one that states the
+        // review was ablated rather than fabricating a passing review.
+        const ablatedReview: ViharapalaOutput = {
+          verdict: 'APPROVE', overallScore: 0, mustFix: [],
+          suggestions: ['Merged WITHOUT Viharapala review (ablation: review)'], issues: [], insights: [],
+        };
+        await openPrAndDefer(task, kshetra, silpiOut, ablatedReview, context.taskDetails);
+        return { approved: true, note: `Round ${round} — review ablated, PR opened` };
+      }
+      await squashMergeAndClose(task, kshetra, silpiOut);
+      return { approved: true, note: `Round ${round} — review ablated, merged` };
     }
 
     await bdClient.addNote(task.id, `Round ${round}: submitted for review`);

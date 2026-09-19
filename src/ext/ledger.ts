@@ -97,6 +97,9 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     // per worker start, audit-relevant provenance of the conditions in force. It
     // goes to the ledger — the only git-tracked, shared store.
     case 'worker_started':
+    // review_ablated (epic 8wi / Study B1): a round merged without review. It is a
+    // decision-grade provenance record — the ledger must show review did NOT happen.
+    case 'review_ablated':
       return true;
     case 'round_start':
     case 'agent_text':
@@ -165,6 +168,9 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     // never be folded into an agent prompt, so it takes the most restrictive
     // audience — 'audit' — which also keeps it out of readLedger({audience:'agent'}).
     case 'worker_started':
+    // review_ablated (epic 8wi / Study B1): provenance that review was skipped —
+    // audit-relevant, and must never read to an agent as task context.
+    case 'review_ablated':
       return 'audit';
     // Non-decision kinds. They never reach ledger.jsonl (isDecisionGrade filters
     // them at the sink), but are classified so this switch stays exhaustive over

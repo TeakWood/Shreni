@@ -93,6 +93,15 @@ describe('renderShow', () => {
     expect(out).toContain('context compacted (unknown, 0 tokens before)');
   });
 
+  it('renders review_ablated unmistakably — merged WITHOUT review, never as an approval (epic 8wi)', () => {
+    const out = renderShow(
+      { id: 'b1', title: 'X', status: 'closed', type: 'task', priority: null, criteria: '' },
+      [entry('review_ablated', '2026-09-16T00:00:03.000Z', { round: 2, ablations: ['review'] })],
+    );
+    expect(out).toContain('merged WITHOUT review (ablation: review)');
+    expect(out).not.toContain('APPROVED');
+  });
+
   it('renders an unknown (forward-compat) kind without crashing', () => {
     const out = renderShow(
       { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },

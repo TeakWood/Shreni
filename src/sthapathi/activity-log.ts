@@ -4,6 +4,7 @@ import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { getSinkRegistry } from '../ext/index.js';
 import type { Phase } from './lifecycle.js';
+import type { AblationKey } from '../kshetra/ablation.js';
 
 export type ActivityEvent =
   | { type: 'task_claimed';     kshetra: string; beadId: string; title: string }
@@ -128,6 +129,13 @@ export type ActivityEvent =
   // folded in and `heldMs` their total idle time, so idle between claims is still
   // recoverable exactly. `beadId` is optional (unset for the pre-claim phases).
   | { type: 'phase_changed';    kshetra: string; from: Phase; to: Phase; beadId?: string; heldMs: number; polls?: number }
+  // review_ablated (DECISION-GRADE, epic 8wi / Study B1): a round whose gates passed
+  // was merged WITHOUT Viharapala because the `review` switch is active. It is
+  // emitted INSTEAD OF viharapala_done — never as an APPROVE (decision 8): the
+  // ledger must not make an ablated outcome look like a real review. `ablations`
+  // carries the generic marker (['review']) that shreni show labels and
+  // computeMetrics excludes off (8wi.4), so a new switch needs no consumer change.
+  | { type: 'review_ablated';   kshetra: string; beadId: string; round: number; ablations: AblationKey[] }
   // Suthradhara (interactive planning session) lifecycle events (epic fnd). The
   // launched session runs interactive with no stream-json, so these lifecycle
   // events — not the per-token agent_text/agent_tool_call the executors emit — are

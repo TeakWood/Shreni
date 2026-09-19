@@ -62,6 +62,10 @@ describe('isDecisionGrade', () => {
   it('rejects phase_changed run-log (epic hto / Study A3)', () => {
     expect(isDecisionGrade(ev({ type: 'phase_changed', from: 'IDLE', to: 'SELECTING', heldMs: 10 } as unknown as LoggedEvent))).toBe(false);
   });
+
+  it('accepts review_ablated (epic 8wi / Study B1)', () => {
+    expect(isDecisionGrade(ev({ type: 'review_ablated', beadId: 'b1', round: 1, ablations: ['review'] } as unknown as LoggedEvent))).toBe(true);
+  });
 });
 
 describe('audienceFor', () => {
@@ -98,6 +102,10 @@ describe('audienceFor', () => {
 
   it('classifies phase_changed as operator (epic hto / Study A3)', () => {
     expect(audienceFor('phase_changed')).toBe<LedgerAudience>('operator');
+  });
+
+  it('classifies review_ablated as audit (epic 8wi / Study B1)', () => {
+    expect(audienceFor('review_ablated')).toBe<LedgerAudience>('audit');
   });
 });
 

@@ -583,3 +583,42 @@ describe('runSilpiViharapalaLoop — health repair beads', () => {
     expect(mockBdFlag).toHaveBeenCalledWith('proj-health', expect.stringContaining('[needs-human]'));
   });
 });
+
+describe('review ablation (epic 8wi / Study B1)', () => {
+  const ABLATED = { ...KSHETRA, ablation: { review: 'off' } } as unknown as KshetraConfig;
+
+  it('merges a gates-passing round WITHOUT spawning Viharapala, recording one review_ablated', async () => {
+    emitSpy.mockClear();
+    const result = await runSilpiViharapalaLoop(ABLATED, TASK, 'bead-proj-42/fix-auth');
+    expect(result.approved).toBe(true);
+    expect(mockRunViharapala).not.toHaveBeenCalled();
+    expect(mockSquashMergeAndClose).toHaveBeenCalledOnce();
+    const events = emitSpy.mock.calls.map((c: unknown[]) => c[0] as { type: string; agent?: string; round?: number; ablations?: string[] });
+    expect(events.filter(e => e.type === 'viharapala_done')).toHaveLength(0);
+    expect(events.filter(e => e.type === 'round_start' && e.agent === 'viharapala')).toHaveLength(0);
+    const ablated = events.filter(e => e.type === 'review_ablated');
+    expect(ablated).toHaveLength(1);
+    expect(ablated[0]).toMatchObject({ round: 1, ablations: ['review'] });
+    // Never recorded as an APPROVE review (decision 8): task_done is present, viharapala_done is not.
+    expect(events.some(e => e.type === 'task_done')).toBe(true);
+  });
+
+  it('still rejects and retries a failing gate under review ablation — no review_ablated, no merge', async () => {
+    emitSpy.mockClear();
+    mockMeasureHealth.mockResolvedValue({ green: false, failCount: 3, baseline: 0, sha: 'sha' });
+    await runSilpiViharapalaLoop(ABLATED, TASK, 'bead-proj-42/fix-auth');
+    const events = emitSpy.mock.calls.map((c: unknown[]) => c[0] as { type: string });
+    expect(events.filter(e => e.type === 'review_ablated')).toHaveLength(0);
+    expect(mockRunViharapala).not.toHaveBeenCalled();
+    expect(mockSquashMergeAndClose).not.toHaveBeenCalled();
+  });
+
+  it('without the ablation, Viharapala runs and no review_ablated is emitted (unchanged)', async () => {
+    emitSpy.mockClear();
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    const events = emitSpy.mock.calls.map((c: unknown[]) => c[0] as { type: string });
+    expect(mockRunViharapala).toHaveBeenCalledOnce();
+    expect(events.filter(e => e.type === 'review_ablated')).toHaveLength(0);
+    expect(events.some(e => e.type === 'viharapala_done')).toBe(true);
+  });
+});

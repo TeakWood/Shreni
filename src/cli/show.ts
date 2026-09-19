@@ -164,6 +164,12 @@ function fmtEntry(e: LedgerEntry): string {
     case 'task_done':
       body = `${label('DONE')}${p.approved ? 'APPROVED' : 'BLOCKED'} (${num(p.rounds)} round${num(p.rounds) === 1 ? '' : 's'})`;
       break;
+    case 'review_ablated': {
+      // Epic 8wi: a round merged WITHOUT review. Must NEVER read as an approval.
+      const abls = Array.isArray(p.ablations) ? (p.ablations as unknown[]).map(String).join(', ') : 'review';
+      body = `${label('ABLATED')}round ${num(p.round)} — merged WITHOUT review (ablation: ${abls})`;
+      break;
+    }
     default:
       body = `${label(e.kind)}${JSON.stringify(p)}`;
   }
