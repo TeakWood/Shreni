@@ -6,6 +6,8 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
   statSync,
 } from 'fs';
 import { dirname, join } from 'path';
@@ -119,6 +121,22 @@ export function copyTree(src: string, dest: string): 'clone' | 'copy' {
   }
   cpSync(src, dest, { recursive: true });
   return 'copy';
+}
+
+// Move a file or directory to `dest` (archive-first restore, B4.3). Prefers an
+// atomic rename (instant, no extra disk — src and dest are usually on the same
+// volume); on a cross-device move (EXDEV) falls back to copy-then-remove. The
+// parent of `dest` is created. No-op-safe callers should check existsSync(src)
+// first — a missing src throws here.
+export function moveTree(src: string, dest: string): void {
+  mkdirSync(dirname(dest), { recursive: true });
+  try {
+    renameSync(src, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+    cpSync(src, dest, { recursive: true });
+    rmSync(src, { recursive: true, force: true });
+  }
 }
 
 // Classify issues.jsonl and compute verifiable counts + the bead-id hash. A

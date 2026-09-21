@@ -6,6 +6,7 @@ import {
   readBeadStats,
   readLastDoltCommit,
   copyTree,
+  moveTree,
   pathSizeBytes,
   readManifest,
   MANIFEST_FILENAME,
@@ -119,6 +120,18 @@ describe('copyTree + pathSizeBytes', () => {
 
   it('pathSizeBytes is 0 for a missing path', () => {
     expect(pathSizeBytes(join(dir, 'ghost'))).toBe(0);
+  });
+});
+
+describe('moveTree', () => {
+  it('moves a directory, leaving nothing behind at the source', () => {
+    const src = join(dir, 'src');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'a.txt'), 'data');
+    const dest = join(dir, 'archive', 'moved');
+    moveTree(src, dest);
+    expect(existsSync(src)).toBe(false);
+    expect(readFileSync(join(dest, 'a.txt'), 'utf8')).toBe('data');
   });
 });
 

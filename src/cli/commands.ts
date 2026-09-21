@@ -18,6 +18,7 @@ import { runLogs } from './logs';
 import { runRun } from './run';
 import { runDrain, formatDrainResult, drainResultJson } from './drain';
 import { runFreeze } from './freeze';
+import { runRestore } from './restore';
 import { runSync } from './sync';
 import { initKshetra } from './init-kshetra';
 import { runRegister } from './register';
@@ -248,6 +249,14 @@ export const COMMANDS: Command[] = [
     usage: '--kshetra <id> --out <dir> [--label key=value ...] [--force]',
     run(ctx) {
       return runFreeze(ctx);
+    },
+  },
+  {
+    name: 'restore',
+    summary: 'Restore a kshetra from a freeze snapshot (archive-first, delete-then-copy, verified)',
+    usage: '--kshetra <id> --from <dir> --yes [--clean] [--archive <dir>]',
+    run(ctx) {
+      return runRestore(ctx);
     },
   },
   {

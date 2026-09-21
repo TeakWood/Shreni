@@ -12,7 +12,7 @@ const STATE_PATH = stateFilePath();
 // coupling the fast-poll read path to the daemon executor graph.
 export const MISSING_BASE_BRANCH_REASON = 'missing-base-branch';
 
-interface KshetraState {
+export interface KshetraState {
   paused: boolean;
   reason?: string;
   message?: string;
@@ -76,6 +76,30 @@ export function pauseKshetra(
     requiresManualResume: opts.manual ?? false,
   };
   saveState(state);
+}
+
+// Overwrite a Kshetra's ENTIRE state slice from a restored snapshot (shreni
+// restore, B4.3), touching only this kshetra's entry (finding 3 — the global
+// file holds every other kshetra's flags). The pause/stuck latches are cleared
+// unconditionally so a restored kshetra comes up runnable regardless of the
+// paused state captured at freeze time (a snapshot is a clean trial start, not a
+// paused checkpoint). `slice` null (the snapshot had no entry) resets to a bare
+// unpaused state.
+export function restoreKshetraSlice(kshetra: KshetraConfig, slice: KshetraState | null): void {
+  const state = loadState();
+  const { stuck: _stuck, ...rest } = slice ?? { paused: false };
+  state.kshetras[kshetra.id] = {
+    ...rest,
+    paused: false,
+    requiresManualResume: false,
+  };
+  saveState(state);
+}
+
+// Read-only accessor for a Kshetra's current slice (restore's post-verify reads
+// paused/stuck through this). Undefined when the kshetra has no entry yet.
+export function getKshetraState(kshetra: KshetraConfig): KshetraState | undefined {
+  return loadState().kshetras[kshetra.id];
 }
 
 export function resumeKshetra(kshetra: KshetraConfig): void {
