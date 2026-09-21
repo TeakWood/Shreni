@@ -18,6 +18,7 @@ import {
   readBeadStats,
   readLastDoltCommit,
   computeSnapshotId,
+  scanSnapshotParent,
   SNAPSHOT_SCHEMA_VERSION,
 } from '../kshetra/snapshot';
 import { appendLedgerEvent } from '../ext/index';
@@ -36,8 +37,8 @@ function archiveStamp(): string {
 export async function runRestore(ctx: CommandContext): Promise<void> {
   const id = ctx.flag('--kshetra');
   if (!id) throw new Error('restore requires --kshetra <id>.');
-  const from = ctx.flag('--from');
-  if (!from) throw new Error('restore requires --from <dir>.');
+  const fromArg = ctx.flag('--from');
+  if (!fromArg) throw new Error('restore requires --from <dir>.');
   if (!ctx.has('--yes')) {
     throw new Error('restore is destructive (replaces the beads DB); pass --yes to confirm.');
   }
@@ -45,6 +46,25 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
 
   const kshetra = loadRegistry().find(k => k.id === id);
   if (!kshetra) throw new Error(`Kshetra not found: ${id}`);
+
+  // --latest: treat --from as a PARENT of snapshots and resolve to this kshetra's
+  // newest one by manifest createdAt (never mtime — a copied/cloned snapshot's
+  // mtime lies). Resolved and ANNOUNCED before we touch anything, so the operator
+  // sees which snapshot was chosen even if a later guard aborts the restore.
+  let from = fromArg;
+  if (ctx.has('--latest')) {
+    const candidates = scanSnapshotParent(fromArg)
+      .filter(e => !e.unreadable && e.manifest && e.manifest.kshetraId === id)
+      .sort((a, b) => b.manifest!.createdAt.localeCompare(a.manifest!.createdAt));
+    if (candidates.length === 0) {
+      throw new Error(`--latest found no restorable snapshot for "${id}" under ${fromArg}.`);
+    }
+    const chosen = candidates[0];
+    console.log(
+      `--latest → ${chosen.dir} (createdAt ${chosen.manifest!.createdAt}) of ${candidates.length} under ${fromArg}`,
+    );
+    from = chosen.path;
+  }
 
   // Guard 1 — a live worker. No --force: restoring the beads dir under an active
   // dispatch corrupts the Dolt DB mid-write.

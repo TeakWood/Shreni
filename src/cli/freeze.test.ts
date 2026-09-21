@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
@@ -12,7 +12,7 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: () => HOME };
 });
 
-const { runFreeze } = await import('./freeze.js');
+const { runFreeze, resolveFreezeOutDir } = await import('./freeze.js');
 const { makeContext } = await import('./registry.js');
 
 const KID = 'testk';
@@ -192,5 +192,87 @@ describe('runFreeze', () => {
     mkdirSync(nonEmpty, { recursive: true });
     writeFileSync(join(nonEmpty, 'x'), 'y');
     await expect(runFreeze(ctx(['--kshetra', KID, '--out', nonEmpty]))).rejects.toThrow(/not empty/i);
+  });
+
+  describe('resolveFreezeOutDir (parent-dir resolution)', () => {
+    const NOW = new Date('2026-09-21T14:30:05.123Z');
+
+    it('returns the dir itself when absent or empty (backward compatible)', () => {
+      const absent = join(WORK, 'nope');
+      expect(resolveFreezeOutDir(absent, {}, NOW)).toBe(absent);
+      const empty = join(WORK, 'empty');
+      mkdirSync(empty, { recursive: true });
+      expect(resolveFreezeOutDir(empty, {}, NOW)).toBe(empty);
+    });
+
+    it('treats a directory of snapshots as a parent and stamps a timestamped subdir', () => {
+      const parent = join(WORK, 'parent');
+      mkdirSync(join(parent, 'old-snap'), { recursive: true });
+      writeFileSync(join(parent, 'old-snap', 'manifest.json'), '{}');
+      writeFileSync(join(parent, '.DS_Store'), 'junk'); // ignorable
+
+      const resolved = resolveFreezeOutDir(parent, {}, NOW);
+      expect(resolved).toBe(join(parent, '2026-09-21-143005'));
+    });
+
+    it('carries the stage label into the subdir slug, sanitised', () => {
+      const parent = join(WORK, 'parent');
+      mkdirSync(join(parent, 'old-snap'), { recursive: true });
+      writeFileSync(join(parent, 'old-snap', 'manifest.json'), '{}');
+
+      const resolved = resolveFreezeOutDir(parent, { stage: 'Warm Up!' }, NOW);
+      expect(resolved).toBe(join(parent, '2026-09-21-143005-warm-up'));
+    });
+
+    it('steps to a -N suffix on a same-second collision with a non-empty subdir', () => {
+      const parent = join(WORK, 'parent');
+      mkdirSync(join(parent, 'old-snap'), { recursive: true });
+      writeFileSync(join(parent, 'old-snap', 'manifest.json'), '{}');
+      // A prior freeze already claimed this exact stamp.
+      const taken = join(parent, '2026-09-21-143005');
+      mkdirSync(taken, { recursive: true });
+      writeFileSync(join(taken, 'manifest.json'), '{}');
+
+      expect(resolveFreezeOutDir(parent, {}, NOW)).toBe(join(parent, '2026-09-21-143005-2'));
+    });
+
+    it('refuses a non-empty directory that is not a snapshot parent', () => {
+      const dir = join(WORK, 'mixed');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'unrelated.txt'), 'stuff');
+      expect(() => resolveFreezeOutDir(dir, {}, NOW)).toThrow(/not a snapshot parent/i);
+    });
+  });
+
+  it('freeze --out on a parent of snapshots writes a timestamped subdir and prints it', async () => {
+    const parent = join(WORK, 'snaps');
+    // First freeze lands directly in a fresh dir under the parent.
+    await runFreeze(ctx(['--kshetra', KID, '--out', join(parent, 'seed')]));
+    // Second freeze targets the now-populated parent → nested timestamped subdir.
+    await runFreeze(ctx(['--kshetra', KID, '--out', parent, '--label', 'stage=trial1']));
+
+    const subdirs = readdirSync(parent).filter(n => n !== 'seed');
+    expect(subdirs).toHaveLength(1);
+    expect(subdirs[0]).toMatch(/^\d{4}-\d{2}-\d{2}-\d{6}-trial1$/);
+    expect(existsSync(join(parent, subdirs[0], 'manifest.json'))).toBe(true);
+  });
+
+  it('freeze --json emits the resolved dir and snapshot facts', async () => {
+    const parent = join(WORK, 'snaps');
+    await runFreeze(ctx(['--kshetra', KID, '--out', join(parent, 'seed')]));
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation(m => void logs.push(String(m)));
+    try {
+      await runFreeze(ctx(['--kshetra', KID, '--out', parent, '--json']));
+    } finally {
+      spy.mockRestore();
+    }
+    const payload = JSON.parse(logs[logs.length - 1]);
+    expect(payload.kshetraId).toBe(KID);
+    expect(payload.outDir.startsWith(parent)).toBe(true);
+    expect(payload.outDir).not.toBe(parent); // resolved into a subdir
+    expect(payload.snapshotId).toMatch(/^snap:[0-9a-f]{32}$/);
+    expect(payload.beadCount).toBe(2);
+    expect(existsSync(join(payload.outDir, 'manifest.json'))).toBe(true);
   });
 });

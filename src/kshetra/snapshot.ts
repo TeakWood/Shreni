@@ -218,6 +218,66 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(sort(value));
 }
 
+// One subdirectory of a snapshot parent, as seen by a listing / --latest scan.
+// A manifest that is missing, corrupt, or schema-newer than this build is
+// surfaced as `unreadable` (with a reason) rather than thrown, so one bad
+// snapshot never sinks the whole scan.
+export interface SnapshotScanEntry {
+  // The subdirectory name (e.g. '2026-09-21-143005-warmup').
+  dir: string;
+  // Absolute path to the subdirectory.
+  path: string;
+  // The parsed manifest, or null when unreadable.
+  manifest: SnapshotManifest | null;
+  unreadable: boolean;
+  // Why the manifest could not be trusted (set iff unreadable).
+  reason?: string;
+}
+
+// Scan ONE level of `parent` for subdirectories that contain a manifest.json and
+// read each. Subdirs without a manifest are skipped (they are not snapshots). A
+// manifest that is corrupt or schema-newer than this build yields an unreadable
+// entry rather than throwing. Entries come back sorted by dir name; callers that
+// want newest-first re-sort by manifest.createdAt. Throws only if `parent` itself
+// cannot be read as a directory.
+export function scanSnapshotParent(parent: string): SnapshotScanEntry[] {
+  let names: string[];
+  try {
+    names = readdirSync(parent);
+  } catch {
+    throw new Error(`Not a directory (cannot list snapshots): ${parent}`);
+  }
+  const out: SnapshotScanEntry[] = [];
+  for (const name of names.sort()) {
+    const full = join(parent, name);
+    let st;
+    try {
+      st = statSync(full);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    if (!existsSync(join(full, MANIFEST_FILENAME))) continue;
+    let manifest: SnapshotManifest | null = null;
+    let unreadable = false;
+    let reason: string | undefined;
+    try {
+      const m = readManifest(full);
+      if (typeof m.schemaVersion === 'number' && m.schemaVersion > SNAPSHOT_SCHEMA_VERSION) {
+        unreadable = true;
+        reason = `schema v${m.schemaVersion} is newer than this build (v${SNAPSHOT_SCHEMA_VERSION})`;
+      } else {
+        manifest = m;
+      }
+    } catch (err) {
+      unreadable = true;
+      reason = (err as Error).message;
+    }
+    out.push({ dir: name, path: full, manifest, unreadable, reason });
+  }
+  return out;
+}
+
 // Read the snapshot manifest at the root of a snapshot dir. Throws a clear error
 // if absent or unparseable (restore's first gate).
 export function readManifest(snapshotDir: string): SnapshotManifest {

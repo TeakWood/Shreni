@@ -144,6 +144,42 @@ describe('runRestore', () => {
     expect(state.kshetras[KID].stuck).toBeUndefined();
   });
 
+  it('--latest resolves a parent to the newest snapshot by createdAt and announces it', async () => {
+    const parent = join(WORK, 'snaps');
+    // Two snapshots under one parent; rewrite createdAt so ordering is deterministic.
+    await freezeTo(join(parent, 'older'));
+    await freezeTo(join(parent, 'newer'));
+    const olderM = join(parent, 'older', 'manifest.json');
+    const newerM = join(parent, 'newer', 'manifest.json');
+    const setCreatedAt = (p: string, at: string) => {
+      const m = JSON.parse(readFileSync(p, 'utf8'));
+      m.createdAt = at;
+      writeFileSync(p, JSON.stringify(m));
+    };
+    setCreatedAt(olderM, '2026-09-20T10:00:00.000Z');
+    setCreatedAt(newerM, '2026-09-21T10:00:00.000Z');
+
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation(m => void logs.push(String(m)));
+    try {
+      await runRestore(ctx(['--kshetra', KID, '--from', parent, '--latest', '--yes']));
+    } finally {
+      spy.mockRestore();
+    }
+    const announce = logs.find(l => l.startsWith('--latest'));
+    expect(announce).toContain('→ newer ');
+    expect(announce).toContain('2026-09-21T10:00:00.000Z');
+    expect(announce).not.toContain('→ older ');
+  });
+
+  it('--latest fails when the parent has no snapshot for this kshetra', async () => {
+    const parent = join(WORK, 'empty-parent');
+    mkdirSync(parent, { recursive: true });
+    await expect(
+      runRestore(ctx(['--kshetra', KID, '--from', parent, '--latest', '--yes'])),
+    ).rejects.toThrow(/no restorable snapshot/i);
+  });
+
   it('fails non-zero and names the failed check on a tampered manifest', async () => {
     const snap = join(WORK, 'snap');
     await freezeTo(snap);

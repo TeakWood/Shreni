@@ -20,6 +20,7 @@ import { runDrain, formatDrainResult, drainResultJson } from './drain';
 import { runFreeze } from './freeze';
 import { runExport } from './export';
 import { runRestore } from './restore';
+import { runSnapshots } from './snapshots';
 import { runSync } from './sync';
 import { initKshetra } from './init-kshetra';
 import { runRegister } from './register';
@@ -247,9 +248,17 @@ export const COMMANDS: Command[] = [
   {
     name: 'freeze',
     summary: 'Snapshot a kshetra\'s complete state (beads, runtime, flags, RAG) with a verifiable manifest',
-    usage: '--kshetra <id> --out <dir> [--label key=value ...] [--force]',
+    usage: '--kshetra <id> --out <dir|parent> [--label key=value ...] [--force] [--json]',
     run(ctx) {
       return runFreeze(ctx);
+    },
+  },
+  {
+    name: 'snapshots',
+    summary: 'List freeze snapshots under a parent directory (newest first, with counts, labels, build, and shared-state markers)',
+    usage: 'list <parent> [--kshetra <id>] [--json]',
+    run(ctx) {
+      return runSnapshots(ctx);
     },
   },
   {
@@ -263,7 +272,7 @@ export const COMMANDS: Command[] = [
   {
     name: 'restore',
     summary: 'Restore a kshetra from a freeze snapshot (archive-first, delete-then-copy, verified)',
-    usage: '--kshetra <id> --from <dir> --yes [--clean] [--archive <dir>]',
+    usage: '--kshetra <id> --from <dir|parent> [--latest] --yes [--clean] [--archive <dir>]',
     run(ctx) {
       return runRestore(ctx);
     },
