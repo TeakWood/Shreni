@@ -16,6 +16,7 @@ import { createBaseBranchForKshetra } from './base-branch';
 import { runAgents } from './agents';
 import { runLogs } from './logs';
 import { runRun } from './run';
+import { runDrain, formatDrainResult } from './drain';
 import { runSync } from './sync';
 import { initKshetra } from './init-kshetra';
 import { runRegister } from './register';
@@ -217,6 +218,27 @@ export const COMMANDS: Command[] = [
       // Ablation guard (epic 8wi) is enforced inside runManualCycle, which has the
       // resolved config; thread the flag through.
       return runRun(id, labels, ctx.has('--allow-ablation'));
+    },
+  },
+  {
+    name: 'drain',
+    summary: 'Run the worker in the foreground until every ready bead is worked, then exit with a reason',
+    usage: '--kshetra <id> [--epic <id>] [--label key=value ...] [--allow-ablation]',
+    async run(ctx) {
+      const id = ctx.flag('--kshetra');
+      if (!id) throw new Error('Usage: shreni drain --kshetra <id> [--epic <id>] [--label key=value ...] [--allow-ablation]');
+      // Opaque run labels (epic yrk / Study B2); malformed --label fails fast here.
+      const labels = parseLabels(ctx.args);
+      const result = await runDrain(id, {
+        labels,
+        epic: ctx.flag('--epic'),
+        allowAblation: ctx.has('--allow-ablation'),
+      });
+      console.log(formatDrainResult(id, result));
+      // drain owns its exit code (0 complete / 10 stalled / 130·143 signal) — the
+      // whole point is a machine-readable end. Exit directly rather than returning
+      // to the dispatcher (which only distinguishes 0 from 1).
+      process.exit(result.exitCode);
     },
   },
   {

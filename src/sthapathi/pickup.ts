@@ -171,9 +171,18 @@ export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promis
 // to mutating the work tree once it advances a selected task into PREPARE. This
 // separation is what stops a poll from checking out main under an in-flight agent
 // (see the Sthapathi workflow design §4.2).
-export async function selectNext(kshetra: KshetraConfig): Promise<Task | null> {
+export async function selectNext(
+  kshetra: KshetraConfig,
+  // Optional scope filter (epic 7h3 / Study B3): `shreni drain --epic <id>` passes
+  // a predicate so only ready beads inside the epic's subtree are picked. Applied
+  // to the ready LIST before pickNext, so an out-of-scope higher-priority bead
+  // never masks an in-scope one. Omitted everywhere else — the daemon works the
+  // whole ready queue.
+  inScope?: (task: Task) => boolean,
+): Promise<Task | null> {
   const raw = await bd(kshetra).ready();
-  return pickNext(parseReadyOutput(raw));
+  const tasks = parseReadyOutput(raw);
+  return pickNext(inScope ? tasks.filter(inScope) : tasks);
 }
 
 // PREPARE (the ONLY mutator in the pickup path) + bd claim. Syncs beads, runs

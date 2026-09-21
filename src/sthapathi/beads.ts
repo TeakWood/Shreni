@@ -77,6 +77,12 @@ export function bd(kshetra: KshetraConfig) {
       return exec(['show', id, '--json'], env);
     },
 
+    // Direct child beads of a parent (one level). `shreni drain --epic <id>`
+    // (epic 7h3) walks this recursively to build the epic's subtree scope.
+    children(id: string): Promise<string> {
+      return exec(['children', id, '--json'], env);
+    },
+
     prime(): Promise<string> {
       return exec(['prime'], env);
     },

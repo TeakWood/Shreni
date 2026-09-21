@@ -1,32 +1,16 @@
 import { loadRegistry } from '../kshetra/registry';
-import { createScheduler } from '../sthapathi/index';
-import { selectNext, prepareTask } from '../sthapathi/pickup';
-import { runSilpiViharapalaLoop } from '../sthapathi/dispatch';
-import { handleCycleError, AgentAbortedError } from '../sthapathi/errors';
-import { recoverKshetra, scheduleResume } from '../sthapathi/recover';
-import { untrackCommittedRepoMap } from '../sthapathi/repo-map-migration';
-import { runWatchdogOnce } from '../sthapathi/watchdog';
-import { branchName } from '../sthapathi/branch';
-import { touchHeartbeat, emitLotManifest } from '../sthapathi/activity-log';
-import { collectLotManifest } from '../sthapathi/lot-manifest';
-import { selfHeal, shouldSelfHeal, type ActiveRun, type PauseSnapshot } from '../sthapathi/self-heal';
-import { clearStuckPauseOnRecover, isKshetraManuallyPaused, loadState, setPhase, setAblations } from '../kshetra/state';
-import { syncBeads } from '../sthapathi/beads';
-import { reconcilePullRequests } from '../sthapathi/merge';
-import { selectFollowup } from '../sthapathi/pr-followup';
-import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
-import { loadExtension, DEFAULT_EXT_MODULE } from '../ext/loader';
-import { extensionCore, getPolicySource, makeBudgetPolicy, makeLedgerSink, extensionSeamsSnapshot } from '../ext/index';
-import { join } from 'path';
-import { findRoleCredentialGaps } from './provider-preflight';
+import { createWorkerRuntime, workerPreconditionError } from './worker-runtime';
 import { parseLabels } from './labels';
-import { ablationGuardError, ablationBanner, activeAblations } from '../kshetra/ablation';
-import type { KshetraConfig } from '../kshetra/config';
-import type { Task } from '../sthapathi/types';
 
 // A worker process drives exactly one kshetra. Its id is passed as argv[2] by
 // `shreni start`. Each worker has its own PID + logs under ~/.shreni/kshetra/<id>/,
 // so one kshetra crashing never takes the others down.
+//
+// The real machinery (scheduler, hooks, self-heal, startup, the background timers)
+// lives in worker-runtime.ts, shared verbatim with `shreni drain` (epic 7h3). This
+// entry owns only what is specific to the long-lived daemon: reading argv, the
+// precondition gate (log + exit 1), arming the poll loop (scheduleLoop, which
+// never exits), and clean shutdown on a signal.
 
 const kshetraId = process.argv[2];
 
@@ -44,279 +28,47 @@ if (!kshetra) {
 
 // Opaque run labels (epic yrk / Study B2), threaded from `shreni start` as
 // `--label key=value` args after the kshetra id. Already shape-validated by the
-// `start` command before spawning; re-parsed here so they reach the lot manifest.
+// `start` command; re-parsed here so they reach the lot manifest.
 const labels = parseLabels(process.argv.slice(3));
 
-// Ablation guard (epic 8wi / Study B1): `shreni start` already refused an ablated
-// Kshetra without --allow-ablation, but __worker can be invoked directly — gate
-// defensively so a copied config can never silently weaken a real repo.
+// Ablation guard (epic 8wi) + credential preflight (b0f.3): `shreni start`
+// already ran these, but __worker can be invoked directly — gate defensively so a
+// copied config can never silently weaken a real repo, and a missing key fails
+// loud here rather than mid-run.
 const allowAblation = process.argv.includes('--allow-ablation');
-const ablationErr = ablationGuardError(kshetra, allowAblation);
-if (ablationErr) {
-  console.error(`[shreni worker:${kshetraId}] ${ablationErr}`);
+const precondErr = workerPreconditionError(kshetra, allowAblation);
+if (precondErr) {
+  console.error(`[shreni worker:${kshetraId}] ${precondErr}`);
   process.exit(1);
 }
 
-// Credential preflight (b0f.3): with per-role providers a worker may drive
-// several providers at once. Verify every role's provider has credentials NOW —
-// a hard gate before any work starts — so a missing key fails loud here rather
-// than mid-run when that agent is first dispatched. Subscription providers
-// (Claude's login default) are never flagged.
-const credentialGaps = findRoleCredentialGaps(kshetra);
-if (credentialGaps.length > 0) {
-  console.error(`[shreni worker:${kshetraId}] cannot start — missing provider credentials:`);
-  for (const gap of credentialGaps) console.error(`  • ${gap.message}`);
-  process.exit(1);
-}
-
-// Persist the phase so `shreni status` / Phalaka can show it cross-process. Entering
-// a non-IDLE phase also refreshes the heartbeat immediately, so the watchdog's
-// liveness window starts fresh at the moment work begins (rather than up to one
-// heartbeat tick stale). See the watchdog design §3.1.
-const scheduler = createScheduler({
-  onPhase: (_id, phase) => {
-    setPhase(kshetra!, phase);
-    if (phase !== 'IDLE') touchHeartbeat(kshetra!.id);
-  },
-});
-
-// Run one task through the Silpi↔Viharapala loop, funnelling any throw into the
-// error handler. Shared by the scheduler's WORK phase and by resume (same loop,
-// same error policy — resume just skips SELECT/PREPARE).
-async function runTaskSafely(
-  k: KshetraConfig,
-  task: Task,
-  branch: string,
-  signal?: AbortSignal,
-): Promise<{ approved: boolean; note: string }> {
-  try {
-    // Follow-up beads (epic hjw) take the PR fix+finalize path instead of the
-    // fresh Silpi↔Viharapala loop; both share this error funnel and error policy.
-    if (task.followup) return await runPrFollowupTask(k, task, signal);
-    return await runSilpiViharapalaLoop(k, task, branch, signal);
-  } catch (err) {
-    // A self-heal abort is a SANCTIONED cancellation, not a cycle failure — the
-    // resume watcher deliberately aborted this run and will RECOVER the bead in
-    // recoverKshetra. Routing it through handleCycleError would flag the bead and
-    // clean the branch out from under the recovery. Swallow it quietly.
-    if (err instanceof AgentAbortedError) return { approved: false, note: 'aborted for self-heal' };
-    await handleCycleError(k, task, err as Error);
-    return { approved: false, note: 'cycle error (handled)' };
-  }
-}
-
-// The single in-flight run's cancellation handle + a promise that resolves once
-// it has fully unwound, plus a gate the self-heal holds while RECOVER runs so no
-// poll cycle mutates the work tree underneath it.
-let activeRun: ActiveRun | undefined;
-let healing = false;
-
-const hooks = {
-  async selectNext(k: KshetraConfig): Promise<Task | null> {
-    // While a self-heal is in flight, no cycle may proceed to PREPARE (which
-    // checks out main / mutates the tree) and race recoverKshetra. selectNext is
-    // read-only and runs first in the cycle, so returning null here idles the
-    // cycle before any mutation.
-    if (healing) return null;
-    if (isKshetraManuallyPaused(k)) return null;
-    // Follow-up beads are prioritised over fresh work (ARD §4.1): finish in-flight
-    // PRs before opening new WIP. Cheap — a bd label query, no gh call on the poll.
-    const followup = await selectFollowup(k);
-    if (followup) return followup;
-    return selectNext(k);
-  },
-  prepareTask,
-  async runTask(task: Task, k: KshetraConfig): Promise<void> {
-    // Publish a cancellation handle so the resume watcher can abort a hung run
-    // and RECOVER in-process. `done` resolves in the finally, after the loop has
-    // unwound and (via runCycle's own finally) phase has returned to IDLE.
-    const controller = new AbortController();
-    let resolveDone!: () => void;
-    const done = new Promise<void>(resolve => { resolveDone = resolve; });
-    activeRun = { controller, task, done };
-    try {
-      await runTaskSafely(k, task, branchName(task), controller.signal);
-    } finally {
-      activeRun = undefined;
-      resolveDone();
-    }
-  },
-};
+const runtime = createWorkerRuntime(kshetra, { labels, allowAblation, entrypoint: 'worker' });
 
 // Assigned once startup recovery has finished and the poll loop is armed.
 let stop: (() => void) | undefined;
+let stopTimers: (() => void) | undefined;
 
-const BEADS_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+// Startup: sync + RECOVER crash drift + RESUME reopened WIP, and only THEN arm
+// the poll loop — resuming before the loop is armed keeps resume (which runs
+// WORKING outside the scheduler's phase machine) from racing a poll tick.
+runtime.startup()
+  .then(() => {
+    stop = runtime.scheduler.scheduleLoop(runtime.kshetra, runtime.hooks);
+  })
+  .catch(err => {
+    console.error(`[shreni worker:${kshetraId}] startup failed:`, err);
+    // Arm the poll loop anyway so a recovery/resume hiccup doesn't leave the
+    // worker permanently idle — the normal gated pickup path is the safe fallback.
+    stop ??= runtime.scheduler.scheduleLoop(runtime.kshetra, runtime.hooks);
+  });
 
-async function sync(): Promise<void> {
-  try {
-    await syncBeads(kshetra!);
-    console.log(`[shreni worker:${kshetraId}] beads synced`);
-  } catch (err) {
-    console.error(`[shreni worker:${kshetraId}] beads sync failed:`, err);
-  }
-}
-
-// Reconcile deferred PR beads (mergePolicy 'pr', 3r2): close any whose PR has
-// merged, block any whose PR was closed unmerged. Gated on IDLE + not-healing so
-// its branch deletes never race an in-flight agent's work tree, mirroring the
-// scheduler's "mutations only when nothing is in flight" invariant.
-async function reconcile(): Promise<void> {
-  if (scheduler.getPhase(kshetra!.id) !== 'IDLE' || healing) return;
-  try {
-    await reconcilePullRequests(kshetra!);
-  } catch (err) {
-    console.error(`[shreni worker:${kshetraId}] PR reconcile failed:`, err);
-  }
-}
-
-// Startup: (1) sync the local DB, (2) RECONCILE any drift left by a crash/restart
-// (dirty tree, stale bead-* branches, orphaned in_progress beads) back to a clean
-// IDLE, (3) RESUME any reopened WIP through the work loop — bypassing the pickup
-// health gate — and only THEN (4) arm the poll loop. Resuming before the loop is
-// armed is what keeps resume (which runs WORKING outside the scheduler's phase
-// machine) from racing a poll tick that would check out main under it. See
-// recover.ts / the Sthapathi workflow design §4.2–4.3.
-async function startup(): Promise<void> {
-  // Load the optional extension FIRST, before any events are emitted or the poll
-  // loop arms, so a registered extension's sinks/meter are in place from the very
-  // first event. Fail-open: a missing/throwing extension degrades to the local
-  // defaults with one log line (extension-points.md §"Loading an extension").
-  // Loud ablation banner (epic 8wi / Study B1): one line per active switch, so an
-  // operator watching the worker log can never miss that the harness is weakened.
-  // Also persist the active switches so `shreni status` / Phalaka flag them.
-  for (const line of ablationBanner(kshetra!)) console.log(`[shreni worker:${kshetraId}] ${line}`);
-  setAblations(kshetra!, activeAblations(kshetra!));
-  const extensionLoaded = await loadExtension({ log: msg => console.log(`[shreni worker:${kshetraId}] ${msg}`) });
-  // Snapshot which seams the extension overrode (epic yrk / Study B2) RIGHT NOW —
-  // before we compose our own budget policy / register the ledger sink below, which
-  // would otherwise read as extension overrides. moduleId mirrors loader.ts.
-  const extensionSeams = extensionSeamsSnapshot();
-  const extensionModuleId = process.env.SHRENI_EXT?.trim() || DEFAULT_EXT_MODULE;
-  // Register the decision ledger sink (4a2.3) beside localFileSink and any sink
-  // the extension just added. It writes decision-grade events to ledger.jsonl in
-  // the beads repo — the only git-tracked, pushed store; syncBeads (4a2.4) commits
-  // it. A failing ledger write is isolated by the SinkRegistry, so it never stops
-  // localFileSink or crashes the worker.
-  extensionCore.addEventSink(
-    makeLedgerSink({ kshetraId: kshetra!.id, ledgerPath: join(kshetra!.beads.path, 'ledger.jsonl') }),
-  );
-  // Enforce kshetra.yaml budget caps (ho4.3) on top of whatever policy is now
-  // active — the static default, or an extension's own policy loaded just above.
-  // Composed last so the caps always apply; the inner policy keeps its model
-  // selection and can still deny for its own reasons.
-  extensionCore.setPolicySource(makeBudgetPolicy(getPolicySource()));
-  // Collect + emit the lot manifest (epic yrk / Study B2) NOW — after loadExtension
-  // and after the ledger sink is registered, so worker_started reaches ledger.jsonl
-  // and records the extension identity — and BEFORE any other event (sync, recover)
-  // is emitted, so every one of them carries this lot's id. One per worker process.
-  // Collection is bounded (parallel probes with timeouts) so it never stalls start.
-  const sections = await collectLotManifest(kshetra!, {
-    loaded: extensionLoaded, moduleId: extensionModuleId, seams: extensionSeams,
-  }, { allowAblation });
-  emitLotManifest(kshetra!.id, 'worker', labels, sections);
-  await sync();
-  const resumable = await recoverKshetra(kshetra!);
-  // RECOVER has just reconciled the drift a stuck pause escalated over, so a
-  // leftover auto-escalated stuck pause is now stale — clear it, or the fresh
-  // worker comes up paused and idle, flying the old banner.
-  // A deliberate user pause is left intact.
-  if (clearStuckPauseOnRecover(kshetra!)) {
-    console.log(`[shreni worker:${kshetraId}] cleared stale stuck pause after recovery`);
-  }
-  console.log(`[shreni worker:${kshetraId}] recovery complete (${resumable.length} to resume)`);
-  // Self-heal a legacy repo that committed .shreni/repo-map.md before it was
-  // gitignored: untrack it so its post-merge regen stops dirtying the tree and
-  // wedging preflight. recoverKshetra has just left us on a clean main — the
-  // precondition — and this must land before any bead work rebranches off main.
-  if (await untrackCommittedRepoMap(kshetra!)) {
-    console.log(`[shreni worker:${kshetraId}] untracked committed .shreni/repo-map.md (now gitignored)`);
-  }
-  for (const task of resumable) {
-    console.log(`[shreni worker:${kshetraId}] resuming WIP bead ${task.id} (bypassing health gate)`);
-    await scheduleResume(kshetra!, task, runTaskSafely);
-  }
-  // Reconcile any PRs that merged/closed while this worker was down, before the
-  // poll loop starts picking up new work.
-  await reconcile();
-  stop = scheduler.scheduleLoop(kshetra!, hooks);
-}
-
-startup().catch(err => {
-  console.error(`[shreni worker:${kshetraId}] startup failed:`, err);
-  // Arm the poll loop anyway so a recovery/resume hiccup doesn't leave the worker
-  // permanently idle — the normal gated pickup path is the safe fallback.
-  stop ??= scheduler.scheduleLoop(kshetra!, hooks);
-});
-
-const syncTimer = setInterval(
-  () => sync().catch(err => console.error(`[shreni worker:${kshetraId}] beads sync failed:`, err)),
-  BEADS_SYNC_INTERVAL_MS,
-);
-
-// Poll open PRs for deferred (mergePolicy 'pr') beads and close/block them as
-// their PRs land. Same cadence as the beads sync — merges are human-paced, so a
-// tight loop buys nothing, and reconcile() self-gates to IDLE anyway.
-const reconcileTimer = setInterval(
-  () => reconcile().catch(err => console.error(`[shreni worker:${kshetraId}] PR reconcile failed:`, err)),
-  BEADS_SYNC_INTERVAL_MS,
-);
-
-// Watchdog: detect a stuck worker (hung agent or a repeating stall loop) and
-// escalate — pause for manual resume + push an operator notification with
-// remediation. Runs every minute; thresholds in watchdog.ts.
-const WATCHDOG_INTERVAL_MS = 60 * 1000;
-const watchdogTimer = setInterval(() => {
-  // hasReadyWork: probe the RAW ready queue (pickup's selectNext, not the
-  // pause-gated hook) so the watchdog can tell "idle, nothing to do" from "hung"
-  // and never escalate an empty-queue Kshetra to Phalaka.
-  runWatchdogOnce(kshetra!, () => scheduler.getPhase(kshetra!.id), Date.now(), {
-    hasReadyWork: async () => (await selectNext(kshetra!)) !== null,
-  }).catch((err: unknown) => console.error(`[shreni worker:${kshetraId}] watchdog failed:`, err));
-}, WATCHDOG_INTERVAL_MS);
-
-// Worker-liveness heartbeat (the watchdog design §3.1, fixes RC1): while a phase
-// is active, stamp the heartbeat on a fixed cadence regardless of whether the agent
-// has emitted anything. This is what makes a long SILENT tool call (build, test run,
-// slow bd op) stop reading as a hung agent. Faster than the 20m stuck threshold so a
-// real worker-event-loop wedge still goes stale and trips.
-const HEARTBEAT_INTERVAL_MS = 30 * 1000;
-const heartbeatTimer = setInterval(() => {
-  if (scheduler.getPhase(kshetra!.id) !== 'IDLE') touchHeartbeat(kshetra!.id);
-}, HEARTBEAT_INTERVAL_MS);
-
-// Resume watcher: `shreni resume` runs in a SEPARATE process
-// and can only flip state.json — it cannot reach into this worker to cancel the
-// hung agent. So we poll for the stuck-paused -> resumed transition and, when we
-// see it with a run still in flight, self-heal in-process: abort the hung agent,
-// RECOVER, and re-arm. Faster than the 60s watchdog so recovery lands promptly,
-// and it holds the `healing` gate so RECOVER never races a poll cycle.
-const RESUME_WATCH_INTERVAL_MS = 5 * 1000;
-let prevPause: PauseSnapshot | undefined;
-const resumeWatchTimer = setInterval(() => {
-  const curr = loadState().kshetras[kshetra!.id] as PauseSnapshot | undefined;
-  if (shouldSelfHeal(prevPause, curr, activeRun !== undefined, healing)) {
-    const run = activeRun!;
-    healing = true;
-    console.log(`[shreni worker:${kshetraId}] stuck resume detected — self-healing bead ${run.task.id}`);
-    selfHeal(kshetra!, run)
-      .then(() => console.log(`[shreni worker:${kshetraId}] self-heal complete — back to IDLE`))
-      .catch((err: unknown) => console.error(`[shreni worker:${kshetraId}] self-heal failed:`, err))
-      .finally(() => { healing = false; });
-  }
-  prevPause = curr;
-}, RESUME_WATCH_INTERVAL_MS);
+// The background timers (bead sync, PR reconcile, watchdog, heartbeat, resume
+// watcher) run independently of startup — arm them immediately.
+stopTimers = runtime.startTimers();
 
 function shutdown(): void {
   stop?.();
-  // Flush any coalesced idle-poll time as a final phase_changed (epic hto) so idle
-  // accumulated since the last real cycle is recorded before we exit.
-  scheduler.flushPhase(kshetra!.id);
-  clearInterval(syncTimer);
-  clearInterval(reconcileTimer);
-  clearInterval(watchdogTimer);
-  clearInterval(heartbeatTimer);
-  clearInterval(resumeWatchTimer);
+  stopTimers?.();
   process.exit(0);
 }
 

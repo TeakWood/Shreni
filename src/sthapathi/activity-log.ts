@@ -121,7 +121,7 @@ export type ActivityEvent =
   // `labels` are opaque operator tags (--label k=v, yrk.4), recorded verbatim —
   // Shreni never branches on them. Decision-grade → ledger (isDecisionGrade);
   // audience 'audit' (about the machinery, never folded into an agent prompt).
-  | { type: 'worker_started';   kshetra: string; entrypoint: 'worker' | 'run'; subject: Record<string, unknown>; process: Record<string, unknown>; labels: Record<string, string> }
+  | { type: 'worker_started';   kshetra: string; entrypoint: 'worker' | 'run' | 'drain'; subject: Record<string, unknown>; process: Record<string, unknown>; labels: Record<string, string> }
   // phase_changed (RUN-LOG, epic hto / Study A3): one scheduler phase transition,
   // with `heldMs` = the monotonic time spent in `from` before moving to `to`. It
   // is how the report attributes select/prepare overhead and idle (poll) time,
@@ -277,7 +277,7 @@ export function getCurrentLotId(kshetraId: string): string {
 // envelope stamping, decision-grade routing, no-bead handling — is testable first.
 export function emitLotManifest(
   kshetraId: string,
-  entrypoint: 'worker' | 'run',
+  entrypoint: 'worker' | 'run' | 'drain',
   labels: Record<string, string> = {},
   sections: { subject?: Record<string, unknown>; process?: Record<string, unknown> } = {},
 ): string {
