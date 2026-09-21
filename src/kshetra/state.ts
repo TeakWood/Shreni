@@ -1,9 +1,9 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { resolve, dirname } from 'path';
-import { homedir } from 'os';
+import { dirname } from 'path';
 import type { KshetraConfig } from './config.js';
+import { stateFilePath } from './state-locations.js';
 
-const STATE_PATH = resolve(homedir(), '.shreni', 'state.json');
+const STATE_PATH = stateFilePath();
 
 // Pause reason set when a Kshetra's configured base branch (repo.mainBranch) is
 // absent on origin (epic Shreni-beads-uvu). Defined here — the lightweight state

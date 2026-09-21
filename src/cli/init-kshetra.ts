@@ -5,9 +5,9 @@ import {
   existsSync, mkdirSync, readFileSync, readlinkSync, chmodSync,
 } from 'fs';
 import { resolve, join, dirname, basename } from 'path';
-import { homedir } from 'os';
 import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
+import { ragIndexDir } from '../kshetra/state-locations';
 import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
 import { GATES_DEFAULTS, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
 import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
@@ -780,7 +780,7 @@ export function appendShreniIntegration(repoPath: string): void {
 // ── Step 9: RAG index stub ────────────────────────────────────────────────────
 
 export function createRagIndexStub(slug: string): void {
-  const ragDir = resolve(homedir(), '.shreni', 'rag', slug);
+  const ragDir = ragIndexDir(slug);
   mkdirSync(ragDir, { recursive: true });
   const indexPath = join(ragDir, 'index.json');
   if (!existsSync(indexPath)) {

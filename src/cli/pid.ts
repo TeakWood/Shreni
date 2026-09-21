@@ -1,19 +1,16 @@
 import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+// shreniDir / kshetraDir live in kshetra/state-locations.ts (the single source
+// of truth for every ~/.shreni path). Re-exported here so existing importers of
+// '../cli/pid' keep working.
+import { shreniDir, kshetraDir } from '../kshetra/state-locations.js';
 
 // Per-kshetra layout under ~/.shreni/kshetra/<id>/:
 //   worker.pid       — detached worker process id
 //   activity.jsonl   — structured event log (see activity-log.ts)
 //   worker.log       — worker stdout/stderr
 
-export function shreniDir(): string {
-  return join(homedir(), '.shreni');
-}
-
-export function kshetraDir(kshetraId: string): string {
-  return join(shreniDir(), 'kshetra', kshetraId);
-}
+export { shreniDir, kshetraDir };
 
 export function workerPidPath(kshetraId: string): string {
   return join(kshetraDir(kshetraId), 'worker.pid');

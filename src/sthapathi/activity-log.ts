@@ -1,10 +1,14 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { getSinkRegistry } from '../ext/index.js';
 import type { Phase } from './lifecycle.js';
 import type { AblationKey } from '../kshetra/ablation.js';
+// Per-Kshetra path derivations live in kshetra/state-locations.ts (single
+// source). legacyLogPath is re-exported so cli/tail.ts keeps its import site.
+import { kshetraDir, legacyLogPath } from '../kshetra/state-locations.js';
+
+export { legacyLogPath };
 
 export type ActivityEvent =
   | { type: 'task_claimed';     kshetra: string; beadId: string; title: string }
@@ -180,10 +184,6 @@ export type LoggedEvent = ActivityEvent & {
   lotId?: string;
 };
 
-function kshetraDir(kshetraId: string): string {
-  return join(homedir(), '.shreni', 'kshetra', kshetraId);
-}
-
 export function logPath(kshetraId: string): string {
   return join(kshetraDir(kshetraId), 'activity.jsonl');
 }
@@ -199,11 +199,6 @@ export function notificationsPath(kshetraId: string): string {
 // and spend accounting (F5) read it.
 export function usagePath(kshetraId: string): string {
   return join(kshetraDir(kshetraId), 'usage.jsonl');
-}
-
-// Pre-Feature-2 location, kept so `tail` can read older logs.
-export function legacyLogPath(kshetraId: string): string {
-  return join(homedir(), '.shreni', 'logs', `${kshetraId}.jsonl`);
 }
 
 // Worker-liveness heartbeat (the watchdog design §3.1 / OQ1). A bare file whose

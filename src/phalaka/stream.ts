@@ -7,8 +7,8 @@ import {
   watch,
   type FSWatcher,
 } from 'fs';
-import { join, dirname } from 'path';
-import { homedir } from 'os';
+import { dirname } from 'path';
+import { stateFilePath } from '../kshetra/state-locations.js';
 import type { FastifyInstance } from 'fastify';
 import { loadRegistry } from '../kshetra/registry.js';
 import { logPath } from '../sthapathi/activity-log.js';
@@ -78,7 +78,7 @@ function defaultActivityPaths(): string[] {
 }
 
 function defaultStatePath(): string {
-  return join(homedir(), '.shreni', 'state.json');
+  return stateFilePath();
 }
 
 // One SSE frame. A named event + a JSON data line, terminated by a blank line.
