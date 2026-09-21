@@ -2,6 +2,8 @@ import { writeFileSync } from 'fs';
 import type { CommandContext } from './registry';
 import { loadRegistry } from '../kshetra/registry';
 import { bd } from '../sthapathi/beads';
+import { git } from '../sthapathi/git';
+import { readBeadStats, readManifest } from '../kshetra/snapshot';
 import type { KshetraConfig } from '../kshetra/config';
 
 // `shreni export --kshetra <id> [--epic <id>] --format md --out <file>` (epic
@@ -40,12 +42,30 @@ export interface ExportBead {
   closedAt: string;
 }
 
+// Where an export's input state came from, so a trial's plan file is traceable to
+// an exact frozen state (C1.2 point 3). The three values are computed the SAME way
+// `shreni freeze` computes them, so a reader can confirm export and freeze manifest
+// describe the same state: beadsHeadSha (git HEAD of the beads repo) and beadIdHash
+// (sha256 over the sorted bead ids in issues.jsonl) are state-derived; snapshotId
+// is copied from a named freeze manifest when --snapshot points at one.
+export interface ExportProvenance {
+  snapshotId: string | null; // from the --snapshot manifest, else null
+  beadsHeadSha: string | null;
+  beadIdHash: string;
+  // True when --allow-executed was used to export beads that carry execution
+  // history — the header must then say so, loudly and never silently.
+  containsExecutionHistory: boolean;
+}
+
 // The assembled, ordered document a format renders. Pure data — no IO, no bd.
+// `provenance` is attached by the IO layer (runExport) after the pure build; the
+// pure buildExportDocument leaves it undefined and the format omits the section.
 export interface ExportDocument {
   goal: string; // the epic title, or a generic heading for a whole-queue export
   epicId: string | null;
   beads: ExportBead[]; // in a valid topological execution order
   edges: { from: string; to: string }[]; // blocker -> blocked, both in scope
+  provenance?: ExportProvenance;
 }
 
 // The seam that keeps json/other formats additive (C1.1 point 7): the core builds
@@ -291,6 +311,51 @@ export function buildExportDocument(beads: ExportBead[], opts: BuildOptions = {}
   return { goal, epicId, beads: ordered, edges };
 }
 
+// ── executed-bead guard ──────────────────────────────────────────────────────
+
+export interface ExecutedBead {
+  id: string;
+  fields: string[]; // the execution artefacts that tripped the guard, named
+}
+
+// Scan beads for EXECUTION ARTEFACTS — the fields a bead only carries AFTER it has
+// been worked: a non-open status, a close reason, or loop-added notes (round notes
+// and review feedback both land in `notes`). Their presence means the export would
+// leak how the work was done: a close reason describes the implementation, so
+// handing it to E3's bare baseline would give away the answers. Returns one entry
+// per offending bead naming exactly which field tripped it.
+export function findExecutedBeads(beads: ExportBead[]): ExecutedBead[] {
+  const offenders: ExecutedBead[] = [];
+  for (const b of beads) {
+    const fields: string[] = [];
+    if (b.status !== 'open') fields.push(`status=${b.status}`);
+    if (b.closeReason) fields.push('close reason');
+    if (b.notes) fields.push('notes');
+    if (fields.length > 0) offenders.push({ id: b.id, fields });
+  }
+  return offenders;
+}
+
+// The rationale, surfaced AT THE POINT OF FAILURE (C1.2 point 4: document why the
+// guard exists). Reused verbatim in the thrown error so an operator who trips it
+// learns the reason, not just the rule.
+const GUARD_RATIONALE =
+  'A post-run bead carries its implementation in its close reason and round notes; ' +
+  'exporting it would hand a baseline the answers. Freeze and export at PLAN TIME, ' +
+  'or pass --allow-executed to export the history anyway (the header will be marked).';
+
+export class ExecutedBeadError extends Error {
+  constructor(public readonly offenders: ExecutedBead[]) {
+    super(
+      `Refusing to export ${offenders.length} executed bead${offenders.length === 1 ? '' : 's'} ` +
+        `(no output written):\n` +
+        offenders.map(o => `  ${o.id} — ${o.fields.join(', ')}`).join('\n') +
+        `\n${GUARD_RATIONALE}`,
+    );
+    this.name = 'ExecutedBeadError';
+  }
+}
+
 // ── markdown format ──────────────────────────────────────────────────────────
 
 // The fixed lead paragraph. States, in plain prose, that the listing IS a valid
@@ -308,6 +373,24 @@ export const markdownFormat: ExportFormat = {
     out.push(`# ${doc.goal}`);
     out.push('');
     out.push(`${doc.beads.length} bead${doc.beads.length === 1 ? '' : 's'}.`);
+    // Provenance block (C1.2): ties this export to an exact frozen state. All three
+    // values are content-derived, so they stay byte-stable across runs of the same
+    // state — they never break C1.1's determinism.
+    const p = doc.provenance;
+    if (p) {
+      out.push('');
+      out.push(`- Source snapshot: ${p.snapshotId ?? '(not linked to a freeze snapshot)'}`);
+      out.push(`- Beads repo HEAD: ${p.beadsHeadSha ?? '(unavailable)'}`);
+      out.push(`- Bead-id hash: ${p.beadIdHash}`);
+      if (p.containsExecutionHistory) {
+        out.push('');
+        out.push(
+          '> ⚠ WARNING: this export CONTAINS EXECUTION HISTORY (--allow-executed). Closed ' +
+            'beads and their close reasons / notes are included — it is NOT a clean plan-time ' +
+            'baseline and must not be used as one.',
+        );
+      }
+    }
     out.push('');
     out.push(ORDER_NOTE);
     out.push('');
@@ -341,6 +424,22 @@ export const markdownFormat: ExportFormat = {
         out.push('');
         out.push(b.design);
       }
+      // Execution history — the leak the guard exists to stop. These fields are only
+      // present on a bead that has been worked, so a clean plan-time export never
+      // reaches them; they render ONLY under --allow-executed (the guard rejects the
+      // export otherwise), where the header already warns the reader.
+      if (b.closeReason) {
+        out.push('');
+        out.push('**Close reason (execution history)**');
+        out.push('');
+        out.push(b.closeReason);
+      }
+      if (b.notes) {
+        out.push('');
+        out.push('**Notes (execution history)**');
+        out.push('');
+        out.push(b.notes);
+      }
     }
 
     out.push('');
@@ -360,20 +459,49 @@ const FORMATS: Record<string, ExportFormat> = { md: markdownFormat };
 
 // ── command ──────────────────────────────────────────────────────────────────
 
-// The IO seam: production loads the bead snapshot through the bd wrapper; tests
-// inject a fixture JSON string so the whole command can be exercised without a
-// real beads database.
+// State-derived provenance for an export: the beads repo HEAD and the bead-id hash
+// (the two fields freeze also records), computed the SAME way freeze computes them.
+export interface ExportProvenanceInputs {
+  beadsHeadSha: string | null;
+  beadIdHash: string;
+}
+
+// The IO seam: production loads the bead snapshot through the bd wrapper and the
+// provenance from the beads repo; tests inject fixtures so the whole command can be
+// exercised without a real beads database, git repo, or freeze snapshot.
 export interface ExportDeps {
   loadBeadsJson(kshetra: KshetraConfig): Promise<string>;
   registry(): KshetraConfig[];
+  loadProvenance(kshetra: KshetraConfig): Promise<ExportProvenanceInputs>;
+  // Read a freeze snapshot's manifest for the --snapshot cross-check. Returns just
+  // the two fields the cross-check needs — the snapshot id to cite and the bead-id
+  // hash to match against the exported state. Throws if the directory is not a
+  // snapshot (readManifest's contract).
+  readSnapshotManifest(dir: string): { snapshotId: string; beadIdHash: string };
 }
 
 const defaultDeps: ExportDeps = {
   loadBeadsJson: kshetra => bd(kshetra).list({ status: 'open,in_progress,blocked,deferred,closed' }),
   registry: () => loadRegistry(),
+  async loadProvenance(kshetra) {
+    // Beads HEAD is best-effort (a beads dir that is not a git checkout records
+    // null rather than failing the export) — mirrors freeze's own handling.
+    let beadsHeadSha: string | null = null;
+    try {
+      beadsHeadSha = await git(kshetra.beads.path).headSha();
+    } catch {
+      beadsHeadSha = null;
+    }
+    return { beadsHeadSha, beadIdHash: readBeadStats(kshetra.beads.path).beadIdHash };
+  },
+  readSnapshotManifest(dir) {
+    const m = readManifest(dir);
+    return { snapshotId: m.snapshotId, beadIdHash: m.beads.beadIdHash };
+  },
 };
 
-export async function runExport(ctx: CommandContext, deps: ExportDeps = defaultDeps): Promise<void> {
+export async function runExport(ctx: CommandContext, overrides: Partial<ExportDeps> = {}): Promise<void> {
+  const deps: ExportDeps = { ...defaultDeps, ...overrides };
   const id = ctx.flag('--kshetra');
   if (!id) throw new Error('export requires --kshetra <id>.');
   const out = ctx.flag('--out');
@@ -383,12 +511,23 @@ export async function runExport(ctx: CommandContext, deps: ExportDeps = defaultD
   if (!writer) {
     throw new Error(`Unsupported --format "${format}": expected one of ${Object.keys(FORMATS).join(', ')}.`);
   }
+  const allowExecuted = ctx.has('--allow-executed');
+  const snapshotDir = ctx.flag('--snapshot');
 
   const kshetra = deps.registry().find(k => k.id === id);
   if (!kshetra) throw new Error(`Kshetra not found: ${id}`);
 
   const beads = parseBeads(await deps.loadBeadsJson(kshetra));
   const doc = buildExportDocument(beads, { epic: ctx.flag('--epic') });
+
+  // THE GUARD (C1.2): refuse to export beads that carry execution history, which
+  // would leak the answers, UNLESS --allow-executed. Runs before any provenance IO
+  // or file write, so a rejected export touches nothing. Scans the beads that would
+  // actually ship (the scoped, ordered set).
+  const offenders = findExecutedBeads(doc.beads);
+  if (offenders.length > 0 && !allowExecuted) {
+    throw new ExecutedBeadError(offenders);
+  }
 
   // An --epic scope that resolves to zero work beads is almost always a mistake —
   // a typo'd epic id, or a kshetra whose hierarchy is expressed through 'blocks'
@@ -402,9 +541,34 @@ export async function runExport(ctx: CommandContext, deps: ExportDeps = defaultD
     );
   }
 
+  // Provenance: the state-derived values always; the snapshot id only when
+  // --snapshot names a freeze manifest. A named snapshot whose recorded state does
+  // NOT match the beads being exported is a provenance falsehood — fail loudly
+  // (write nothing) rather than stamp a citation the export doesn't satisfy.
+  const { beadsHeadSha, beadIdHash } = await deps.loadProvenance(kshetra);
+  let snapshotId: string | null = null;
+  if (snapshotDir) {
+    const m = deps.readSnapshotManifest(snapshotDir);
+    if (m.beadIdHash !== beadIdHash) {
+      throw new Error(
+        `--snapshot ${snapshotDir} does not match the exported state (no output written): ` +
+          `manifest bead-id hash ${m.beadIdHash} ≠ current ${beadIdHash}. ` +
+          `The snapshot describes a different bead graph than the one being exported.`,
+      );
+    }
+    snapshotId = m.snapshotId;
+  }
+  doc.provenance = {
+    snapshotId,
+    beadsHeadSha,
+    beadIdHash,
+    containsExecutionHistory: offenders.length > 0,
+  };
+
   const body = writer.render(doc);
   writeFileSync(out, body, 'utf8');
 
   const scope = doc.epicId ? `epic ${doc.epicId}` : 'all beads';
-  console.log(`exported ${doc.beads.length} bead${doc.beads.length === 1 ? '' : 's'} (${scope}) → ${out}`);
+  const warn = offenders.length > 0 ? ' ⚠ WITH EXECUTION HISTORY' : '';
+  console.log(`exported ${doc.beads.length} bead${doc.beads.length === 1 ? '' : 's'} (${scope})${warn} → ${out}`);
 }

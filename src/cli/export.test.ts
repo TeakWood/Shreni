@@ -9,6 +9,7 @@ import {
   buildExportDocument,
   markdownFormat,
   runExport,
+  findExecutedBeads,
   ExportCycleError,
   type ExportBead,
   type ExportDeps,
@@ -91,6 +92,30 @@ describe('parseBeads', () => {
     const beads = parseBeads(JSON.stringify([row('a', { closeReason: 'fixed in abc', notes: 'round 1' })]));
     expect(beads[0].closeReason).toBe('fixed in abc');
     expect(beads[0].notes).toBe('round 1');
+  });
+});
+
+describe('findExecutedBeads', () => {
+  it('flags non-open status, close reason, and notes; names each field', () => {
+    const beads = parseBeads(
+      JSON.stringify([
+        row('clean', {}), // open, no notes → not an offender
+        row('closed', { status: 'closed', closeReason: 'fixed it' }),
+        row('noted', { notes: 'round 1 feedback' }),
+        row('inprog', { status: 'in_progress' }),
+      ]),
+    );
+    const offenders = findExecutedBeads(beads);
+    const byId = Object.fromEntries(offenders.map(o => [o.id, o.fields]));
+    expect(byId.clean).toBeUndefined();
+    expect(byId.closed).toEqual(['status=closed', 'close reason']);
+    expect(byId.noted).toEqual(['notes']);
+    expect(byId.inprog).toEqual(['status=in_progress']);
+  });
+
+  it('returns [] for an all-open, note-free plan-time set', () => {
+    const beads = parseBeads(JSON.stringify([row('a'), row('b'), row('c')]));
+    expect(findExecutedBeads(beads)).toEqual([]);
   });
 });
 
@@ -271,9 +296,12 @@ describe('runExport (command wiring)', () => {
     row('e.2', { parent: 'e', priority: 1, title: 'Two', blockedBy: ['e.1'] }),
   ]);
 
-  const deps = (json: string): ExportDeps => ({
+  const deps = (json: string, over: Partial<ExportDeps> = {}): Partial<ExportDeps> => ({
     loadBeadsJson: async () => json,
     registry: () => [kshetra],
+    loadProvenance: async () => ({ beadsHeadSha: 'abc123', beadIdHash: 'sha256:deadbeef' }),
+    readSnapshotManifest: () => ({ snapshotId: 'snap:fixture', beadIdHash: 'sha256:deadbeef' }),
+    ...over,
   });
 
   beforeEach(() => {
@@ -312,6 +340,59 @@ describe('runExport (command wiring)', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no work beads'));
     expect(existsSync(outFile)).toBe(true); // still writes — an empty epic is legal
     warn.mockRestore();
+  });
+
+  it('refuses to export a scope containing a closed bead, naming it and writing nothing', async () => {
+    const json = JSON.stringify([
+      row('e', { type: 'epic', title: 'Study Epic' }),
+      row('e.1', { parent: 'e' }),
+      row('e.2', { parent: 'e', status: 'closed', closeReason: 'fixed in abc123' }),
+    ]);
+    await expect(
+      runExport(makeContext(['--kshetra', 'testk', '--epic', 'e', '--out', outFile]), deps(json)),
+    ).rejects.toThrow(/e\.2 — status=closed, close reason/);
+    expect(existsSync(outFile)).toBe(false); // wrote nothing
+  });
+
+  it('--allow-executed exports the same scope and marks the header with a warning', async () => {
+    const json = JSON.stringify([
+      row('e', { type: 'epic', title: 'Study Epic' }),
+      row('e.1', { parent: 'e', status: 'closed', closeReason: 'the answer' }),
+    ]);
+    await runExport(
+      makeContext(['--kshetra', 'testk', '--epic', 'e', '--allow-executed', '--out', outFile]),
+      deps(json),
+    );
+    const md = readFileSync(outFile, 'utf8');
+    expect(md).toMatch(/⚠ WARNING: this export CONTAINS EXECUTION HISTORY/);
+    expect(md).toContain('the answer'); // the leaked close reason is present, as asked
+  });
+
+  it('records provenance (snapshot id, beads HEAD, bead-id hash) in the header', async () => {
+    await runExport(
+      makeContext(['--kshetra', 'testk', '--epic', 'e', '--snapshot', '/snap', '--out', outFile]),
+      deps(fixture),
+    );
+    const md = readFileSync(outFile, 'utf8');
+    expect(md).toContain('- Source snapshot: snap:fixture');
+    expect(md).toContain('- Beads repo HEAD: abc123');
+    expect(md).toContain('- Bead-id hash: sha256:deadbeef');
+  });
+
+  it('without --snapshot, the header notes the export is not linked to a snapshot', async () => {
+    await runExport(makeContext(['--kshetra', 'testk', '--epic', 'e', '--out', outFile]), deps(fixture));
+    const md = readFileSync(outFile, 'utf8');
+    expect(md).toContain('- Source snapshot: (not linked to a freeze snapshot)');
+  });
+
+  it('fails (writes nothing) when --snapshot names a manifest whose state differs', async () => {
+    const mismatched = deps(fixture, {
+      readSnapshotManifest: () => ({ snapshotId: 'snap:other', beadIdHash: 'sha256:different' }),
+    });
+    await expect(
+      runExport(makeContext(['--kshetra', 'testk', '--epic', 'e', '--snapshot', '/snap', '--out', outFile]), mismatched),
+    ).rejects.toThrow(/does not match the exported state/);
+    expect(existsSync(outFile)).toBe(false);
   });
 
   it('rejects an unknown kshetra', async () => {

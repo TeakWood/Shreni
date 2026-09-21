@@ -254,8 +254,8 @@ export const COMMANDS: Command[] = [
   },
   {
     name: 'export',
-    summary: 'Export a kshetra\'s bead graph as a deterministic, topologically ordered markdown file',
-    usage: '--kshetra <id> [--epic <id>] [--format md] --out <file>',
+    summary: 'Export a kshetra\'s bead graph as a deterministic, topologically ordered markdown file (refuses executed beads — they leak the answers — unless --allow-executed)',
+    usage: '--kshetra <id> [--epic <id>] [--format md] [--snapshot <dir>] [--allow-executed] --out <file>',
     run(ctx) {
       return runExport(ctx);
     },
