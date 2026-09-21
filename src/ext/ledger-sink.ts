@@ -16,9 +16,33 @@
 
 import { appendFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
-import type { LoggedEvent } from '../sthapathi/activity-log.js';
+import { SCHEMA_VERSION, type ActivityEvent, type LoggedEvent } from '../sthapathi/activity-log.js';
 import type { EventSink } from './types.js';
 import { isDecisionGrade, toLedgerEntry } from './ledger.js';
+
+// Append one decision-grade event to a ledger.jsonl, filtering + mapping exactly
+// as the sink does. The single write path shared by the worker's sink and the
+// direct CLI appender below.
+function writeLedgerEntry(ledgerPath: string, ev: LoggedEvent): void {
+  if (!isDecisionGrade(ev)) return; // run-log tier stays local, out of git
+  const entry = toLedgerEntry(ev);
+  mkdirSync(dirname(ledgerPath), { recursive: true });
+  appendFileSync(ledgerPath, JSON.stringify(entry) + '\n', 'utf8');
+}
+
+// Append a decision-grade event to a ledger.jsonl from OUTSIDE the worker's emit
+// pipeline — for CLI commands (shreni freeze / restore, epic Shreni-beads-ius)
+// that record a kshetra-level decision but never run a worker/SinkRegistry. The
+// envelope's ts/schemaVersion are stamped here the way emit() would; there is no
+// runId/lotId (no governing run). Non-fatal by contract: callers should treat a
+// throw as best-effort audit, never fail the underlying operation on it.
+export function appendLedgerEvent(ledgerPath: string, ev: ActivityEvent): void {
+  writeLedgerEntry(ledgerPath, {
+    ...ev,
+    ts: new Date().toISOString(),
+    schemaVersion: SCHEMA_VERSION,
+  });
+}
 
 export interface LedgerSinkOpts {
   // The Kshetra this sink writes for. A worker process drives exactly one
@@ -43,9 +67,6 @@ export function makeLedgerSink(opts: LedgerSinkOpts): EventSink {
     name: 'ledger',
     handle(ev: LoggedEvent): void {
       if (ev.kshetra !== kshetraId) return; // only this Kshetra's events
-      if (!isDecisionGrade(ev)) return; // run-log tier stays local, out of git
-      const entry = toLedgerEntry(ev);
-      mkdirSync(dirname(ledgerPath), { recursive: true });
       // ACCEPTED RISK (4a2.11): this append shares the beads working tree with
       // syncBeads' `git add -A`/commit/pull --rebase (sthapathi/beads.ts), and
       // there is no cross-lock — the sync's in-flight map only serializes syncs
@@ -66,7 +87,7 @@ export function makeLedgerSink(opts: LedgerSinkOpts): EventSink {
       //   • worst case is ONE deferred/lost ledger entry — never issues.jsonl
       //     corruption — and the same event is also in the local activity.jsonl.
       // Decision-grade events are O(rounds), so the window is rarely even entered.
-      appendFileSync(ledgerPath, JSON.stringify(entry) + '\n', 'utf8');
+      writeLedgerEntry(ledgerPath, ev);
     },
   };
 }

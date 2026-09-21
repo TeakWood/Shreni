@@ -9,6 +9,7 @@ import {
   moveTree,
   pathSizeBytes,
   readManifest,
+  computeSnapshotId,
   MANIFEST_FILENAME,
 } from './snapshot.js';
 
@@ -146,5 +147,21 @@ describe('readManifest', () => {
   it('parses a valid manifest', () => {
     writeFileSync(join(dir, MANIFEST_FILENAME), JSON.stringify({ kshetraId: 'k', schemaVersion: 1 }));
     expect(readManifest(dir)).toMatchObject({ kshetraId: 'k', schemaVersion: 1 });
+  });
+});
+
+describe('computeSnapshotId', () => {
+  it('is stable, key-order independent, and ignores its own snapshotId field', () => {
+    const a = computeSnapshotId({ kshetraId: 'k', schemaVersion: 1, createdAt: 't' } as never);
+    const b = computeSnapshotId({ schemaVersion: 1, createdAt: 't', kshetraId: 'k' } as never);
+    const c = computeSnapshotId({ kshetraId: 'k', schemaVersion: 1, createdAt: 't', snapshotId: 'whatever' } as never);
+    expect(a).toMatch(/^snap:[0-9a-f]{32}$/);
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+  });
+  it('changes when the content changes', () => {
+    const a = computeSnapshotId({ kshetraId: 'k', createdAt: 't1' } as never);
+    const b = computeSnapshotId({ kshetraId: 'k', createdAt: 't2' } as never);
+    expect(a).not.toBe(b);
   });
 });

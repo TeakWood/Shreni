@@ -102,6 +102,54 @@ describe('renderShow', () => {
     expect(out).not.toContain('APPROVED');
   });
 
+  it('renders a state_restored boundary in the timeline, positioned by ts (epic Shreni-beads-ius)', () => {
+    const boundary: LedgerEntry = {
+      ts: '2026-09-16T00:00:02.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: '',
+      kind: 'state_restored',
+      payload: { snapshotId: 'snap:abc', archivePath: '/arch/x', clean: true, beadCount: 2, memoryCount: 1 },
+    };
+    const out = renderShow(
+      { id: 'b1', title: 'X', status: 'closed', type: 'task', priority: null, criteria: '' },
+      [
+        entry('task_claimed', '2026-09-16T00:00:01.000Z', { title: 'X' }),
+        entry('merge_done', '2026-09-16T00:00:03.000Z', { mergePolicy: 'push' }),
+      ],
+      new Map(),
+      [boundary],
+    );
+    expect(out).toContain('state restored from snapshot snap:abc');
+    expect(out).toContain('entries above predate this');
+    expect(out).toContain('per-trial feeds cleaned');
+    // Boundary sits between the earlier CLAIMED and the later MERGE (ts ordering).
+    expect(out.indexOf('CLAIMED')).toBeLessThan(out.indexOf('RESTORE'));
+    expect(out.indexOf('RESTORE')).toBeLessThan(out.indexOf('MERGE'));
+    // 3 entries: the two bead entries + the boundary.
+    expect(out).toContain('Timeline (3 ledger entries):');
+  });
+
+  it('surfaces a restore boundary even when the bead itself has no other entries', () => {
+    const boundary: LedgerEntry = {
+      ts: '2026-09-16T00:00:02.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: '',
+      kind: 'state_restored',
+      payload: { snapshotId: 'snap:z', archivePath: '/a', clean: false, beadCount: 0, memoryCount: 0 },
+    };
+    const out = renderShow(
+      { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },
+      [], new Map(), [boundary],
+    );
+    expect(out).not.toContain('no ledger entries');
+    expect(out).toContain('state restored from snapshot snap:z');
+  });
+
+  it('renders a state_frozen entry with counts', () => {
+    const out = renderShow(
+      { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },
+      [entry('state_frozen', '2026-09-16T00:00:05.000Z', { snapshotId: 'snap:f', beadCount: 7, memoryCount: 3, labels: {} })],
+    );
+    expect(out).toContain('FROZEN');
+    expect(out).toContain('snapshot snap:f (7 beads, 3 memories)');
+  });
+
   it('renders an unknown (forward-compat) kind without crashing', () => {
     const out = renderShow(
       { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },

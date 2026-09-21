@@ -132,6 +132,16 @@ export type ActivityEvent =
   // audit-relevant provenance: the reason a trial ended belongs in the git-tracked
   // ledger, not only on a terminal that scrolls away. Decision-grade → ledger.
   | { type: 'drain_finished';   kshetra: string; lotId: string; reason: string; scope: string | null; exitCode: number; counts: { filed: number; merged: number; open: number }; stalled: { beadId: string; reason: string }[]; outOfScopeFiled: string[] }
+  // state_frozen / state_restored (DECISION-GRADE, epic Shreni-beads-ius / Study B4):
+  // freeze/restore provenance. Kshetra-level, not bead-level (no beadId — like
+  // worker_started), audience 'audit' (about the whole kshetra's state, never an
+  // agent prompt). `snapshotId` is the manifest's stable content hash so a lot
+  // manifest or trial log can name the exact starting state. state_restored is
+  // emitted AFTER a restore into the restored ledger, so a rewound ledger can be
+  // told apart from one that simply lost history: `shreni show` renders it as an
+  // explicit boundary ("entries above predate the restore").
+  | { type: 'state_frozen';     kshetra: string; snapshotId: string; beadCount: number; memoryCount: number; beadsSha: string | null; labels: Record<string, string> }
+  | { type: 'state_restored';   kshetra: string; snapshotId: string; beadCount: number; memoryCount: number; beadsSha: string | null; archivePath: string; clean: boolean }
   // phase_changed (RUN-LOG, epic hto / Study A3): one scheduler phase transition,
   // with `heldMs` = the monotonic time spent in `from` before moving to `to`. It
   // is how the report attributes select/prepare overhead and idle (poll) time,

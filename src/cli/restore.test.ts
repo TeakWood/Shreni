@@ -165,10 +165,14 @@ describe('runRestore', () => {
 
     await runRestore(ctx(['--kshetra', KID, '--from', snap, '--yes', '--clean', '--archive', archiveBase]));
 
-    // live per-trial feeds are empty
+    // live per-trial feeds are empty (activity/usage fully cleared)
     expect(readFileSync(runtimeFile('activity.jsonl'), 'utf8')).toBe('');
     expect(readFileSync(runtimeFile('usage.jsonl'), 'utf8')).toBe('');
-    expect(readFileSync(join(beadsPath, 'ledger.jsonl'), 'utf8')).toBe('');
+    // the ledger's prior contents are cleared; its ONLY entry is the boundary
+    // marker appended after the wipe (a rewound ledger, not a truncated one).
+    const ledgerLines = readFileSync(join(beadsPath, 'ledger.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    expect(ledgerLines).toHaveLength(1);
+    expect(ledgerLines[0].kind).toBe('state_restored');
 
     // the archive holds the pre-restore activity
     const tsDir = join(archiveBase, readdirSync(archiveBase)[0]);
@@ -183,6 +187,32 @@ describe('runRestore', () => {
     writeFileSync(runtimeFile('activity.jsonl'), '{"t":"changed"}\n');
     await runRestore(ctx(['--kshetra', KID, '--from', snap, '--yes']));
     expect(readFileSync(runtimeFile('activity.jsonl'), 'utf8')).toContain('seed-activity');
+  });
+
+  it('appends state_restored to the restored ledger; --clean makes it the first entry', async () => {
+    const snap = join(WORK, 'snap');
+    await freezeTo(snap);
+    const m = JSON.parse(readFileSync(join(snap, 'manifest.json'), 'utf8'));
+
+    // Default: the snapshot's ledger (with the seed entry) is restored, then
+    // state_restored is appended at the boundary — so the seed is still above it.
+    await runRestore(ctx(['--kshetra', KID, '--from', snap, '--yes']));
+    let lines = readFileSync(join(beadsPath, 'ledger.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    const last = lines[lines.length - 1];
+    expect(last.kind).toBe('state_restored');
+    expect(last.payload.snapshotId).toBe(m.snapshotId);
+    expect(last.payload.archivePath).toContain('archive');
+    expect(last.payload.clean).toBe(false);
+    expect(lines.some(l => l.kind === 'prev-trial' || l.kind === 'task_done')).toBe(true); // seed still above
+
+    // --clean: ledger emptied first, so state_restored is the FIRST (only) entry —
+    // a rewound ledger, not one that silently lost history.
+    await freezeTo(join(WORK, 'snap2'));
+    await runRestore(ctx(['--kshetra', KID, '--from', join(WORK, 'snap2'), '--yes', '--clean']));
+    lines = readFileSync(join(beadsPath, 'ledger.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0].kind).toBe('state_restored');
+    expect(lines[0].payload.clean).toBe(true);
   });
 
   it('refuses without --yes, on a missing kshetra, and while a worker is alive', async () => {

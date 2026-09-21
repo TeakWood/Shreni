@@ -66,6 +66,12 @@ export interface BeadStats {
 
 export interface SnapshotManifest {
   schemaVersion: number;
+  // Stable content id of this snapshot (sha256 over the manifest with this field
+  // omitted), so a lot manifest / trial log / ledger entry can name the exact
+  // starting state. Two freezes of an unchanged kshetra differ only by createdAt,
+  // so the id is snapshot-instance-stable, not state-stable (use beads.beadIdHash
+  // for state equality).
+  snapshotId: string;
   kshetraId: string;
   // ISO timestamp the snapshot was taken.
   createdAt: string;
@@ -186,6 +192,30 @@ export function readLastDoltCommit(beadsPath: string): string | null {
   } catch {
     return null;
   }
+}
+
+// The stable content id of a manifest: sha256 over its canonical JSON (sorted
+// keys) with `snapshotId` itself omitted, so the id never depends on itself. Used
+// by freeze to stamp manifest.snapshotId and by restore to recover it from an
+// (older) snapshot that predates the field.
+export function computeSnapshotId(manifest: Partial<SnapshotManifest>): string {
+  const { snapshotId: _omit, ...rest } = manifest;
+  return 'snap:' + createHash('sha256').update(canonicalJson(rest)).digest('hex').slice(0, 32);
+}
+
+// Canonical JSON with recursively sorted keys, so key order never moves the hash.
+function canonicalJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v && typeof v === 'object') {
+      const src = v as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(src).sort()) out[k] = sort(src[k]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(sort(value));
 }
 
 // Read the snapshot manifest at the root of a snapshot dir. Throws a clear error

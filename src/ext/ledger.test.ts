@@ -70,6 +70,11 @@ describe('isDecisionGrade', () => {
   it('accepts review_ablated (epic 8wi / Study B1)', () => {
     expect(isDecisionGrade(ev({ type: 'review_ablated', beadId: 'b1', round: 1, ablations: ['review'] } as unknown as LoggedEvent))).toBe(true);
   });
+
+  it('accepts state_frozen / state_restored (epic Shreni-beads-ius / Study B4)', () => {
+    expect(isDecisionGrade(ev({ type: 'state_frozen', snapshotId: 's', beadCount: 0, memoryCount: 0, beadsSha: null, labels: {} } as unknown as LoggedEvent))).toBe(true);
+    expect(isDecisionGrade(ev({ type: 'state_restored', snapshotId: 's', beadCount: 0, memoryCount: 0, beadsSha: null, archivePath: '/a', clean: false } as unknown as LoggedEvent))).toBe(true);
+  });
 });
 
 describe('audienceFor', () => {
@@ -84,6 +89,11 @@ describe('audienceFor', () => {
       expect(audienceFor(kind)).toBe<LedgerAudience>('operator');
     }
     expect(audienceFor('merge_done')).toBe<LedgerAudience>('audit');
+  });
+
+  it('classifies state_frozen / state_restored as audit-only — never agent-visible (Study B4)', () => {
+    expect(audienceFor('state_frozen')).toBe<LedgerAudience>('audit');
+    expect(audienceFor('state_restored')).toBe<LedgerAudience>('audit');
   });
 
   it('classifies non-decision kinds as audit-only (most restrictive)', () => {

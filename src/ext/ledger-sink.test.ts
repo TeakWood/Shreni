@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { makeLedgerSink } from './ledger-sink.js';
+import { makeLedgerSink, appendLedgerEvent } from './ledger-sink.js';
 import { SinkRegistry } from './sink-registry.js';
 import { parseLedgerLines } from './ledger.js';
 import type { EventSink } from './types.js';
@@ -32,6 +32,25 @@ describe('makeLedgerSink', () => {
     expect(entries.map(e => e.kind)).toEqual(['task_claimed', 'merge_done']);
     expect(entries[0]).toMatchObject({ kshetra: 'k1', beadId: 'b1', runId: 'r1', payload: { title: 't' } });
     expect(entries[1].payload).toEqual({ mergePolicy: 'push', sha: 'abc' });
+  });
+
+  it('appendLedgerEvent stamps ts/schemaVersion and appends a decision-grade event directly', () => {
+    appendLedgerEvent(ledgerPath, {
+      type: 'state_frozen', kshetra: 'k1', snapshotId: 'snap:x',
+      beadCount: 3, memoryCount: 1, beadsSha: 'sha', labels: { arm: 'A' },
+    });
+    const entries = parseLedgerLines(readFileSync(ledgerPath, 'utf8'));
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe('state_frozen');
+    expect(entries[0].schemaVersion).toBe(1);
+    expect(typeof entries[0].ts).toBe('string');
+    expect(entries[0].beadId).toBe(''); // kshetra-level
+    expect(entries[0].payload).toMatchObject({ snapshotId: 'snap:x', beadCount: 3, labels: { arm: 'A' } });
+  });
+
+  it('appendLedgerEvent drops a non-decision-grade event (never grows the git-tracked ledger)', () => {
+    appendLedgerEvent(ledgerPath, { type: 'beads_synced', kshetra: 'k1' });
+    expect(existsSync(ledgerPath)).toBe(false);
   });
 
   it('folds a decision-grade context_compacted event into ledger.jsonl (epic 408/A1)', () => {

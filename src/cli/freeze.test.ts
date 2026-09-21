@@ -33,6 +33,7 @@ function seedBeads(issues: object[]): void {
     join(beadsPath, 'export-state.json'),
     JSON.stringify({ last_dolt_commit: 'dolt-xyz', issues: issues.length }),
   );
+  writeFileSync(join(beadsPath, 'ledger.jsonl'), JSON.stringify({ kind: 'task_done', beadId: 'testk-2' }) + '\n');
   // Make it a real git repo so headSha is captured.
   execFileSync('git', ['-C', beadsPath, 'init', '-q']);
   execFileSync('git', ['-C', beadsPath, 'add', '-A']);
@@ -130,6 +131,26 @@ describe('runFreeze', () => {
     expect(slice).toEqual({ paused: true, reason: 'manual' });
     const flagsEntry = m.locations.find((l: { key: string }) => l.key === 'flags');
     expect(flagsEntry.sliceKey).toBe(KID);
+  });
+
+  it('stamps a stable snapshotId and appends a state_frozen entry to the live ledger', async () => {
+    const out = join(WORK, 'snap');
+    await runFreeze(ctx(['--kshetra', KID, '--out', out, '--label', 'arm=A']));
+    const m = JSON.parse(readFileSync(join(out, 'manifest.json'), 'utf8'));
+    expect(m.snapshotId).toMatch(/^snap:[0-9a-f]{32}$/);
+
+    // The snapshot's OWN ledger predates the freeze (copied before the append)...
+    expect(existsSync(join(out, 'beads', 'ledger.jsonl'))).toBe(true);
+    expect(readFileSync(join(out, 'beads', 'ledger.jsonl'), 'utf8')).not.toContain('state_frozen');
+    // ...but the LIVE ledger records it.
+    const live = readFileSync(join(beadsPath, 'ledger.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    const frozen = live.find(e => e.kind === 'state_frozen');
+    expect(frozen).toBeTruthy();
+    expect(frozen.payload.snapshotId).toBe(m.snapshotId);
+    expect(frozen.payload.beadCount).toBe(2);
+    expect(frozen.payload.memoryCount).toBe(1);
+    expect(frozen.payload.labels).toEqual({ arm: 'A' });
+    expect(frozen.beadId).toBe(''); // kshetra-level, not bead-level
   });
 
   it('bead-id hash is stable across two consecutive freezes of an unchanged kshetra', async () => {

@@ -17,8 +17,10 @@ import {
   moveTree,
   readBeadStats,
   readLastDoltCommit,
+  computeSnapshotId,
   SNAPSHOT_SCHEMA_VERSION,
 } from '../kshetra/snapshot';
+import { appendLedgerEvent } from '../ext/index';
 
 // Filesystem-safe timestamp for the archive dir name (colons/dots break some
 // tools). Derived from the clock, never from the snapshot.
@@ -124,8 +126,7 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
     }
   }
 
-  // ── Verify against the manifest and fail non-zero on ANY mismatch — a silent
-  // partial restore would invalidate every trial after it.
+  // Post-restore facts, read once for both the ledger boundary and verification.
   const stats = readBeadStats(kshetra.beads.path);
   let headSha: string | null = null;
   try {
@@ -136,6 +137,33 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
   const doltCommit = readLastDoltCommit(kshetra.beads.path);
   const slice = getKshetraState(kshetra);
 
+  // Record the restore in the RESTORED ledger, AFTER the restore (and after any
+  // --clean wipe) but BEFORE verification. It lands at the boundary between the
+  // rewound snapshot entries and whatever runs next, so a rewound ledger is
+  // distinguishable from one that simply lost history (shreni show renders it as
+  // an explicit marker). Emitted before the verify gate on purpose: the rewind is
+  // a physical fact worth recording even when verification then fails — that is
+  // exactly the case where an unmarked, rewound ledger would mislead most. With
+  // --clean the ledger was emptied, so this is its first entry. Best-effort audit:
+  // a ledger write must not fail an otherwise-completed restore.
+  const snapshotId = manifest.snapshotId || computeSnapshotId(manifest);
+  try {
+    appendLedgerEvent(join(kshetra.beads.path, 'ledger.jsonl'), {
+      type: 'state_restored',
+      kshetra: id,
+      snapshotId,
+      beadCount: stats.beadCount,
+      memoryCount: stats.memoryCount,
+      beadsSha: headSha,
+      archivePath: archiveTo,
+      clean,
+    });
+  } catch (err) {
+    console.error(`warning: could not append state_restored to ledger: ${(err as Error).message}`);
+  }
+
+  // ── Verify against the manifest and fail non-zero on ANY mismatch — a silent
+  // partial restore would invalidate every trial after it.
   const failures: string[] = [];
   const check = (name: string, ok: boolean, got: unknown, want: unknown) => {
     if (!ok) failures.push(`${name}: got ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`);

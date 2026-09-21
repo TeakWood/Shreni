@@ -104,6 +104,12 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     // O(1) per drain, audit-relevant. The git-tracked record of a trial's outcome
     // (a stalled trial must never be readable as a completed one).
     case 'drain_finished':
+    // state_frozen / state_restored (epic Shreni-beads-ius / Study B4): freeze and
+    // restore provenance — O(1) per snapshot/restore, audit-relevant. The
+    // git-tracked record that a kshetra's state was captured or rewound (a rewound
+    // ledger must be distinguishable from one that lost history).
+    case 'state_frozen':
+    case 'state_restored':
       return true;
     case 'round_start':
     case 'agent_text':
@@ -180,6 +186,12 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     // symmetric with worker_started (the lot's birth). Surfaced to operators via
     // the report (which reads the full event stream, not audience-filtered).
     case 'drain_finished':
+    // state_frozen / state_restored (epic Shreni-beads-ius / Study B4): provenance
+    // about the whole kshetra's stored state, NOT task context — the most
+    // restrictive audience, symmetric with worker_started. Surfaced to operators
+    // via `shreni show` (which reads at audit clearance), never to an agent.
+    case 'state_frozen':
+    case 'state_restored':
       return 'audit';
     // Non-decision kinds. They never reach ledger.jsonl (isDecisionGrade filters
     // them at the sink), but are classified so this switch stays exhaustive over

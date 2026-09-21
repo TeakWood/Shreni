@@ -13,11 +13,13 @@ import {
   pathSizeBytes,
   readBeadStats,
   readLastDoltCommit,
+  computeSnapshotId,
   MANIFEST_FILENAME,
   SNAPSHOT_SCHEMA_VERSION,
   type SnapshotLocationEntry,
   type SnapshotManifest,
 } from '../kshetra/snapshot';
+import { appendLedgerEvent } from '../ext/index';
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -130,6 +132,7 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
 
   const manifest: SnapshotManifest = {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    snapshotId: '', // filled in below once the rest of the manifest is assembled
     kshetraId: id,
     createdAt: new Date().toISOString(),
     shreniBuild: getBuildIdentity(),
@@ -146,9 +149,27 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
     locations: entries,
     labels,
   };
+  manifest.snapshotId = computeSnapshotId(manifest);
 
   const manifestPath = join(out, MANIFEST_FILENAME);
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+
+  // Record the freeze in the LIVE ledger (best-effort audit — a ledger write must
+  // never fail the snapshot). The snapshot's own ledger.jsonl was copied before
+  // this line, so it records state as-of freeze, not its own state_frozen entry.
+  try {
+    appendLedgerEvent(join(kshetra.beads.path, 'ledger.jsonl'), {
+      type: 'state_frozen',
+      kshetra: id,
+      snapshotId: manifest.snapshotId,
+      beadCount: beadStats.beadCount,
+      memoryCount: beadStats.memoryCount,
+      beadsSha: headSha,
+      labels,
+    });
+  } catch (err) {
+    console.error(`warning: could not append state_frozen to ledger: ${(err as Error).message}`);
+  }
 
   const captured = entries.filter(e => e.present).map(e => e.key);
   const totalBytes = entries.reduce((sum, e) => sum + e.sizeBytes, 0);

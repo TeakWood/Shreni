@@ -103,6 +103,16 @@ function lotManifests(all: LedgerEntry[]): Map<string, LedgerEntry> {
   return map;
 }
 
+// The restore boundaries in this kshetra's ledger (state_restored, epic
+// Shreni-beads-ius). Kshetra-level (beadId ''), so they surface via the '' bead
+// query at audit clearance and apply to EVERY bead's timeline — a rewind rewound
+// the whole shared ledger. Merged into the timeline by ts so the marker lands at
+// the point history was rewound, letting a reader tell a rewound ledger apart
+// from one that lost entries.
+function restoreBoundaries(all: LedgerEntry[]): LedgerEntry[] {
+  return readLedger(all, '', { audience: 'audit' }).filter(e => e.kind === 'state_restored');
+}
+
 // ── rendering ────────────────────────────────────────────────────────────────
 
 // Compact, stable timestamp (UTC, no locale): "2026-09-16 03:12:44".
@@ -170,6 +180,17 @@ function fmtEntry(e: LedgerEntry): string {
       body = `${label('ABLATED')}round ${num(p.round)} — merged WITHOUT review (ablation: ${abls})`;
       break;
     }
+    case 'state_frozen':
+      body = `${label('FROZEN')}snapshot ${text(p.snapshotId)} (${num(p.beadCount)} beads, ${num(p.memoryCount)} memories)`;
+      break;
+    case 'state_restored':
+      // A rewind boundary, not a normal timeline event: everything ABOVE this line
+      // predates the restore. Rendered emphatically so an auditor never mistakes a
+      // rewound ledger for one that silently lost history (epic Shreni-beads-ius).
+      body =
+        `${label('RESTORE')}⟲ state restored from snapshot ${text(p.snapshotId)} — entries above predate this` +
+        `${p.clean ? ' (per-trial feeds cleaned)' : ''}`;
+      break;
     default:
       body = `${label(e.kind)}${JSON.stringify(p)}`;
   }
@@ -324,6 +345,7 @@ export function renderShow(
   header: BeadHeader,
   entries: LedgerEntry[],
   manifests: Map<string, LedgerEntry> = new Map(),
+  boundaries: LedgerEntry[] = [],
 ): string {
   const lines: string[] = [];
   lines.push(`Bead ${header.id}${header.title ? ` — ${header.title}` : ''}`);
@@ -338,11 +360,15 @@ export function renderShow(
   // The governing lot manifest(s) — the conditions each worker ran this bead
   // under (epic yrk / Study B2) — as a header above the timeline.
   lines.push(...renderLotSection(entries, manifests));
-  if (entries.length === 0) {
+  // Merge the kshetra-level restore boundaries into the bead timeline by ts, so a
+  // "state restored" marker appears exactly where history was rewound. Kept out of
+  // the lot section above (they carry no lotId) — they belong in the timeline.
+  const timeline = [...entries, ...boundaries].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  if (timeline.length === 0) {
     lines.push('Timeline: no ledger entries for this bead.');
   } else {
-    lines.push(`Timeline (${entries.length} ledger ${entries.length === 1 ? 'entry' : 'entries'}):`);
-    for (const e of entries) lines.push(fmtEntry(e));
+    lines.push(`Timeline (${timeline.length} ledger ${timeline.length === 1 ? 'entry' : 'entries'}):`);
+    for (const e of timeline) lines.push(fmtEntry(e));
   }
   return lines.join('\n');
 }
@@ -394,5 +420,6 @@ export async function runShow(opts: ShowOpts): Promise<void> {
   const all = loadLedger(kshetra);
   const entries = beadTimeline(all, header.id);
   const manifests = lotManifests(all);
-  console.log(renderShow(header, entries, manifests));
+  const boundaries = restoreBoundaries(all);
+  console.log(renderShow(header, entries, manifests, boundaries));
 }
