@@ -62,7 +62,14 @@ commands (`start`, `stop`, `status`, `pause`, `resume`, `run`, `sync`,
 
 The heart of the system is a small phase machine
 ([`src/sthapathi/index.ts`](src/sthapathi/index.ts)). A worker polls every 30s
-(`DEFAULT_INTERVAL_MS`) and runs one cycle at a time:
+(`DEFAULT_INTERVAL_MS`) and runs one cycle at a time — with one exception: when a
+cycle **completes a task** (`runCycle` returns `'ran'`) the loop re-ticks
+*immediately* instead of waiting out the interval, because the next bead may be
+ready right now and a full interval per bead is pure latency (and, across a
+multi-bead epic, a systematic bias against decomposition). A cycle that finds no
+work (`'no-work'`) or is rejected at PREPARE (`'declined'`) keeps the full
+interval: `'declined'` is the failure-backoff path, where an early re-tick would
+spin hot. This asymmetry applies to both the daemon and `shreni drain`.
 
 ```mermaid
 stateDiagram-v2
@@ -88,8 +95,10 @@ Two invariants make this safe under a repeating timer:
 
 1. **One task at a time is structural, not emergent.** A cycle runs *only* from
    `IDLE`, and the phase is advanced synchronously before the first `await`, so an
-   overlapping tick for the same Kshetra is an immediate no-op. A single-flight
-   latch in `scheduleLoop` additionally skips ticks while a cycle is running.
+   overlapping tick for the same Kshetra is an immediate no-op. `scheduleLoop`
+   additionally schedules the next tick only *after* the current cycle resolves
+   (never overlapping), so the immediate re-tick on `'ran'` is still a single,
+   non-overlapping tick — the same structural guarantee, at zero delay.
 2. **SELECT is read-only; PREPARE is the only mutator.** Choosing the next task
    performs no git operations and no claim, so polling for work can never check
    out `main` underneath an in-flight agent. Only once a task advances to PREPARE

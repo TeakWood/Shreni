@@ -164,8 +164,10 @@ shreni agents                    # see which agent is active and on what
 shreni phalaka start             # optional: local dashboard on 127.0.0.1
 ```
 
-Sthapathi polls each registered project every 30 seconds. When your task is ready,
-the coder ↔ reviewer loop runs and — on approval — the change merges to `main`.
+Sthapathi polls each registered project every 30 seconds (and re-checks
+immediately after finishing a task, so back-to-back beads don't each wait out the
+interval). When your task is ready, the coder ↔ reviewer loop runs and — on
+approval — the change merges to `main`.
 
 ## Prerequisites
 
@@ -480,7 +482,7 @@ shreni start         # start the Sthapathi orchestration loop
 shreni stop          # graceful shutdown (waits for active round to finish)
 ```
 
-Sthapathi polls each registered Kshetra every 30 seconds for ready tasks. P0-priority tasks interrupt the queue immediately.
+Sthapathi polls each registered Kshetra every 30 seconds for ready tasks, and re-ticks immediately after completing one so a chain of ready beads isn't paced by the interval. P0-priority tasks interrupt the queue immediately.
 
 ### Check Status
 

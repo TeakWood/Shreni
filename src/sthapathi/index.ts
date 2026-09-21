@@ -178,26 +178,50 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
     hooks: SchedulerHooks,
     intervalMs = DEFAULT_INTERVAL_MS,
   ): () => void {
-    // Single-flight: skip a tick while the previous cycle is still running.
-    // runCycle calls pickNext (= pickup → preFlightCheck → `git checkout main`)
-    // before its capacity check, so overlapping cycles would check out main
-    // under an in-flight agent and knock it off its bead branch. Holding the
-    // tick until the active runTask resolves keeps pickup off the work repo
-    // while an agent is working (P0 preemption is deferred to idle).
+    // Self-rescheduling loop (epic 7h3 / Study B3): each cycle schedules the next
+    // one when it settles, with the delay chosen by the OUTCOME —
+    //   'ran'  → re-tick immediately (0ms). A task just merged and the next bead
+    //            may be ready NOW; the full interval there is pure latency and,
+    //            across a multi-bead epic, a systematic per-bead bias against
+    //            decomposition (up to one interval lost per bead).
+    //   else   → wait the full interval. 'declined' is the failure-backoff path
+    //            (ARCHITECTURE.md ~L228 — e.g. the same preflight rejection every
+    //            poll); an early re-tick there would spin hot and burn the retry
+    //            budget in seconds. 'no-work' has nothing to hurry for. An errored
+    //            cycle also backs off a full interval.
+    // Single-flight is preserved two ways: the next tick is only ever scheduled
+    // AFTER the current cycle resolves (never overlapping), and runCycle still
+    // enters only from IDLE. The `inFlight` guard is a belt-and-suspenders no-op
+    // against a stray double-fire. An immediate re-tick is still a normal tick.
+    let stopped = false;
     let inFlight = false;
-    const tick = () => {
-      if (inFlight) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const schedule = (delayMs: number): void => {
+      if (stopped) return;
+      timer = setTimeout(tick, delayMs);
+    };
+
+    function tick(): void {
+      if (stopped || inFlight) return;
       inFlight = true;
       runCycle(kshetra, hooks)
+        .then((outcome) => {
+          inFlight = false;
+          schedule(outcome === 'ran' ? 0 : intervalMs);
+        })
         .catch((err: unknown) => {
           console.error(`[sthapathi] cycle error for "${kshetra.id}":`, err);
-        })
-        .finally(() => {
           inFlight = false;
+          schedule(intervalMs);
         });
+    }
+
+    schedule(intervalMs);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
     };
-    const timer = setInterval(tick, intervalMs);
-    return () => clearInterval(timer);
   }
 
   function start(

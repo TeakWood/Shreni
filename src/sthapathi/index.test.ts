@@ -361,6 +361,83 @@ describe('scheduleLoop', () => {
     consoleSpy.mockRestore();
   });
 
+  // Immediate re-tick after a completed task (epic 7h3 / Study B3).
+  it("re-ticks immediately on 'ran' — two ready beads claimed back-to-back, no interval gap", async () => {
+    vi.useFakeTimers();
+    const scheduler = createScheduler();
+    // Two ready beads then nothing. runTask resolves at once, so each cycle 'ran'.
+    const selectNext = vi.fn()
+      .mockResolvedValueOnce(P2_TASK)
+      .mockResolvedValueOnce({ ...P2_TASK, id: 'bd-003' })
+      .mockResolvedValue(null);
+    const hooks = makeHooks({ selectNext });
+
+    const stop = scheduler.scheduleLoop(KSHETRA, hooks, 100);
+    // One interval fires the first tick; its 'ran' outcome re-ticks at 0ms. Drain
+    // the chained 0ms re-ticks with tiny epsilon steps: the second and third
+    // selects land within ~2ms of the first — far under the 100ms interval, which
+    // is the whole point (no per-bead interval gap). The third ('no-work') then
+    // schedules a normal interval wait, so the chain stops at three.
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(selectNext).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBeGreaterThan(0); // the pending interval wait, not a hot 0ms loop
+    stop();
+  });
+
+  it("does NOT re-tick early on 'declined' — next tick lands one full interval later", async () => {
+    vi.useFakeTimers();
+    const scheduler = createScheduler();
+    const hooks = makeHooks({
+      selectNext: vi.fn().mockResolvedValue(P2_TASK),
+      prepareTask: vi.fn().mockResolvedValue(null), // preflight/health rejected → 'declined'
+    });
+
+    const stop = scheduler.scheduleLoop(KSHETRA, hooks, 100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    // No early re-tick: nothing more until a full interval elapses.
+    await vi.advanceTimersByTimeAsync(99);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("does NOT re-tick early on 'no-work' — keeps the full interval", async () => {
+    vi.useFakeTimers();
+    const scheduler = createScheduler();
+    const hooks = makeHooks(); // selectNext → null → 'no-work'
+
+    const stop = scheduler.scheduleLoop(KSHETRA, hooks, 100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('a repeatedly-declining kshetra ticks at most once per interval (no hot loop)', async () => {
+    vi.useFakeTimers();
+    const scheduler = createScheduler();
+    const hooks = makeHooks({
+      selectNext: vi.fn().mockResolvedValue(P2_TASK),
+      prepareTask: vi.fn().mockResolvedValue(null), // always declined
+    });
+
+    const stop = scheduler.scheduleLoop(KSHETRA, hooks, 100);
+    // Ten intervals elapse. If 'declined' re-ticked early the count would explode;
+    // it must be one tick per interval (10, plus at most the boundary tick).
+    await vi.advanceTimersByTimeAsync(1000);
+    const calls = (hooks.selectNext as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(calls).toBeGreaterThanOrEqual(9);
+    expect(calls).toBeLessThanOrEqual(11);
+    stop();
+  });
+
   it('does not start a new cycle while the previous one is still in flight', async () => {
     vi.useFakeTimers();
     const scheduler = createScheduler();
