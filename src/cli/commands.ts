@@ -17,6 +17,7 @@ import { runAgents } from './agents';
 import { runLogs } from './logs';
 import { runRun } from './run';
 import { runDrain, formatDrainResult, drainResultJson } from './drain';
+import { runFreeze } from './freeze';
 import { runSync } from './sync';
 import { initKshetra } from './init-kshetra';
 import { runRegister } from './register';
@@ -239,6 +240,14 @@ export const COMMANDS: Command[] = [
       // signal) — the whole point is a machine-readable end. Exit directly rather
       // than returning to the dispatcher (which only distinguishes 0 from 1).
       process.exit(result.exitCode);
+    },
+  },
+  {
+    name: 'freeze',
+    summary: 'Snapshot a kshetra\'s complete state (beads, runtime, flags, RAG) with a verifiable manifest',
+    usage: '--kshetra <id> --out <dir> [--label key=value ...] [--force]',
+    run(ctx) {
+      return runFreeze(ctx);
     },
   },
   {
