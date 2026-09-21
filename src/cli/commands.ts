@@ -18,6 +18,7 @@ import { runLogs } from './logs';
 import { runRun } from './run';
 import { runDrain, formatDrainResult, drainResultJson } from './drain';
 import { runFreeze } from './freeze';
+import { runExport } from './export';
 import { runRestore } from './restore';
 import { runSync } from './sync';
 import { initKshetra } from './init-kshetra';
@@ -249,6 +250,14 @@ export const COMMANDS: Command[] = [
     usage: '--kshetra <id> --out <dir> [--label key=value ...] [--force]',
     run(ctx) {
       return runFreeze(ctx);
+    },
+  },
+  {
+    name: 'export',
+    summary: 'Export a kshetra\'s bead graph as a deterministic, topologically ordered markdown file',
+    usage: '--kshetra <id> [--epic <id>] [--format md] --out <file>',
+    run(ctx) {
+      return runExport(ctx);
     },
   },
   {
