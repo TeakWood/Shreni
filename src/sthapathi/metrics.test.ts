@@ -142,6 +142,7 @@ describe('computeMetrics — empty log', () => {
       perBead: [], totalTokens: 0, totalCostUsd: 0, unpricedRuns: 0,
       perRunContext: [], perBeadContext: [],
       lots: [],
+      drains: [],
       ablated: { beads: [], byLabel: {} },
     });
   });
@@ -161,6 +162,20 @@ describe('computeMetrics — empty log', () => {
 
   it('treats empty arrays the same as omitted feeds', () => {
     expect(computeMetrics({ events: [], usage: [], notifications: [] })).toEqual(computeMetrics());
+  });
+
+  it('surfaces drain outcomes per lot (epic 7h3 / Study B3)', () => {
+    const m = computeMetrics({
+      events: [
+        ev({ type: 'drain_finished', kshetra: 'k', lotId: 'lot-A', reason: 'complete', scope: null, exitCode: 0, counts: { filed: 0, merged: 3, open: 0 }, stalled: [], outOfScopeFiled: [] }),
+        ev({ type: 'drain_finished', kshetra: 'k', lotId: 'lot-B', reason: 'stalled', scope: 'epic-1', exitCode: 10, counts: { filed: 1, merged: 2, open: 2 }, stalled: [{ beadId: 'mid', reason: 'needs-human' }, { beadId: 'dep', reason: 'blocked-by mid' }], outOfScopeFiled: ['x-9'] }),
+      ],
+    });
+    expect(m.drains).toHaveLength(2);
+    expect(m.drains[0]).toMatchObject({ lotId: 'lot-A', reason: 'complete', exitCode: 0 });
+    expect(m.drains[1]).toMatchObject({ lotId: 'lot-B', reason: 'stalled', exitCode: 10, scope: 'epic-1' });
+    // A stalled drain records its per-bead reasons — never readable as complete.
+    expect(m.drains[1].stalled).toEqual([{ beadId: 'mid', reason: 'needs-human' }, { beadId: 'dep', reason: 'blocked-by mid' }]);
   });
 });
 

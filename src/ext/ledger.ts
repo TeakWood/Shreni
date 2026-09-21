@@ -100,6 +100,10 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     // review_ablated (epic 8wi / Study B1): a round merged without review. It is a
     // decision-grade provenance record — the ledger must show review did NOT happen.
     case 'review_ablated':
+    // drain_finished (epic 7h3 / Study B3): the reason a `shreni drain` ended —
+    // O(1) per drain, audit-relevant. The git-tracked record of a trial's outcome
+    // (a stalled trial must never be readable as a completed one).
+    case 'drain_finished':
       return true;
     case 'round_start':
     case 'agent_text':
@@ -171,6 +175,11 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     // review_ablated (epic 8wi / Study B1): provenance that review was skipped —
     // audit-relevant, and must never read to an agent as task context.
     case 'review_ablated':
+    // drain_finished (epic 7h3 / Study B3): the trial-outcome record. Provenance
+    // about how a drain ended, NOT task context — the most restrictive audience,
+    // symmetric with worker_started (the lot's birth). Surfaced to operators via
+    // the report (which reads the full event stream, not audience-filtered).
+    case 'drain_finished':
       return 'audit';
     // Non-decision kinds. They never reach ledger.jsonl (isDecisionGrade filters
     // them at the sink), but are classified so this switch stays exhaustive over

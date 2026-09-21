@@ -152,6 +152,17 @@ export interface LotTimeBreakdown {
 // denominator is 0 (no rounds / no tasks) is defined as 0, never NaN. Raw counts
 // sit beside every rate so the report (g2k.3) can render either without
 // recomputing.
+// One `shreni drain` outcome (epic 7h3 / Study B3), read from a drain_finished
+// event. Surfaced per lot so a stalled trial can never be read as a completed one.
+export interface DrainOutcome {
+  lotId: string;
+  reason: string;      // complete | stalled | budget
+  exitCode: number;
+  scope: string | null;
+  counts: { filed: number; merged: number; open: number };
+  stalled: { beadId: string; reason: string }[];
+}
+
 export interface Metrics {
   // Task outcomes (task_done events).
   totalTasks: number;
@@ -186,6 +197,10 @@ export interface Metrics {
   // Per-lot time breakdown (epic hto / Study A3), one entry per worker_started
   // lot, in first-seen order. Empty when no lot manifest was recorded (pre-B2).
   lots: LotTimeBreakdown[];
+
+  // Drain outcomes (epic 7h3 / Study B3), one per drain_finished event in order.
+  // Empty for a Kshetra that was never drained.
+  drains: DrainOutcome[];
 
   // Ablated work (epic 8wi / Study B1). `beads` are the beadIds excluded from the
   // product-quality metrics above (their spend is still in perBead/totals);
@@ -399,6 +414,16 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
     perRunContext,
     perBeadContext,
     lots: computeLotBreakdowns(events, notifications, input.interactions ?? []),
+    drains: events
+      .filter((e): e is Extract<LoggedEvent, { type: 'drain_finished' }> => e.type === 'drain_finished')
+      .map(e => ({
+        lotId: e.lotId,
+        reason: e.reason,
+        exitCode: e.exitCode,
+        scope: e.scope,
+        counts: e.counts,
+        stalled: e.stalled,
+      })),
     ablated: {
       beads: [...ablatedBeads].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })),
       byLabel: ablatedByLabel,

@@ -216,6 +216,31 @@ describe('renderReport — time breakdown (epic hto)', () => {
   });
 });
 
+describe('renderReport — drain outcomes (epic 7h3 / Study B3)', () => {
+  it('renders each drain outcome per lot with its reason, exit code, and stalled beads', () => {
+    const out = renderReport(K, computeMetrics({ events: [
+      ev({ type: 'drain_finished', kshetra: K, lotId: 'lot-cccc', reason: 'stalled', scope: 'epic-1', exitCode: 10, counts: { filed: 1, merged: 2, open: 2 }, stalled: [{ beadId: 'mid', reason: 'needs-human' }, { beadId: 'dep', reason: 'blocked-by mid' }], outOfScopeFiled: [] }),
+    ] }));
+    expect(out).toContain('Drain outcomes (per lot)');
+    expect(out).toContain('Lot lot-cccc · stalled (exit 10) · scope epic-1 · filed 1 merged 2 open 2');
+    expect(out).toContain('mid — needs-human');
+    expect(out).toContain('dep — blocked-by mid');
+  });
+
+  it('a stalled drain is never rendered as complete', () => {
+    const out = renderReport(K, computeMetrics({ events: [
+      ev({ type: 'drain_finished', kshetra: K, lotId: 'lot-dddd', reason: 'stalled', scope: null, exitCode: 10, counts: { filed: 0, merged: 0, open: 1 }, stalled: [{ beadId: 'x', reason: 'needs-human' }], outOfScopeFiled: [] }),
+    ] }));
+    expect(out).toContain('stalled (exit 10)');
+    expect(out).not.toContain('complete');
+  });
+
+  it('omits the section when no drain ran', () => {
+    const out = renderReport(K, computeMetrics({ events: [taskDone('b1', true, 1)] }));
+    expect(out).not.toContain('Drain outcomes');
+  });
+});
+
 describe('runReport --json (epic hto)', () => {
   it('emits the full metrics incl. per-lot shreniElapsedMs and breakdown fields', () => {
     mockLoadRegistry.mockReturnValue([KSHETRA]);

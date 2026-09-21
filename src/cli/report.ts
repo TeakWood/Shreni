@@ -145,7 +145,7 @@ export function renderReport(kshetraId: string, m: Metrics): string {
   // hidden behind "no runs".
   if (
     m.totalTasks === 0 && m.totalRounds === 0 && m.perBead.length === 0 &&
-    m.escalations === 0 && m.stuckEvents === 0
+    m.escalations === 0 && m.stuckEvents === 0 && m.drains.length === 0
   ) {
     lines.push('No runs recorded yet.');
     lines.push('Metrics appear once this Kshetra completes work — check back after a run,');
@@ -222,6 +222,21 @@ export function renderReport(kshetraId: string, m: Metrics): string {
     lines.push('');
     lines.push('Time breakdown (per lot)');
     for (const lot of m.lots) lines.push(...renderLotTime(lot));
+  }
+
+  // Drain outcomes per lot (epic 7h3 / Study B3). The reason a drain ended is
+  // shown explicitly, so a stalled trial can never read as a completed one.
+  if (m.drains.length > 0) {
+    lines.push('');
+    lines.push('Drain outcomes (per lot)');
+    for (const d of m.drains) {
+      const scope = d.scope ? ` · scope ${d.scope}` : '';
+      lines.push(
+        `  Lot ${d.lotId.slice(0, 8)} · ${d.reason} (exit ${d.exitCode})${scope} · ` +
+          `filed ${d.counts.filed} merged ${d.counts.merged} open ${d.counts.open}`,
+      );
+      for (const s of d.stalled) lines.push(`    ${s.beadId} — ${s.reason}`);
+    }
   }
 
   return lines.join('\n');

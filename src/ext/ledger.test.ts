@@ -59,6 +59,10 @@ describe('isDecisionGrade', () => {
     expect(isDecisionGrade(ev({ type: 'worker_started', entrypoint: 'worker', subject: {}, process: {}, labels: {} } as unknown as LoggedEvent))).toBe(true);
   });
 
+  it('accepts drain_finished (epic 7h3 / Study B3)', () => {
+    expect(isDecisionGrade(ev({ type: 'drain_finished', lotId: 'l1', reason: 'stalled', scope: null, exitCode: 10, counts: { filed: 0, merged: 0, open: 1 }, stalled: [], outOfScopeFiled: [] } as unknown as LoggedEvent))).toBe(true);
+  });
+
   it('rejects phase_changed run-log (epic hto / Study A3)', () => {
     expect(isDecisionGrade(ev({ type: 'phase_changed', from: 'IDLE', to: 'SELECTING', heldMs: 10 } as unknown as LoggedEvent))).toBe(false);
   });
@@ -106,6 +110,11 @@ describe('audienceFor', () => {
 
   it('classifies review_ablated as audit (epic 8wi / Study B1)', () => {
     expect(audienceFor('review_ablated')).toBe<LedgerAudience>('audit');
+  });
+
+  it('classifies drain_finished as audit (epic 7h3 / Study B3)', () => {
+    // Provenance about how a trial ended — never task context for an agent.
+    expect(audienceFor('drain_finished')).toBe<LedgerAudience>('audit');
   });
 });
 

@@ -122,6 +122,12 @@ export type ActivityEvent =
   // Shreni never branches on them. Decision-grade → ledger (isDecisionGrade);
   // audience 'audit' (about the machinery, never folded into an agent prompt).
   | { type: 'worker_started';   kshetra: string; entrypoint: 'worker' | 'run' | 'drain'; subject: Record<string, unknown>; process: Record<string, unknown>; labels: Record<string, string> }
+  // drain_finished (epic 7h3 / Study B3): the decision-grade record of WHY a
+  // `shreni drain` ended — its reason, exit code, scope, per-status counts, and
+  // each still-open in-scope bead with its stall reason. O(1) per drain,
+  // audit-relevant provenance: the reason a trial ended belongs in the git-tracked
+  // ledger, not only on a terminal that scrolls away. Decision-grade → ledger.
+  | { type: 'drain_finished';   kshetra: string; lotId: string; reason: string; scope: string | null; exitCode: number; counts: { filed: number; merged: number; open: number }; stalled: { beadId: string; reason: string }[]; outOfScopeFiled: string[] }
   // phase_changed (RUN-LOG, epic hto / Study A3): one scheduler phase transition,
   // with `heldMs` = the monotonic time spent in `from` before moving to `to`. It
   // is how the report attributes select/prepare overhead and idle (poll) time,

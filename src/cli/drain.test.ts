@@ -10,8 +10,10 @@ vi.mock('../sthapathi/beads', () => ({
   bd: () => ({ children: mockChildren }),
 }));
 
-const { driveDrain, collectEpicScope } = await import('./drain');
+const { driveDrain, collectEpicScope, drainResultJson, formatDrainResult, openBeadIds } = await import('./drain');
 type DrainDriver = import('./drain').DrainDriver;
+type DrainResult = import('./drain').DrainResult;
+type StalledBead = import('./drain-classify').StalledBead;
 
 const KSHETRA: KshetraConfig = {
   id: 'myapp',
@@ -32,6 +34,7 @@ function fakeDriver(script: {
   isInFlight?: () => boolean;
   isHealing?: () => boolean;
   openInScope?: string[];
+  stalled?: StalledBead[];
 }): { driver: DrainDriver; log: string[]; cycles: () => number } {
   const log: string[] = [];
   let i = 0;
@@ -52,12 +55,18 @@ function fakeDriver(script: {
     isInFlight: () => script.isInFlight?.() ?? false,
     isHealing: () => script.isHealing?.() ?? false,
   };
+  const openIds = script.openInScope ?? [];
   const driver: DrainDriver = {
     runtime,
     openInScope: vi.fn(async () => {
-      log.push(`open:${(script.openInScope ?? []).length}`);
-      return script.openInScope ?? [];
+      log.push(`open:${openIds.length}`);
+      return openIds;
     }),
+    classify: vi.fn(async (ids: string[]) => {
+      log.push(`classify:${ids.length}`);
+      return script.stalled ?? ids.map(id => ({ beadId: id, category: 'open' as const, reason: 'open' }));
+    }),
+    counts: vi.fn(async () => ({ filed: 0, merged: 0, outOfScopeFiled: [] })),
   };
   return { driver, log, cycles: () => i };
 }
@@ -129,11 +138,32 @@ describe('driveDrain', () => {
     expect(result).toMatchObject({ exitCode: 10, reason: 'stalled', openInScope: ['b1'] });
   });
 
-  it('exits 10 (stalled) when open in-scope beads remain', async () => {
-    const { driver } = fakeDriver({ outcomes: ['no-work'], openInScope: ['needs-human-1', 'blocked-2'] });
+  it('exits 10 (stalled) with per-bead classification when open beads remain', async () => {
+    const stalled: StalledBead[] = [
+      { beadId: 'mid', category: 'needs-human', reason: 'needs-human' },
+      { beadId: 'dep', category: 'blocked-by', reason: 'blocked-by mid' },
+    ];
+    const { driver } = fakeDriver({ outcomes: ['no-work'], openInScope: ['mid', 'dep'], stalled });
     const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, noDelay);
     expect(result).toMatchObject({ exitCode: 10, reason: 'stalled' });
-    expect(result.openInScope).toEqual(['needs-human-1', 'blocked-2']);
+    expect(result.openInScope).toEqual(['mid', 'dep']);
+    expect(result.stalled).toEqual(stalled); // classification carried through
+  });
+
+  it('exits 11 (budget) when any open bead is classified budget', async () => {
+    const stalled: StalledBead[] = [
+      { beadId: 'b1', category: 'budget', reason: 'bead b1 has spent $5 of its $5 per-bead budget cap' },
+    ];
+    const { driver } = fakeDriver({ outcomes: ['no-work'], openInScope: ['b1'], stalled });
+    const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, noDelay);
+    expect(result).toMatchObject({ exitCode: 11, reason: 'budget' });
+  });
+
+  it('never classifies as complete while open beads remain (stalled ≠ complete)', async () => {
+    const { driver } = fakeDriver({ outcomes: ['no-work'], openInScope: ['x'] });
+    const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, noDelay);
+    expect(result.reason).not.toBe('complete');
+    expect(result.exitCode).not.toBe(0);
   });
 
   it('stops cleanly on SIGTERM and exits 143, leaving classification to recovery', async () => {
@@ -150,6 +180,22 @@ describe('driveDrain', () => {
     const { driver } = fakeDriver({ outcomes: ['no-work'] });
     const result = await driveDrain(driver, { intervalMs: 100, signalled }, noDelay);
     expect(result.exitCode).toBe(130);
+  });
+});
+
+describe('openBeadIds', () => {
+  const row = (id: string, type: string) => ({ id, title: id, priority: 2, status: 'open', issue_type: type });
+  it('drops epic containers (they stay open after children close and are never worked)', () => {
+    // The scope root epic + a sub-epic must not count as stalled work.
+    const json = JSON.stringify([row('epic-1', 'epic'), row('t1', 'task'), row('sub-epic', 'epic'), row('t2', 'bug')]);
+    expect(openBeadIds(json)).toEqual(['t1', 't2']);
+  });
+  it('applies the scope filter', () => {
+    const json = JSON.stringify([row('t1', 'task'), row('t2', 'task'), row('t3', 'task')]);
+    expect(openBeadIds(json, new Set(['t1', 't3']))).toEqual(['t1', 't3']);
+  });
+  it('returns [] for a malformed payload', () => {
+    expect(openBeadIds('not json')).toEqual([]);
   });
 });
 
@@ -171,5 +217,66 @@ describe('collectEpicScope', () => {
     );
     const scope = await collectEpicScope(KSHETRA, 'epic');
     expect([...scope].sort()).toEqual(['c1', 'epic']);
+  });
+});
+
+const STALLED_RESULT: DrainResult = {
+  exitCode: 10,
+  reason: 'stalled',
+  openInScope: ['mid', 'dep'],
+  stalled: [
+    { beadId: 'mid', category: 'needs-human', reason: 'needs-human' },
+    { beadId: 'dep', category: 'blocked-by', reason: 'blocked-by mid' },
+  ],
+  kshetra: 'myapp',
+  lotId: 'abcdef0123456789',
+  scope: 'epic-1',
+  labels: { arm: 'A' },
+  elapsedMs: 42_000,
+  counts: { filed: 1, merged: 2, open: 2 },
+  outOfScopeFiled: ['x-99'],
+};
+
+describe('drainResultJson', () => {
+  it('carries every field of the summary (machine-readable)', () => {
+    const j = JSON.parse(drainResultJson(STALLED_RESULT));
+    expect(j).toMatchObject({
+      kshetra: 'myapp', lotId: 'abcdef0123456789', reason: 'stalled', exitCode: 10,
+      scope: 'epic-1', labels: { arm: 'A' }, elapsedMs: 42_000,
+      counts: { filed: 1, merged: 2, open: 2 }, outOfScopeFiled: ['x-99'],
+    });
+    expect(j.stalled).toEqual([
+      { beadId: 'mid', category: 'needs-human', reason: 'needs-human' },
+      { beadId: 'dep', category: 'blocked-by', reason: 'blocked-by mid' },
+    ]);
+  });
+
+  it('includes signal only when interrupted', () => {
+    expect(JSON.parse(drainResultJson(STALLED_RESULT)).signal).toBeUndefined();
+    const sig: DrainResult = { ...STALLED_RESULT, reason: 'signal', exitCode: 143, signal: 'SIGTERM' };
+    expect(JSON.parse(drainResultJson(sig)).signal).toBe('SIGTERM');
+  });
+});
+
+describe('formatDrainResult', () => {
+  it('names each stalled bead with its reason and the out-of-scope filed beads', () => {
+    const text = formatDrainResult(STALLED_RESULT);
+    expect(text).toContain('drain stalled for "myapp"');
+    expect(text).toContain('mid — needs-human');
+    expect(text).toContain('dep — blocked-by mid');
+    expect(text).toContain('out-of-scope beads filed: x-99');
+    expect(text).toContain('filed 1 · merged 2 · open 2');
+  });
+
+  it('renders a budget stop naming the exit code', () => {
+    const budget: DrainResult = { ...STALLED_RESULT, reason: 'budget', exitCode: 11 };
+    expect(formatDrainResult(budget)).toContain('budget policy denied work (exit 11)');
+  });
+
+  it('renders complete with no stalled section', () => {
+    const done: DrainResult = { ...STALLED_RESULT, reason: 'complete', exitCode: 0, openInScope: [], stalled: [], outOfScopeFiled: [] };
+    const text = formatDrainResult(done);
+    expect(text).toContain('drain complete for "myapp"');
+    expect(text).not.toContain('stalled beads');
   });
 });
