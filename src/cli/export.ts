@@ -1,10 +1,20 @@
 import { writeFileSync } from 'fs';
+import { dirname, join } from 'path';
 import type { CommandContext } from './registry';
 import { loadRegistry } from '../kshetra/registry';
 import { bd } from '../sthapathi/beads';
 import { git } from '../sthapathi/git';
 import { readBeadStats, readManifest } from '../kshetra/snapshot';
+import { loadStaticAgentContext, type StaticAgentContext } from '../sthapathi/dispatch';
 import type { KshetraConfig } from '../kshetra/config';
+
+// Fixed sidecar filenames --with-context writes beside the export's --out file. Held
+// here so the header's manifest and the actual writes can never disagree.
+const CONTEXT_FILENAMES = {
+  skills: 'context.skills.md',
+  reviewGuide: 'context.review-guide.md',
+  repoMap: 'context.repo-map.md',
+} as const;
 
 // `shreni export --kshetra <id> [--epic <id>] --format md --out <file>` (epic
 // Shreni-beads-3nx / Study C1): the frozen bead graph as a single DETERMINISTIC
@@ -57,15 +67,28 @@ export interface ExportProvenance {
   containsExecutionHistory: boolean;
 }
 
+// What --with-context wrote beside the task file: for each static input the
+// orchestrator injects, the sidecar filename if it was written, or null if the
+// input was absent (recorded as absent, never silently skipped — the reader must
+// know what the recipient did and did not get). Attached by the IO layer; the pure
+// build leaves it undefined and the format omits the whole Context section.
+export interface ExportContext {
+  skills: string | null;
+  reviewGuide: string | null;
+  repoMap: string | null;
+}
+
 // The assembled, ordered document a format renders. Pure data — no IO, no bd.
-// `provenance` is attached by the IO layer (runExport) after the pure build; the
-// pure buildExportDocument leaves it undefined and the format omits the section.
+// `provenance` / `context` are attached by the IO layer (runExport) after the pure
+// build; the pure buildExportDocument leaves them undefined and the format omits
+// those sections.
 export interface ExportDocument {
   goal: string; // the epic title, or a generic heading for a whole-queue export
   epicId: string | null;
   beads: ExportBead[]; // in a valid topological execution order
   edges: { from: string; to: string }[]; // blocker -> blocked, both in scope
   provenance?: ExportProvenance;
+  context?: ExportContext;
 }
 
 // The seam that keeps json/other formats additive (C1.1 point 7): the core builds
@@ -391,6 +414,23 @@ export const markdownFormat: ExportFormat = {
         );
       }
     }
+    // Context manifest (C1.3): what static inputs were written beside this file, and
+    // the deliberate exclusion of project memory. Only present under --with-context.
+    const c = doc.context;
+    if (c) {
+      out.push('');
+      out.push('## Context');
+      out.push('');
+      out.push('The static inputs the orchestrator injects were written beside this file:');
+      out.push(`- Universal skills: ${c.skills ?? 'absent — no ~/.shreni/skills/SKILLS.md'}`);
+      out.push(`- Review guide: ${c.reviewGuide ?? 'absent — no reviewGuide configured for this kshetra'}`);
+      out.push(`- Repo map: ${c.repoMap ?? 'absent — none generated for this repo'}`);
+      out.push('');
+      out.push(
+        'Project memory (bd prime) is deliberately NOT included: memory accumulates DURING ' +
+          'a run and feeds later beads, so it is a capability under test, not a static input.',
+      );
+    }
     out.push('');
     out.push(ORDER_NOTE);
     out.push('');
@@ -478,6 +518,9 @@ export interface ExportDeps {
   // hash to match against the exported state. Throws if the directory is not a
   // snapshot (readManifest's contract).
   readSnapshotManifest(dir: string): { snapshotId: string; beadIdHash: string };
+  // The exact static inputs the orchestrator injects (--with-context), loaded via
+  // the shared dispatch helper so the export can never drift from the real run.
+  loadContext(kshetra: KshetraConfig): Promise<StaticAgentContext>;
 }
 
 const defaultDeps: ExportDeps = {
@@ -498,6 +541,7 @@ const defaultDeps: ExportDeps = {
     const m = readManifest(dir);
     return { snapshotId: m.snapshotId, beadIdHash: m.beads.beadIdHash };
   },
+  loadContext: kshetra => loadStaticAgentContext(kshetra),
 };
 
 export async function runExport(ctx: CommandContext, overrides: Partial<ExportDeps> = {}): Promise<void> {
@@ -565,10 +609,34 @@ export async function runExport(ctx: CommandContext, overrides: Partial<ExportDe
     containsExecutionHistory: offenders.length > 0,
   };
 
+  // --with-context (C1.3): write the STATIC inputs the orchestrator injects beside
+  // the task file, so the bare baseline is argued in good faith. Each input that is
+  // present is written to its fixed sidecar; an absent one writes no file and is
+  // recorded as absent in the header. Project memory is never written — it is
+  // dynamic state under test (the header says so and why). The repo map is already
+  // a deterministic render, so nothing here is stamped: byte-identical across runs.
+  if (ctx.has('--with-context')) {
+    const outDir = dirname(out);
+    const staticCtx = await deps.loadContext(kshetra);
+    const writeSidecar = (content: string, filename: string): string | null => {
+      if (!content) return null; // absent input → no file, recorded as absent
+      writeFileSync(join(outDir, filename), content, 'utf8');
+      return filename;
+    };
+    doc.context = {
+      skills: writeSidecar(staticCtx.universalSkills, CONTEXT_FILENAMES.skills),
+      reviewGuide: writeSidecar(staticCtx.reviewGuide, CONTEXT_FILENAMES.reviewGuide),
+      repoMap: writeSidecar(staticCtx.repoMap, CONTEXT_FILENAMES.repoMap),
+    };
+  }
+
   const body = writer.render(doc);
   writeFileSync(out, body, 'utf8');
 
   const scope = doc.epicId ? `epic ${doc.epicId}` : 'all beads';
   const warn = offenders.length > 0 ? ' ⚠ WITH EXECUTION HISTORY' : '';
-  console.log(`exported ${doc.beads.length} bead${doc.beads.length === 1 ? '' : 's'} (${scope})${warn} → ${out}`);
+  const withCtx = doc.context ? ' +context' : '';
+  console.log(
+    `exported ${doc.beads.length} bead${doc.beads.length === 1 ? '' : 's'} (${scope})${warn}${withCtx} → ${out}`,
+  );
 }

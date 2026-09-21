@@ -41,6 +41,32 @@ async function loadUniversalSkills(): Promise<string> {
   return readFileOptional(join(homedir(), '.shreni', 'skills', 'SKILLS.md'));
 }
 
+// The STATIC inputs Shreni injects into an agent run — the three with no repo-native
+// home that do NOT depend on run history: the cross-project universalSkills, the
+// reviewer-only reviewGuide, and the deterministic repoMap. Extracted so the exact
+// set the orchestrator injects here is what `shreni export --with-context` writes
+// beside a plan file (Study C1.3), with no chance of the two drifting apart — the
+// study's BARE baseline is only argued in good faith if it gets the same inputs.
+// Project memory (bd prime) is deliberately NOT here: it accumulates DURING a run
+// and feeds later beads, so it is dynamic state under test, not a static input.
+export interface StaticAgentContext {
+  universalSkills: string;
+  reviewGuide: string;
+  repoMap: string;
+}
+
+export async function loadStaticAgentContext(kshetra: KshetraConfig): Promise<StaticAgentContext> {
+  const reviewGuidePath = kshetra.conventions?.reviewGuide
+    ? join(kshetra.repo.path, kshetra.conventions.reviewGuide)
+    : null;
+  const [universalSkills, reviewGuide, repoMap] = await Promise.all([
+    loadUniversalSkills(),
+    reviewGuidePath ? readFileOptional(reviewGuidePath) : Promise.resolve(''),
+    loadRepoMap(kshetra),
+  ]);
+  return { universalSkills, reviewGuide, repoMap };
+}
+
 // Map a gate outcome to its decision-ledger verdict (4a2.2 / 4a2.10). Pure and
 // exported so the skip↔pass distinction is unit-tested directly. A gate that DID
 // NOT RUN (no configured command, or an unmeasurable diff — GateResult.skipped)
@@ -64,16 +90,12 @@ export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Pro
   // details + acceptance criteria, the cross-project universalSkills, and the
   // reviewer-only reviewGuide (§3.3 — no provider has a reviewer-only native
   // file, so this one stays Shreni-injected).
-  const reviewGuidePath = kshetra.conventions?.reviewGuide
-    ? join(kshetra.repo.path, kshetra.conventions.reviewGuide)
-    : null;
-  const [projectMemory, taskDetails, universalSkills, reviewGuide, repoMap] = await Promise.all([
+  const [projectMemory, taskDetails, staticCtx] = await Promise.all([
     bdClient.prime(),
     bdClient.show(task.id),
-    loadUniversalSkills(),
-    reviewGuidePath ? readFileOptional(reviewGuidePath) : Promise.resolve(''),
-    loadRepoMap(kshetra),
+    loadStaticAgentContext(kshetra),
   ]);
+  const { universalSkills, reviewGuide, repoMap } = staticCtx;
 
   return {
     kshetra,

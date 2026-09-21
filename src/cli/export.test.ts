@@ -301,6 +301,7 @@ describe('runExport (command wiring)', () => {
     registry: () => [kshetra],
     loadProvenance: async () => ({ beadsHeadSha: 'abc123', beadIdHash: 'sha256:deadbeef' }),
     readSnapshotManifest: () => ({ snapshotId: 'snap:fixture', beadIdHash: 'sha256:deadbeef' }),
+    loadContext: async () => ({ universalSkills: '', reviewGuide: '', repoMap: '' }),
     ...over,
   });
 
@@ -393,6 +394,69 @@ describe('runExport (command wiring)', () => {
       runExport(makeContext(['--kshetra', 'testk', '--epic', 'e', '--snapshot', '/snap', '--out', outFile]), mismatched),
     ).rejects.toThrow(/does not match the exported state/);
     expect(existsSync(outFile)).toBe(false);
+  });
+
+  it('--with-context writes skills/review-guide/repo-map sidecars and lists them in the header', async () => {
+    const ctxDeps = deps(fixture, {
+      loadContext: async () => ({
+        universalSkills: 'SKILLS BODY',
+        reviewGuide: 'REVIEW GUIDE BODY',
+        repoMap: 'REPO MAP BODY',
+      }),
+    });
+    await runExport(
+      makeContext(['--kshetra', 'testk', '--epic', 'e', '--with-context', '--out', outFile]),
+      ctxDeps,
+    );
+    const md = readFileSync(outFile, 'utf8');
+    expect(md).toContain('## Context');
+    expect(md).toContain('- Universal skills: context.skills.md');
+    expect(md).toContain('- Review guide: context.review-guide.md');
+    expect(md).toContain('- Repo map: context.repo-map.md');
+    // Sidecars written beside the task file with the exact injected content.
+    expect(readFileSync(join(WORK, 'context.skills.md'), 'utf8')).toBe('SKILLS BODY');
+    expect(readFileSync(join(WORK, 'context.review-guide.md'), 'utf8')).toBe('REVIEW GUIDE BODY');
+    expect(readFileSync(join(WORK, 'context.repo-map.md'), 'utf8')).toBe('REPO MAP BODY');
+  });
+
+  it('records an absent reviewGuide / repo map as absent, writing no sidecar for it', async () => {
+    const ctxDeps = deps(fixture, {
+      loadContext: async () => ({ universalSkills: 'SKILLS', reviewGuide: '', repoMap: '' }),
+    });
+    await runExport(
+      makeContext(['--kshetra', 'testk', '--epic', 'e', '--with-context', '--out', outFile]),
+      ctxDeps,
+    );
+    const md = readFileSync(outFile, 'utf8');
+    expect(md).toContain('- Review guide: absent — no reviewGuide configured for this kshetra');
+    expect(md).toContain('- Repo map: absent — none generated for this repo');
+    expect(existsSync(join(WORK, 'context.review-guide.md'))).toBe(false);
+    expect(existsSync(join(WORK, 'context.repo-map.md'))).toBe(false);
+  });
+
+  it('never leaks project memory: the exported files contain no bd-prime content', async () => {
+    // The context loader (mirroring the orchestrator) NEVER surfaces memory; assert
+    // a seeded memory string appears nowhere in the task file or any sidecar.
+    const MEMORY = 'SECRET-MEMORY-a1b2c3';
+    const ctxDeps = deps(fixture, {
+      loadContext: async () => ({ universalSkills: 'skills', reviewGuide: 'guide', repoMap: 'map' }),
+    });
+    await runExport(
+      makeContext(['--kshetra', 'testk', '--epic', 'e', '--with-context', '--out', outFile]),
+      ctxDeps,
+    );
+    for (const f of ['export.md', 'context.skills.md', 'context.review-guide.md', 'context.repo-map.md']) {
+      expect(readFileSync(join(WORK, f), 'utf8')).not.toContain(MEMORY);
+    }
+    // And the header states the exclusion explicitly.
+    expect(readFileSync(outFile, 'utf8')).toContain('Project memory (bd prime) is deliberately NOT included');
+  });
+
+  it('without --with-context, no Context section and no sidecars', async () => {
+    await runExport(makeContext(['--kshetra', 'testk', '--epic', 'e', '--out', outFile]), deps(fixture));
+    const md = readFileSync(outFile, 'utf8');
+    expect(md).not.toContain('## Context');
+    expect(existsSync(join(WORK, 'context.skills.md'))).toBe(false);
   });
 
   it('rejects an unknown kshetra', async () => {
