@@ -42,6 +42,7 @@ const {
   dispatchParikshakaAsync,
   gapKey,
 } = await import('./parikshaka-dispatch.js');
+const { parikshakaInFlight } = await import('./parikshaka-tracker.js');
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -275,6 +276,30 @@ describe('dispatchParikshakaAsync', () => {
     dispatchParikshakaAsync(KSHETRA, TASK, SILPI_OUTPUT);
     await new Promise(r => setTimeout(r, 0));
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Parikshaka exploded'));
+    consoleSpy.mockRestore();
+  });
+
+  // Epic 7h3 / Study B3: drain's in-flight signal must cover this backfill. Use a
+  // per-test kshetra id — the tracker is a module singleton and sibling tests here
+  // fire dispatches they never await, which would otherwise leak in-flight counts.
+  it('marks the kshetra in-flight while running and clears it once settled', async () => {
+    const k = { ...KSHETRA, id: 'inflight-settle' };
+    // begin/end bracket the whole backfill: in-flight is set synchronously on
+    // dispatch (before any await) and cleared only once the chain fully settles.
+    expect(parikshakaInFlight(k.id)).toBe(false);
+    dispatchParikshakaAsync(k, TASK, SILPI_OUTPUT);
+    expect(parikshakaInFlight(k.id)).toBe(true);
+    await new Promise(r => setTimeout(r, 0));
+    expect(parikshakaInFlight(k.id)).toBe(false);
+  });
+
+  it('clears the in-flight signal even when the backfill throws', async () => {
+    const k = { ...KSHETRA, id: 'inflight-throw' };
+    mockRunParikshaka.mockRejectedValue(new Error('boom'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    dispatchParikshakaAsync(k, TASK, SILPI_OUTPUT);
+    await new Promise(r => setTimeout(r, 0));
+    expect(parikshakaInFlight(k.id)).toBe(false);
     consoleSpy.mockRestore();
   });
 });

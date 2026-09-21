@@ -9,6 +9,7 @@ vi.mock('./activity-log.js', async (orig) => {
 
 import { createScheduler, DEFAULT_INTERVAL_MS } from './index.js';
 import type { SchedulerHooks } from './index.js';
+import { beginParikshaka, endParikshaka } from './parikshaka-tracker.js';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 
@@ -202,6 +203,101 @@ describe('runCycle', () => {
     const hooks = makeHooks({ selectNext: vi.fn().mockResolvedValue(P2_TASK) });
     await scheduler.runCycle(KSHETRA, hooks);
     expect(seen).toEqual(['SELECTING', 'PREPARING', 'WORKING', 'IDLE']);
+  });
+});
+
+// Typed cycle outcome (epic 7h3 / Study B3): drain reads this to decide re-tick vs
+// wait vs exit. The daemon ignores it, so these must not change any existing edge.
+describe('runCycle outcome', () => {
+  it("returns 'no-work' when selectNext yields null", async () => {
+    const scheduler = createScheduler();
+    expect(await scheduler.runCycle(KSHETRA, makeHooks())).toBe('no-work');
+  });
+
+  it("returns 'declined' when prepareTask rejects the pick (returns null)", async () => {
+    const scheduler = createScheduler();
+    const hooks = makeHooks({
+      selectNext: vi.fn().mockResolvedValue(P2_TASK),
+      prepareTask: vi.fn().mockResolvedValue(null),
+    });
+    expect(await scheduler.runCycle(KSHETRA, hooks)).toBe('declined');
+  });
+
+  it("returns 'ran' when a task was dispatched to WORKING", async () => {
+    const scheduler = createScheduler();
+    const hooks = makeHooks({ selectNext: vi.fn().mockResolvedValue(P2_TASK) });
+    expect(await scheduler.runCycle(KSHETRA, hooks)).toBe('ran');
+  });
+
+  it("returns 'declined' when a cycle is already in flight (no re-tick spin)", async () => {
+    const scheduler = createScheduler();
+    let resolveTask!: () => void;
+    const taskPromise = new Promise<void>(r => { resolveTask = r; });
+    const hooks1 = makeHooks({
+      selectNext: vi.fn().mockResolvedValue(P2_TASK),
+      runTask: vi.fn().mockReturnValue(taskPromise),
+    });
+    const cycle1 = scheduler.runCycle(KSHETRA, hooks1);
+    await tick(); // WORKING
+
+    const hooks2 = makeHooks({ selectNext: vi.fn().mockResolvedValue(P0_TASK) });
+    expect(await scheduler.runCycle(KSHETRA, hooks2)).toBe('declined');
+
+    resolveTask();
+    await cycle1;
+  });
+
+  it('still propagates a runTask throw (does not resolve to an outcome)', async () => {
+    const scheduler = createScheduler();
+    const hooks = makeHooks({
+      selectNext: vi.fn().mockResolvedValue(P2_TASK),
+      runTask: vi.fn().mockRejectedValue(new Error('task failed')),
+    });
+    await expect(scheduler.runCycle(KSHETRA, hooks)).rejects.toThrow('task failed');
+  });
+});
+
+// In-flight signal (epic 7h3 / Study B3): true while a task is dispatched OR a
+// Parikshaka backfill is outstanding; false once BOTH settle.
+describe('isInFlight', () => {
+  it('is false before, true during, false after a task', async () => {
+    const scheduler = createScheduler();
+    let duringTask: boolean | undefined;
+    const hooks = makeHooks({
+      selectNext: vi.fn().mockResolvedValue(P2_TASK),
+      runTask: vi.fn().mockImplementation(async () => { duringTask = scheduler.isInFlight(KSHETRA.id); }),
+    });
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(false);
+    await scheduler.runCycle(KSHETRA, hooks);
+    expect(duringTask).toBe(true);
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(false);
+  });
+
+  it('stays true while a Parikshaka backfill is outstanding, false once it settles', () => {
+    const scheduler = createScheduler();
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(false);
+    beginParikshaka(KSHETRA.id);
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(true);
+    endParikshaka(KSHETRA.id);
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(false);
+  });
+
+  it('remains in-flight until BOTH a backfill and the count of backfills settle', () => {
+    const scheduler = createScheduler();
+    beginParikshaka(KSHETRA.id);
+    beginParikshaka(KSHETRA.id); // two overlapping backfills
+    endParikshaka(KSHETRA.id);
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(true); // one still outstanding
+    endParikshaka(KSHETRA.id);
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(false);
+  });
+
+  it('is isolated per kshetra', () => {
+    const scheduler = createScheduler();
+    beginParikshaka(KSHETRA.id);
+    expect(scheduler.isInFlight(KSHETRA.id)).toBe(true);
+    expect(scheduler.isInFlight(KSHETRA_B.id)).toBe(false);
+    endParikshaka(KSHETRA.id);
   });
 });
 

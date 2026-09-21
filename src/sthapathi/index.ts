@@ -3,12 +3,25 @@ import type { Task } from './types.js';
 import { canTransition, type Phase } from './lifecycle.js';
 import { emit } from './activity-log.js';
 import { nowMs, elapsedMs } from './timing.js';
+import { parikshakaInFlight } from './parikshaka-tracker.js';
 
 // Worker lifecycle phase. One task at a time is enforced structurally: a cycle
 // only starts from IDLE (see runCycle). The legal transitions are formalized in
 // lifecycle.ts (canTransition), consulted by setPhase below.
 // See the Sthapathi workflow design §4.1.
 export type { Phase };
+
+// What a single scheduler cycle did (epic 7h3 / Study B3). `shreni drain` reads
+// this to decide whether to re-tick immediately, wait, or begin its exit sequence;
+// the daemon's scheduleLoop ignores it (its tick is fire-and-forget through
+// setInterval). B3.2 will teach scheduleLoop to re-tick immediately on 'ran'.
+//   'ran'      — a task was dispatched to WORKING (whatever its result).
+//   'no-work'  — SELECT found nothing ready.
+//   'declined' — PREPARE rejected the pick (preflight/health/pause), or the cycle
+//                could not start because one was already in flight. This is the
+//                failure-backoff path: a caller must NOT re-tick early on it, or a
+//                repeatedly-rejecting kshetra spins hot (ARCHITECTURE.md ~L228).
+export type CycleOutcome = 'ran' | 'no-work' | 'declined';
 
 export interface SchedulerHooks {
   // SELECT — read-only: choose the next ready task. Must NOT mutate the work tree.
@@ -21,10 +34,18 @@ export interface SchedulerHooks {
 }
 
 export interface Scheduler {
-  runCycle(kshetra: KshetraConfig, hooks: SchedulerHooks): Promise<void>;
+  // One cycle, awaitable, resolving with what it did (epic 7h3). This IS the
+  // one-shot tick `shreni drain` awaits — it drives cycles itself rather than
+  // firing-and-forgetting through setInterval, so it can act on the outcome.
+  runCycle(kshetra: KshetraConfig, hooks: SchedulerHooks): Promise<CycleOutcome>;
   scheduleLoop(kshetra: KshetraConfig, hooks: SchedulerHooks, intervalMs?: number): () => void;
   start(kshetras: KshetraConfig[], hooks: SchedulerHooks, intervalMs?: number): () => void;
   getActive(kshetraId: string): Task | undefined;
+  // True while ANY work for this kshetra is outstanding: a task is dispatched
+  // (getActive is set) OR an asynchronous post-merge Parikshaka backfill is still
+  // running (epic 7h3). `shreni drain` gates its exit on this being false so it
+  // never quits while an agent is still writing test beads.
+  isInFlight(kshetraId: string): boolean;
   getPhase(kshetraId: string): Phase;
   // Flush any coalesced idle-poll time as a final phase_changed summary (epic hto /
   // Study A3). Called on worker shutdown so idle accumulated since the last real
@@ -124,20 +145,28 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
   // from PREPARE (the only work-tree mutation), so polling for work can never
   // check out main under an in-flight agent — the cause of the off-branch aborts
   //. See the Sthapathi workflow design §4.1–4.2.
-  async function runCycle(kshetra: KshetraConfig, hooks: SchedulerHooks): Promise<void> {
-    if (getPhase(kshetra.id) !== 'IDLE') return;
+  async function runCycle(kshetra: KshetraConfig, hooks: SchedulerHooks): Promise<CycleOutcome> {
+    // A cycle already owns this kshetra: report 'declined' (not 'ran') so a caller
+    // that re-ticks on 'ran' never spins on a busy kshetra. In practice unreachable
+    // — scheduleLoop's single-flight latch and drain's sequential await both keep
+    // ticks from overlapping — but the outcome must still be conservative.
+    if (getPhase(kshetra.id) !== 'IDLE') return 'declined';
     setPhase(kshetra.id, 'SELECTING');
     try {
       const selected = await hooks.selectNext(kshetra);
-      if (!selected) return;
+      if (!selected) return 'no-work';
 
       setPhase(kshetra.id, 'PREPARING');
       const prepared = await hooks.prepareTask(selected, kshetra);
-      if (!prepared) return;
+      if (!prepared) return 'declined';
 
       setPhase(kshetra.id, 'WORKING');
       active.set(kshetra.id, prepared);
       await hooks.runTask(prepared, kshetra);
+      // A task was dispatched (whatever runTask's own result) — real work happened.
+      // A throw from runTask propagates as a rejection through the finally; only the
+      // clean path reaches here as 'ran'.
+      return 'ran';
     } finally {
       active.delete(kshetra.id);
       setPhase(kshetra.id, 'IDLE');
@@ -184,5 +213,13 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
     return active.get(kshetraId);
   }
 
-  return { runCycle, scheduleLoop, start, getActive, getPhase, flushPhase };
+  // In flight = a dispatched task OR an outstanding Parikshaka backfill. The
+  // backfill is registered (beginParikshaka) inside runTask's merge step, before
+  // runCycle's finally clears `active`, so there is no window where both read
+  // false while post-merge work is still pending.
+  function isInFlight(kshetraId: string): boolean {
+    return active.has(kshetraId) || parikshakaInFlight(kshetraId);
+  }
+
+  return { runCycle, scheduleLoop, start, getActive, isInFlight, getPhase, flushPhase };
 }
