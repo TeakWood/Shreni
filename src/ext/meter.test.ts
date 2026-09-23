@@ -50,6 +50,16 @@ describe('fileUsageMeter', () => {
     expect(entry.costUsd).toBeCloseTo(3, 6); // 1M input @ $3/M
   });
 
+  it('carries durationMs through to the entry, and omits it when the record has none (dt7)', () => {
+    fileUsageMeter.record(record({ durationMs: 607286 }));
+    fileUsageMeter.record(record());
+    const timed = JSON.parse((mockedAppend.mock.calls[0][1] as string).trimEnd()) as UsageEntry;
+    const untimed = JSON.parse((mockedAppend.mock.calls[1][1] as string).trimEnd()) as UsageEntry;
+    expect(timed.durationMs).toBe(607286);
+    // Absent, not 0 — a reader treats absence as unknown.
+    expect(untimed).not.toHaveProperty('durationMs');
+  });
+
   it('records a gemini 0-token run with costUsd 0', () => {
     fileUsageMeter.record(record({
       provider: 'gemini', model: 'gemini-2.5-pro',

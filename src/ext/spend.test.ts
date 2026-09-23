@@ -88,6 +88,15 @@ describe('readUsageEntries', () => {
     expect(entries.map(e => e.costUsd)).toEqual([1, 2]);
   });
 
+  it('parses a pre-dt7 entry with no durationMs — absence reads as unknown', () => {
+    // entry() sets no durationMs — the shape every pre-dt7 line has on disk.
+    mockedRead.mockReturnValue(JSON.stringify(entry()) + '\n' + JSON.stringify(entry({ durationMs: 1234 })) + '\n');
+    const entries = readUsageEntries('myapp');
+    expect(entries).toHaveLength(2);
+    expect(entries[0].durationMs).toBeUndefined();
+    expect(entries[1].durationMs).toBe(1234);
+  });
+
   it('returns [] when the ledger file is missing (ENOENT)', () => {
     mockedRead.mockImplementation(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
     expect(readUsageEntries('myapp')).toEqual([]);

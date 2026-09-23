@@ -12,7 +12,7 @@
 // (epg.5) and are intentionally absent so this module stays focused on the
 // behavior-preserving observation seam.
 
-import type { LoggedEvent } from '../sthapathi/activity-log.js';
+import type { LoggedEvent, ActivityEvent } from '../sthapathi/activity-log.js';
 import type { Provider } from '../agents/providers/types.js';
 
 // The agent roles a metered run can belong to. The three executors, plus the
@@ -56,6 +56,15 @@ export interface UsageRecord {
   // USAGE_SCHEMA_VERSION bump; a reader treats absent as unknown (the provider
   // surfaced no unambiguous entry, or it is a non-claude adapter). Never 0-filled.
   contextWindow?: number;
+  // Monotonic ms this attempt took (epic hto / Study A3), timed at the site
+  // (runner.ts) around the provider run and carried on every metered
+  // finalization, ok or error — a failed session still consumed real time
+  // (Shreni-beads-dt7). A run that is not metered at all (abort, spawn failure,
+  // no-usage error) has no record, so no duration either. Additive
+  // OPTIONAL field — no USAGE_SCHEMA_VERSION bump; entries written before dt7,
+  // and producers that do not time the run (suthradhara's planning session),
+  // omit it, and a reader treats absent as unknown, never as 0.
+  durationMs?: number;
 }
 
 // Bump when the persisted UsageEntry shape changes in a way a consumer must
@@ -88,6 +97,20 @@ export interface UsageEntry extends UsageRecord {
   costUsd: number;
   priced: boolean;
 }
+
+// COMPILE-TIME GUARD (Shreni-beads-dt7): the ledger's run_usage event is a
+// PROJECTION of the UsageEntry, so every field it declares (bar its own `type`
+// discriminant) must also exist on UsageEntry. Adding a field to run_usage
+// without adding it to UsageRecord fails `pnpm typecheck` here, for EVERY
+// producer (runner.ts and suthradhara.ts alike). Fields shared today: kshetra,
+// beadId, agent, provider, model, inputTokens, outputTokens, costUsd, priced,
+// outcome, contextWindow?, durationMs? (plus the ts/schemaVersion/runId envelope).
+type RunUsageFieldsMissingFromEntry = Exclude<
+  keyof Extract<ActivityEvent, { type: 'run_usage' }>,
+  keyof UsageEntry | 'type'
+>;
+const _runUsageIsProjectionOfUsageEntry: [RunUsageFieldsMissingFromEntry] extends [never] ? true : never = true;
+void _runUsageIsProjectionOfUsageEntry;
 
 // Receives one record per finalized agent run. The default implementation
 // persists it (defaults.ts, fileUsageMeter); an optional extension may swap in a

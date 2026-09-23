@@ -278,6 +278,58 @@ describe('runAgent context_compacted is record-only (epic 408/A1)', () => {
   });
 });
 
+describe('runAgent usage.jsonl ⊇ ledger run_usage (Shreni-beads-dt7)', () => {
+  // The ledger's run_usage is a PROJECTION of the usage record: every field it
+  // carries (bar the activity envelope's own `type`/`lotId`) must also be on the
+  // UsageEntry fileUsageMeter persists for the same run. Built through the REAL
+  // toUsageEntry so a field added to the fold but not the record fails here.
+  const LEDGER_ONLY_ENVELOPE = new Set(['type', 'lotId']);
+
+  async function shapesFor(adapter: unknown, expectReject: boolean) {
+    mockRecord.mockClear();
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(adapter);
+    if (expectReject) await expect(runAgent(OPTS())).rejects.toBeInstanceOf(AgentRunError);
+    else await runAgent(OPTS());
+    const { toUsageEntry } = await vi.importActual<typeof import('../ext/defaults.js')>('../ext/defaults.js');
+    expect(mockRecord).toHaveBeenCalledOnce();
+    const entry = toUsageEntry(mockRecord.mock.calls[0][0]);
+    const ledger = mockEmitted.filter(e => e.type === 'run_usage');
+    expect(ledger).toHaveLength(1);
+    return { entry: entry as unknown as Record<string, unknown>, ledger: ledger[0] };
+  }
+
+  function ledgerFieldsMissingFromEntry(entry: Record<string, unknown>, ledger: Record<string, unknown>): string[] {
+    return Object.keys(ledger).filter(k => !LEDGER_ONLY_ENVELOPE.has(k) && !(k in entry));
+  }
+
+  it('records durationMs in BOTH shapes with the same value, and the ledger carries no field the entry lacks', async () => {
+    const { entry, ledger } = await shapesFor(
+      okAdapter({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheCreationTokens: 2, contextWindow: 200000 }), false);
+    expect(typeof entry.durationMs).toBe('number');
+    expect(ledger.durationMs).toBe(entry.durationMs);
+    expect(ledger.contextWindow).toBe(entry.contextWindow);
+    expect(ledgerFieldsMissingFromEntry(entry, ledger)).toEqual([]);
+    // Shared values agree field by field. costUsd/priced are left out: the entry
+    // is priced by the real pricing.ts here, the ledger by this file's costFor mock.
+    for (const k of ['kshetra', 'beadId', 'agent', 'provider', 'model', 'inputTokens', 'outputTokens', 'outcome']) {
+      expect(ledger[k]).toEqual(entry[k]);
+    }
+  });
+
+  it('holds on the errored path too (a failed session still records its duration)', async () => {
+    const { entry, ledger } = await shapesFor(
+      failAdapter({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 3, cacheCreationTokens: 1 }), true);
+    expect(typeof entry.durationMs).toBe('number');
+    expect(ledger.durationMs).toBe(entry.durationMs);
+    expect(ledgerFieldsMissingFromEntry(entry, ledger)).toEqual([]);
+  });
+
+  it('the check itself fails on a ledger-only field (guards the guard)', () => {
+    expect(ledgerFieldsMissingFromEntry({ a: 1 }, { type: 'run_usage', lotId: 'l', a: 1, extra: 2 })).toEqual(['extra']);
+  });
+});
+
 describe('runAgent contextWindow carry-through (epic 408/A1 part B)', () => {
   it('carries contextWindow onto the meter record and the run_usage ledger fold', async () => {
     mockRecord.mockClear();

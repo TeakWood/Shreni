@@ -215,6 +215,11 @@ function reportUsage(
     // absent when the provider surfaced no unambiguous main-loop-model entry; a
     // reader treats absent as unknown, never as 0.
     ...(usage?.contextWindow !== undefined ? { contextWindow: usage.contextWindow } : {}),
+    // Session duration (epic hto / Study A3). On the record — not only the ledger
+    // fold below — so usage.jsonl, the cost/timing feed, carries it too
+    // (Shreni-beads-dt7): the ledger entry is a projection of this record and
+    // must never hold a field the record lacks.
+    durationMs,
   };
   try {
     // usage.jsonl (epic g2k): the full per-run record with the price snapshot.
@@ -225,9 +230,11 @@ function reportUsage(
     // A metering failure must never fail an otherwise-successful agent run.
   }
   // Fold the same record into the decision ledger as a run_usage SUMMARY (4a2.5):
-  // agent/provider/model, the headline token totals, cost, and outcome — NOT the
-  // full record. The cache/tool breakdown stays in usage.jsonl, referenced by the
-  // envelope's runId. costFor is the same pure price-table lookup the meter uses,
+  // agent/provider/model, the headline token totals, cost, outcome, and the
+  // optional contextWindow/durationMs — NOT the full record, and NEVER a field
+  // the record (hence usage.jsonl) lacks (dt7; enforced at compile time in
+  // ext/types.ts). The cache/tool breakdown stays in usage.jsonl, referenced by
+  // the envelope's runId. costFor is the same pure price-table lookup the meter uses,
   // so the ledger's cost matches usage.jsonl exactly. A run with no provider usage
   // (gemini) still emits, with zeroed totals, rather than being dropped. One
   // run_usage per metered finalization, mirroring usage.jsonl 1:1 (a transient-
@@ -252,8 +259,9 @@ function reportUsage(
       // peak_context/contextWindow can be evaluated at read time. Additive
       // optional field; omitted when unknown.
       ...(record.contextWindow !== undefined ? { contextWindow: record.contextWindow } : {}),
-      // Session duration for time attribution (epic hto / Study A3).
-      durationMs,
+      // Session duration for time attribution (epic hto / Study A3) — read off
+      // the record so the two shapes carry the same value (dt7).
+      durationMs: record.durationMs,
     });
   } catch {
     // A ledger-fold failure must never fail an otherwise-successful agent run.

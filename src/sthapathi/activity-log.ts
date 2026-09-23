@@ -81,7 +81,11 @@ export type ActivityEvent =
   // `durationMs` (epic hto / Study A3): monotonic time the provider subprocess ran
   // for this attempt (spawn → exit), measured at the site (runner.ts) on BOTH the
   // ok and errored path — a failed session still consumed real time. Additive
-  // optional; absent on pre-A3 data.
+  // optional; absent on pre-A3 data. Folded from the UsageRecord, so usage.jsonl
+  // carries the same value (Shreni-beads-dt7).
+  // INVARIANT (dt7): this entry is a PROJECTION of the UsageEntry — every
+  // non-envelope field here must also exist on UsageEntry. Add a field to the
+  // record first; the type guard in ext/types.ts fails typecheck otherwise.
   | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error'; contextWindow?: number; durationMs?: number }
   // turn_usage (RUN-LOG, epic 408/A1): per-MODEL-CALL context usage, the raw input
   // to Figure 1 (effective_context vs. assistant-turn index). It is O(turns) —

@@ -24,6 +24,23 @@ export const localFileSink: EventSink = {
   },
 };
 
+// Wrap a UsageRecord in the persistence envelope (ts/schemaVersion) plus the
+// price snapshot, producing the canonical UsageEntry fileUsageMeter appends.
+// Every record field passes through unchanged — including optional ones like
+// contextWindow and durationMs — so the entry is a superset of the record, and
+// the ledger's run_usage fold (a projection of the same record) can never carry
+// a field usage.jsonl lacks (Shreni-beads-dt7). Pure; exported for that test.
+export function toUsageEntry(usage: UsageRecord, ts: string = new Date().toISOString()): UsageEntry {
+  const { costUsd, priced } = costFor(usage);
+  return {
+    ...usage,
+    ts,
+    schemaVersion: USAGE_SCHEMA_VERSION,
+    costUsd,
+    priced,
+  };
+}
+
 // The default UsageMeter: derive the run's cost from the price table
 // (pricing.ts) and append one canonical UsageEntry to the Kshetra's usage.jsonl
 // — same mkdir-then-append, one-JSON-object-per-line format as the activity log
@@ -35,14 +52,7 @@ export const localFileSink: EventSink = {
 // fails an otherwise-successful agent run.
 export const fileUsageMeter: UsageMeter = {
   record(usage: UsageRecord): void {
-    const { costUsd, priced } = costFor(usage);
-    const entry: UsageEntry = {
-      ...usage,
-      ts: new Date().toISOString(),
-      schemaVersion: USAGE_SCHEMA_VERSION,
-      costUsd,
-      priced,
-    };
+    const entry = toUsageEntry(usage);
     const path = usagePath(usage.kshetra);
     mkdirSync(dirname(path), { recursive: true });
     appendFileSync(path, JSON.stringify(entry) + '\n', 'utf8');
