@@ -306,6 +306,22 @@ describe('runSilpiViharapalaLoop', () => {
     for (const g of gateResults) expect(g.durationMs).toEqual(expect.any(Number));
   });
 
+  it('records the measured coverage on the coverage gate_result (Shreni-beads-06z)', async () => {
+    // A real, harmless coverage "command" that prints an istanbul text-summary
+    // line; repo.path is a real dir so the subprocess can spawn.
+    const k = {
+      ...KSHETRA,
+      repo: { ...KSHETRA.repo, path: process.cwd() },
+      stack: { ...KSHETRA.stack, coverageCommand: 'echo Statements : 88.5% ( 885/1000 )' },
+    } as KshetraConfig;
+    emitSpy.mockClear();
+    await runSilpiViharapalaLoop(k, TASK, 'bead-proj-42/fix-auth');
+    const events = emitSpy.mock.calls.map((c: unknown[]) => c[0] as { type: string; [k: string]: unknown });
+    const gates = events.filter(e => e.type === 'gate_result');
+    expect(gates.find(e => e.gate === 'coverage')?.coverage).toEqual({ statements: 88.5 });
+    for (const g of gates.filter(e => e.gate !== 'coverage')) expect(g).not.toHaveProperty('coverage');
+  });
+
   it('stamps silpi_done / viharapala_done with the session that produced each output (Shreni-beads-228)', async () => {
     const silpiOut = { ...SILPI_PASS };
     const review = { ...VIHARAPALA_APPROVE };

@@ -11,6 +11,7 @@ import type { HealthStatus } from './health.js';
 import type { LintResult } from './lint.js';
 import { timed } from './timing.js';
 import { isAblated, type AblationKey } from '../kshetra/ablation.js';
+import { parseCoverageSummary, formatCoverageSummary, COVERAGE_METRICS, type CoverageSummary } from './coverage-summary.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -36,6 +37,9 @@ export interface GateResult {
   // the enforcement ablation — so it is distinguishable from a gate configured as
   // warn. Absent otherwise.
   ablations?: AblationKey[];
+  // Coverage gate only (Shreni-beads-06z): the percentages the coverage command
+  // printed, recorded on gate_result. Absent when nothing parseable was printed.
+  coverage?: CoverageSummary;
 }
 
 export interface GatesOutcome {
@@ -50,6 +54,9 @@ export interface CoverageResult {
   passed: boolean;
   skipped: boolean;
   raw: string;
+  // Parsed from `raw` (Shreni-beads-06z); null when the output carried no
+  // recognisable coverage summary (or the gate was skipped).
+  summary: CoverageSummary | null;
 }
 
 // Run the resolved coverage command (mirroring runLintGate). An empty resolved
@@ -59,19 +66,74 @@ export async function runCoverageGate(kshetra: KshetraConfig): Promise<CoverageR
   const [cmd, ...args] = splitCommand(resolveCoverageCommand(kshetra));
   if (!cmd) {
     console.warn(`[gates] ${kshetra.id}: no coverage command configured — coverage gate skipped`);
-    return { passed: true, skipped: true, raw: '(no coverage command configured — coverage gate skipped)' };
+    return { passed: true, skipped: true, raw: '(no coverage command configured — coverage gate skipped)', summary: null };
   }
   try {
     const { stdout, stderr } = await execFileAsync(cmd, args, {
       cwd: kshetra.repo.path,
       maxBuffer: 32 * 1024 * 1024,
     });
-    return { passed: true, skipped: false, raw: stdout + stderr };
+    const raw = stdout + stderr;
+    return { passed: true, skipped: false, raw, summary: parseCoverageSummary(raw) };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
     const raw = (e.stdout ?? '') + (e.stderr ?? '') + (e.message ?? '');
-    return { passed: false, skipped: false, raw };
+    return { passed: false, skipped: false, raw, summary: parseCoverageSummary(raw) };
   }
+}
+
+// Decide the coverage gate from the command result and the optional configured
+// minimums (Shreni-beads-06z). Pure, so the verdict logic is testable without a
+// subprocess. With no `min` configured the verdict is exactly the pre-06z one
+// (did the command exit 0) — only the reason gains the measured numbers.
+export function judgeCoverage(
+  coverage: CoverageResult,
+  min: KshetraConfig['gates']['coverage']['min'],
+  command: string,
+): { passed: boolean; reason: string; noSignal: boolean } {
+  if (coverage.skipped) return { passed: true, reason: 'coverage skipped (no command configured)', noSignal: false };
+  if (!coverage.passed) {
+    return { passed: false, reason: `Coverage gate failed — run \`${command}\` and address the shortfall.`, noSignal: false };
+  }
+  const s = coverage.summary;
+  const required = COVERAGE_METRICS.filter(k => min?.[k] !== undefined);
+  if (!s) {
+    // The command succeeded but printed no coverage summary: it re-ran the suite
+    // and added no signal beyond the test gate. Surface that — it is a full
+    // suite's cost for nothing — rather than calling it a coverage pass.
+    const noSignal =
+      `\`${command}\` printed no recognisable coverage summary, so it adds no signal beyond the test gate ` +
+      `(a second full suite run). Enable a text/text-summary coverage reporter, or set ` +
+      `stack.coverageCommand: "" to skip the gate.`;
+    // With a minimum configured this cannot pass (never a silent pass), but it is
+    // a HARNESS CONFIGURATION problem, not a task defect: say so, so the agent
+    // does not rework the repo's coverage tooling. A block-level gate therefore
+    // rejects every round and the bead escalates to a human — the right owner.
+    return required.length
+      ? {
+          passed: false,
+          reason:
+            `Coverage gate failed — CONFIGURATION ISSUE, not a defect in this task: gates.coverage.min is set but ` +
+            `${noSignal} Do not change the project's coverage tooling for this task; the operator must fix the ` +
+            `kshetra configuration.`,
+          noSignal: true,
+        }
+      : { passed: true, reason: `coverage command passed, but ${noSignal}`, noSignal: true };
+  }
+  const shortfalls: string[] = [];
+  for (const k of required) {
+    const actual = s[k];
+    if (actual === undefined) shortfalls.push(`${k} not reported (minimum ${min![k]}%)`);
+    else if (actual < min![k]!) shortfalls.push(`${k} ${actual}% < ${min![k]}%`);
+  }
+  if (shortfalls.length) {
+    return {
+      passed: false,
+      reason: `Coverage gate failed — ${shortfalls.join('; ')}. Run \`${command}\` and add tests for the uncovered code.`,
+      noSignal: false,
+    };
+  }
+  return { passed: true, reason: `coverage ${formatCoverageSummary(s)}`, noSignal: false };
 }
 
 export interface DiffSize {
@@ -153,6 +215,10 @@ export async function evaluateGates(
     timed(() => measureDiffSize(kshetra, branch)),
   ]);
   const coverage = coverageT.result;
+  const coverageVerdict = judgeCoverage(coverage, levels.coverage.min, resolveCoverageCommand(kshetra));
+  if (coverageVerdict.noSignal) {
+    console.warn(`[gates] ${kshetra.id}: ${coverageVerdict.reason}`);
+  }
   const diffSize = diffSizeT.result;
   const { maxFiles, maxLines } = levels.diffSize;
   const diffOk =
@@ -187,14 +253,11 @@ export async function evaluateGates(
     {
       gate: 'coverage',
       level: effectiveLevel('coverage', levels.coverage.level, enfAblated),
-      passed: coverage.passed,
+      passed: coverageVerdict.passed,
       skipped: coverage.skipped,
-      reason: coverage.passed
-        ? coverage.skipped
-          ? 'coverage skipped (no command configured)'
-          : 'coverage passed'
-        : `Coverage gate failed — run \`${resolveCoverageCommand(kshetra)}\` and address the shortfall.`,
+      reason: coverageVerdict.reason,
       durationMs: coverageT.durationMs,
+      ...(coverage.summary ? { coverage: coverage.summary } : {}),
     },
     {
       gate: 'diffSize',

@@ -10,7 +10,7 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => (mockExecFile as (...a: unknown[]) => void)(...args),
 }));
 
-const { evaluateGates, runCoverageGate, effectiveLevel } = await import('./gates.js');
+const { evaluateGates, runCoverageGate, effectiveLevel, judgeCoverage } = await import('./gates.js');
 
 // An enforcement-ablated variant of a config (epic 8wi).
 function ablatedEnforcement(k: KshetraConfig): KshetraConfig {
@@ -76,7 +76,7 @@ describe('runCoverageGate', () => {
   it('passes when the resolved coverage command exits 0', async () => {
     execResolves('all covered');
     const r = await runCoverageGate(ksh({ language: 'typescript' }));
-    expect(r).toEqual({ passed: true, skipped: false, raw: 'all covered' });
+    expect(r).toEqual({ passed: true, skipped: false, raw: 'all covered', summary: null });
     const [cmd, args] = mockExecFile.mock.calls[0];
     expect(cmd).toBe('pnpm');
     expect(args).toEqual(['test:coverage']);
@@ -97,6 +97,89 @@ describe('runCoverageGate', () => {
     expect(mockExecFile).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('coverage gate skipped'));
     warn.mockRestore();
+  });
+});
+
+const SUMMARY_OUT = 'Statements   : 91.5% ( 915/1000 )\nBranches     : 80% ( 80/100 )\nFunctions    : 95% ( 95/100 )\nLines        : 92% ( 920/1000 )\n';
+
+describe('coverage numbers + optional minimum (Shreni-beads-06z)', () => {
+  it('runCoverageGate parses the printed summary', async () => {
+    execResolves(SUMMARY_OUT);
+    const r = await runCoverageGate(ksh({ language: 'typescript' }));
+    expect(r.summary).toEqual({ statements: 91.5, branches: 80, functions: 95, lines: 92 });
+  });
+
+  it('evaluateGates records the measured coverage on the coverage result, with the numbers in its reason', async () => {
+    execResolves(SUMMARY_OUT);
+    const o = await evaluateGates(ksh({ language: 'typescript' }), greenHealth, cleanLint, 'bead-1/x');
+    const cov = o.results.find(r => r.gate === 'coverage')!;
+    expect(cov.passed).toBe(true);
+    expect(cov.coverage).toEqual({ statements: 91.5, branches: 80, functions: 95, lines: 92 });
+    expect(cov.reason).toBe('coverage statements 91.5% · branches 80% · functions 95% · lines 92%');
+    // No other gate carries coverage.
+    expect(o.results.filter(r => r.coverage)).toHaveLength(1);
+  });
+
+  it('with no minimum, a passing command with no summary still passes — but says it added no signal', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    execResolves('  1234 passing\n');
+    const o = await evaluateGates(ksh({ language: 'typescript' }), greenHealth, cleanLint, 'bead-1/x');
+    const cov = o.results.find(r => r.gate === 'coverage')!;
+    expect(cov.passed).toBe(true);
+    expect(cov.coverage).toBeUndefined();
+    expect(cov.reason).toContain('no recognisable coverage summary');
+    expect(cov.reason).toContain('stack.coverageCommand: ""');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('adds no signal beyond the test gate'));
+    warn.mockRestore();
+  });
+
+  it('a configured minimum fails the gate on a shortfall and names each metric', async () => {
+    execResolves(SUMMARY_OUT);
+    const o = await evaluateGates(
+      ksh({ language: 'typescript' }, { coverage: { level: 'block', min: { lines: 90, branches: 85 } } } as never),
+      greenHealth, cleanLint, 'bead-1/x',
+    );
+    expect(o.passed).toBe(false);
+    expect(o.blockers.map(b => b.gate)).toEqual(['coverage']);
+    expect(o.blockers[0].reason).toContain('branches 80% < 85%');
+    expect(o.blockers[0].reason).not.toContain('lines');
+    // The measured numbers are still recorded on a failing gate.
+    expect(o.blockers[0].coverage).toMatchObject({ branches: 80 });
+  });
+
+  it('a configured minimum met → pass', async () => {
+    execResolves(SUMMARY_OUT);
+    const o = await evaluateGates(
+      ksh({ language: 'typescript' }, { coverage: { level: 'block', min: { lines: 90 } } } as never),
+      greenHealth, cleanLint, 'bead-1/x',
+    );
+    expect(o.passed).toBe(true);
+  });
+
+  it('judgeCoverage: a minimum with no parseable summary fails loudly, never silently passes', () => {
+    const v = judgeCoverage({ passed: true, skipped: false, raw: 'ok', summary: null }, { lines: 80 }, 'pnpm test:coverage');
+    expect(v.passed).toBe(false);
+    expect(v.noSignal).toBe(true);
+    // Framed as the operator's configuration problem, not a task defect for Silpi.
+    expect(v.reason).toContain('CONFIGURATION ISSUE');
+    expect(v.reason).toContain('gates.coverage.min is set');
+  });
+
+  it('judgeCoverage: a minimum on a metric the tool did not report fails', () => {
+    const v = judgeCoverage({ passed: true, skipped: false, raw: '', summary: { statements: 99 } }, { branches: 50 }, 'c');
+    expect(v).toEqual({ passed: false, noSignal: false, reason: expect.stringContaining('branches not reported (minimum 50%)') });
+  });
+
+  it('judgeCoverage: a failing command fails exactly as before, whatever the numbers', () => {
+    const v = judgeCoverage({ passed: false, skipped: false, raw: '', summary: { lines: 100 } }, undefined, 'pnpm test:coverage');
+    expect(v.passed).toBe(false);
+    expect(v.reason).toContain('pnpm test:coverage');
+  });
+
+  it('judgeCoverage: a skip stays a skip even with a minimum configured', () => {
+    expect(judgeCoverage({ passed: true, skipped: true, raw: '', summary: null }, { lines: 80 }, '')).toEqual({
+      passed: true, reason: 'coverage skipped (no command configured)', noSignal: false,
+    });
   });
 });
 

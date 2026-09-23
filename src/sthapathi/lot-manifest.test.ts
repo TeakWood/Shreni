@@ -49,6 +49,18 @@ describe('collectConfig — inline effective values (epic yrk / Study B2, yrk.3)
     expect(cfg.resolvedConfigHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
+  it('inlines a configured coverage minimum, and omits the key when none is set (Shreni-beads-06z)', () => {
+    expect(collectConfig(ksh())).not.toHaveProperty('coverageMin');
+    const cfg = collectConfig(ksh({
+      gates: {
+        test: { level: 'block' }, lint: { level: 'block' },
+        coverage: { level: 'block', min: { lines: 80 } },
+        diffSize: { level: 'warn', maxFiles: 40, maxLines: 1500 },
+      },
+    }));
+    expect(cfg.coverageMin).toEqual({ lines: 80 });
+  });
+
   it('inlines active ablation switches (epic 8wi / Study B1)', () => {
     expect((collectConfig(ksh()).ablations)).toEqual([]);
     const cfg = collectConfig(ksh({ ablation: { review: 'off' } }));

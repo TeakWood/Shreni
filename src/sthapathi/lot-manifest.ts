@@ -147,6 +147,10 @@ export function collectConfig(kshetra: KshetraConfig): Record<string, unknown> {
     mergePolicy: kshetra.repo.mergePolicy ?? null,
     maxRoundsPerBead: kshetra.agents.maxRoundsPerBead,
     gates,
+    // The coverage threshold changes the gate's verdict (Shreni-beads-06z), so a
+    // reader must see it beside the levels. Only when configured — manifests of
+    // configs without one are unchanged.
+    ...(kshetra.gates.coverage.min ? { coverageMin: kshetra.gates.coverage.min } : {}),
     roles,
     budget: kshetra.budget ?? null,
     // Active ablation switches (epic 8wi / Study B1). Also in the resolved-config

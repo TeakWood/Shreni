@@ -299,6 +299,8 @@ export async function runSilpiViharapalaLoop(
         // Generic ablation marker (epic 8wi / Study B1): set only on a blocker
         // downgraded to warn by the enforcement ablation.
         ...(g.ablations ? { ablations: g.ablations } : {}),
+        // Measured coverage (Shreni-beads-06z), coverage gate only.
+        ...(g.coverage ? { coverage: g.coverage } : {}),
       });
     }
 

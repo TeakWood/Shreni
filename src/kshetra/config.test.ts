@@ -162,6 +162,22 @@ stack:
     expect(config.gates.test.level).toBe('block');
   });
 
+  it('coverage.min is optional and absent by default — the resolved config is unchanged (Shreni-beads-06z)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML);
+    expect(loadKshetraConfig(path).gates.coverage).toEqual({ level: 'warn' });
+  });
+
+  it('accepts gates.coverage.min per metric and rejects out-of-range or unknown metrics (Shreni-beads-06z)', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML + '\ngates:\n  coverage:\n    level: block\n    min:\n      lines: 80\n      branches: 70\n');
+    expect(loadKshetraConfig(path).gates.coverage).toEqual({ level: 'block', min: { lines: 80, branches: 70 } });
+    writeFileSync(path, VALID_YAML + '\ngates:\n  coverage:\n    level: block\n    min:\n      lines: 180\n');
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+    writeFileSync(path, VALID_YAML + '\ngates:\n  coverage:\n    level: block\n    min:\n      line: 80\n');
+    expect(() => loadKshetraConfig(path)).toThrow(KshetraConfigError);
+  });
+
   it('rejects an invalid gate level', () => {
     const path = join(dir, 'kshetra.yaml');
     writeFileSync(path, VALID_YAML + '\ngates:\n  test:\n    level: "off"\n');

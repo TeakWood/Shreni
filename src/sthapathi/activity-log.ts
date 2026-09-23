@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { getSinkRegistry } from '../ext/index.js';
 import type { Phase } from './lifecycle.js';
 import type { AblationKey } from '../kshetra/ablation.js';
+import type { CoverageSummary } from './coverage-summary.js';
 // Per-Kshetra path derivations live in kshetra/state-locations.ts (single
 // source). legacyLogPath is re-exported so cli/tail.ts keeps its import site.
 import { kshetraDir, legacyLogPath } from '../kshetra/state-locations.js';
@@ -72,7 +73,11 @@ export type ActivityEvent =
   // ONLY on a failing gate whose block was downgraded to warn by the enforcement
   // ablation — so a suppressed blocker is distinguishable from a configured warn.
   // Consumers (shreni show, computeMetrics) key off it generically.
-  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' | 'skip'; durationMs?: number; ablations?: AblationKey[] }
+  // `coverage` (Shreni-beads-06z): the percentages the coverage gate's command
+  // printed (statements/branches/functions/lines, each only when reported) — so
+  // per-bead coverage is queryable from the ledger. Coverage gate only; absent
+  // when nothing parseable was printed, and on data written before 06z.
+  | { type: 'gate_result';      kshetra: string; beadId: string; round: number; gate: string; verdict: 'pass' | 'fail' | 'warn' | 'skip'; durationMs?: number; ablations?: AblationKey[]; coverage?: CoverageSummary }
   // merge_done: approved work landed (or a PR was opened to land it). `sha` is the
   // squash commit for mergePolicy 'push'; `pr` is the PR number for 'pr'.
   // `durationMs` (epic hto / Study A3): monotonic time the merge + push (or PR

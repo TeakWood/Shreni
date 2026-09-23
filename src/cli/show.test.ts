@@ -108,6 +108,18 @@ describe('renderShow', () => {
     expect(long).not.toContain('5400.0s');
   });
 
+  it('renders the measured coverage on a coverage gate_result (Shreni-beads-06z)', () => {
+    const out = renderShow(
+      { id: 'b1', title: 'Fix auth', status: 'closed', type: 'task', priority: 2, criteria: '' },
+      [
+        entry('gate_result', '2026-09-16T00:00:02.000Z', { gate: 'coverage', verdict: 'pass', round: 1, coverage: { statements: 99.4, lines: 99.41 } }),
+        entry('gate_result', '2026-09-16T00:00:02.000Z', { gate: 'lint', verdict: 'pass', round: 1 }),
+      ],
+    );
+    expect(out).toContain('coverage: pass (R1) — statements 99.4% · lines 99.41%');
+    expect(out.split('\n').find(l => l.includes('lint: pass'))).not.toContain('—');
+  });
+
   it('renders a clear line when the bead has no ledger entries', () => {
     const out = renderShow(
       { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },

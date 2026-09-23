@@ -18,6 +18,7 @@ import { bd, parseAcceptanceCriteria } from '../sthapathi/beads';
 import { readLedger, parseLedgerLines } from '../ext/index';
 import type { LedgerEntry } from '../ext/index';
 import type { KshetraConfig } from '../kshetra/config';
+import { formatCoverageSummary, type CoverageSummary } from '../sthapathi/coverage-summary';
 import { fmtDuration } from './report';
 
 export interface ShowOpts {
@@ -150,7 +151,9 @@ function fmtEntry(e: LedgerEntry): string {
           : `${label('POLICY')}selectModel → ${text(p.provider)}/${text(p.model)}`;
       break;
     case 'gate_result':
-      body = `${label('GATE')}${text(p.gate)}: ${text(p.verdict)}${p.round ? ` (R${num(p.round)})` : ''}`;
+      body = `${label('GATE')}${text(p.gate)}: ${text(p.verdict)}${p.round ? ` (R${num(p.round)})` : ''}` +
+        // Measured coverage (Shreni-beads-06z), when the coverage gate recorded it.
+        (p.coverage && typeof p.coverage === 'object' ? ` — ${formatCoverageSummary(p.coverage as CoverageSummary)}` : '');
       break;
     case 'silpi_done':
       body = `${label('SILPI')}R${num(p.round)} conf=${num(p.confidence)} lint=${p.lintPassed ? '✓' : '✗'} tests=${p.testsPassed ? '✓' : '✗'}`;

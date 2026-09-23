@@ -234,10 +234,25 @@ export const GATES_DEFAULTS = {
   diffSize: { level: 'warn', maxFiles: 40, maxLines: 1500 },
 } as const;
 
+// Coverage adds an OPTIONAL minimum per metric (percent, 0–100) — Shreni-beads-06z.
+// Absent (the default) = no threshold: the gate records the measured coverage and
+// fails only when the command itself fails, exactly as before. Deliberately no
+// schema default, so an existing config's resolved shape (and its hash in the lot
+// manifest) is unchanged.
+const CoverageMinSchema = z.object({
+  statements: z.number().min(0).max(100).optional(),
+  branches: z.number().min(0).max(100).optional(),
+  functions: z.number().min(0).max(100).optional(),
+  lines: z.number().min(0).max(100).optional(),
+}).strict();
+const CoverageGateSchema = GateEntrySchema.extend({
+  min: CoverageMinSchema.optional(),
+});
+
 const GatesConfigSchema = z.object({
   test: GateEntrySchema.default(GATES_DEFAULTS.test),
   lint: GateEntrySchema.default(GATES_DEFAULTS.lint),
-  coverage: GateEntrySchema.default(GATES_DEFAULTS.coverage),
+  coverage: CoverageGateSchema.default(GATES_DEFAULTS.coverage),
   diffSize: DiffSizeGateSchema.default(GATES_DEFAULTS.diffSize),
 });
 

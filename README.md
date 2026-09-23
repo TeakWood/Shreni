@@ -428,7 +428,7 @@ runs:
 gates:                    # all optional — these are the defaults
   test:     { level: block }
   lint:     { level: block }
-  coverage: { level: warn }
+  coverage: { level: warn }          # optional: min: { lines: 80, branches: 70 }
   diffSize: { level: warn, maxFiles: 40, maxLines: 1500 }
 ```
 
@@ -446,6 +446,15 @@ gates:                    # all optional — these are the defaults
 - **Additive-stricter only.** The hard `build`/`test`/`lint` gates cannot be
   waived: setting `test` or `lint` to `warn` is clamped back to `block`. Config
   may only tighten (e.g. raise `coverage` to `block`), never loosen.
+- **`coverage`** records the percentages its command prints (statements /
+  branches / functions / lines — istanbul/nyc/c8/jest/vitest text or
+  text-summary, coverage.py, `go tool cover -func`, tarpaulin) on every
+  `gate_result`, so per-bead coverage is queryable from the ledger
+  (`shreni show`). An optional `min:` per metric turns it into a threshold; with
+  no `min:` it fails only when the command fails. **Cost:** on most repos the
+  coverage command re-runs the whole test suite. If it prints no coverage
+  summary, the gate says so every round (it is paying a second suite run for no
+  signal) — enable a text reporter, or set `stack.coverageCommand: ""` to skip it.
 - **`diffSize`** is the one loop-native guard (no equivalent in the repo's own
   tooling): it caps the bead branch's diff against `main` — a runaway-agent
   tripwire. Defaults are conservative and `warn`-level; raise to `block` if an
