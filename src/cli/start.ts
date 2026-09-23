@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { openSync, mkdirSync } from 'fs';
-import { readPid, writePid, isAlive, kshetraDir, workerLogPath } from './pid';
+import { readPid, isLiveWorker, claimWorkerPid, kshetraDir, workerLogPath } from './pid';
 import { selfExec, type Launch } from './self-exec';
 import { labelsToArgs } from './labels';
 
@@ -25,8 +25,10 @@ export function startWorker(
     ...(allowAblation ? ['--allow-ablation'] : []),
   ]),
 ): StartResult {
+  // A live worker — a daemon OR a foreground drain/run (Shreni-beads-4w0) — owns
+  // the kshetra: never start a second one on the same working tree.
   const existing = readPid(kshetraId);
-  if (existing !== null && isAlive(existing)) {
+  if (existing !== null && isLiveWorker(existing)) {
     return { status: 'already_running', kshetraId, pid: existing };
   }
 
@@ -41,7 +43,14 @@ export function startWorker(
     throw new Error(`Failed to spawn worker process for "${kshetraId}"`);
   }
 
-  writePid(kshetraId, child.pid);
+  // Claim atomically for the child (the child claims its own pid too, so either
+  // order lands the same value). If a worker won the race since the check above,
+  // back out: kill our child rather than overwrite a live owner's identity.
+  const claim = claimWorkerPid(kshetraId, child.pid);
+  if (!claim.ok) {
+    try { process.kill(child.pid, 'SIGTERM'); } catch { /* already gone */ }
+    return { status: 'already_running', kshetraId, pid: claim.ownerPid };
+  }
   child.unref();
 
   return { status: 'started', kshetraId, pid: child.pid };

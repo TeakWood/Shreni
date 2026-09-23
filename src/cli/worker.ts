@@ -1,6 +1,7 @@
 import { loadRegistry } from '../kshetra/registry';
 import { createWorkerRuntime, workerPreconditionError } from './worker-runtime';
 import { parseLabels } from './labels';
+import { claimForThisProcess } from './pid';
 
 // A worker process drives exactly one kshetra. Its id is passed as argv[2] by
 // `shreni start`. Each worker has its own PID + logs under ~/.shreni/kshetra/<id>/,
@@ -23,6 +24,19 @@ const kshetra = loadRegistry().find(k => k.id === kshetraId);
 
 if (!kshetra) {
   console.error(`[shreni worker] kshetra not registered: ${kshetraId}`);
+  process.exit(1);
+}
+
+// Ownership (Shreni-beads-4w0): `shreni start` already claimed worker.pid for
+// this pid; claiming again is a no-op then, and is what refuses a directly-invoked
+// __worker on a kshetra a live drain or daemon already owns. Claimed BEFORE the
+// precondition gate so its 'exit' backstop releases the pid on any early exit
+// below — no dead worker row left behind by a child that never ran.
+let releaseOwnership: () => void;
+try {
+  releaseOwnership = claimForThisProcess(kshetraId);
+} catch (err) {
+  console.error(`[shreni worker:${kshetraId}] ${(err as Error).message}`);
   process.exit(1);
 }
 
@@ -69,6 +83,7 @@ stopTimers = runtime.startTimers();
 function shutdown(): void {
   stop?.();
   stopTimers?.();
+  releaseOwnership();
   process.exit(0);
 }
 

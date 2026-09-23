@@ -21,6 +21,8 @@ const mockEmit = vi.fn((e: { type: string }) => { order.push(`emit:${e.type}`); 
 vi.mock('../sthapathi/activity-log', () => ({
   emit: (e: { type: string }) => mockEmit(e),
   getCurrentLotId: () => 'lot-xyz',
+  // Read by phalaka/process-read (the process-row test); no heartbeat yet.
+  heartbeatPath: (id: string) => `/nonexistent/${id}/heartbeat`,
 }));
 vi.mock('../kshetra/registry', () => ({ loadRegistry: () => [KSHETRA] }));
 vi.mock('../kshetra/state', () => ({ loadState: () => ({ kshetras: {} }) }));
@@ -32,6 +34,8 @@ vi.mock('./worker-runtime', () => ({
 }));
 
 const { runDrain } = await import('./drain');
+const { readPid, writePid, clearPid } = await import('./pid');
+const { spawn } = await import('child_process');
 type DrainDriver = import('./drain').DrainDriver;
 
 function fakeDriver(openInScope: string[]): DrainDriver {
@@ -54,6 +58,63 @@ function fakeDriver(openInScope: string[]): DrainDriver {
 }
 
 beforeEach(() => { order.length = 0; mockEmit.mockClear(); });
+
+// Shreni-beads-4w0: a foreground drain registers as the kshetra's worker (so
+// Phalaka/`shreni status` render it) and refuses to start on a kshetra another
+// live worker owns.
+describe('runDrain worker ownership (Shreni-beads-4w0)', () => {
+  it('holds worker.pid (this pid) while running and releases it on return', async () => {
+    clearPid('myapp');
+    let during: number | null = null;
+    const driver = fakeDriver([]);
+    driver.openInScope = vi.fn(async () => { during = readPid('myapp'); return []; });
+    await runDrain('myapp', { intervalMs: 1 }, async () => driver, async () => {});
+    expect(during).toBe(process.pid);
+    expect(readPid('myapp')).toBeNull();
+  });
+
+  it('is rendered as a worker process row by Phalaka while it runs', async () => {
+    clearPid('myapp');
+    const { readProcessSnapshots } = await import('../phalaka/process-read');
+    let rows: Array<{ kind: string; kshetraId?: string; pid: number; status: string }> = [];
+    const driver = fakeDriver([]);
+    driver.openInScope = vi.fn(async () => { rows = readProcessSnapshots(); return []; });
+    await runDrain('myapp', { intervalMs: 1 }, async () => driver, async () => {});
+    expect(rows).toContainEqual(expect.objectContaining({ kind: 'worker', kshetraId: 'myapp', pid: process.pid }));
+    expect(rows.find(r => r.kshetraId === 'myapp')?.status).not.toBe('dead');
+  });
+
+  it('releases worker.pid when the drain throws', async () => {
+    clearPid('myapp');
+    await expect(runDrain('myapp', { intervalMs: 1 }, async () => { throw new Error('driver boom'); }, async () => {}))
+      .rejects.toThrow('driver boom');
+    expect(readPid('myapp')).toBeNull();
+  });
+
+  it('refuses to start when a live daemon owns the kshetra, naming its pid; the daemon keeps its identity', async () => {
+    // Stand-in for a running `shreni start` daemon: a live process whose command
+    // line names __worker, recorded in worker.pid.
+    const daemon = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', 'shreni', '__worker', 'myapp'], { stdio: 'ignore' });
+    try {
+      writePid('myapp', daemon.pid!);
+      const makeDriver = vi.fn(async () => fakeDriver([]));
+      await expect(runDrain('myapp', { intervalMs: 1 }, makeDriver, async () => {}))
+        .rejects.toThrow(new RegExp(`already owned by a live worker \\(pid ${daemon.pid}\\)`));
+      expect(makeDriver).not.toHaveBeenCalled(); // never touched the working tree
+      expect(readPid('myapp')).toBe(daemon.pid); // daemon's registration intact
+    } finally {
+      daemon.kill('SIGKILL');
+      clearPid('myapp');
+    }
+  });
+
+  it('a stale pidfile from a crashed worker does not block the drain', async () => {
+    writePid('myapp', 2 ** 22 + 12345); // no such process
+    const result = await runDrain('myapp', { intervalMs: 1 }, async () => fakeDriver([]), async () => {});
+    expect(result.exitCode).toBe(0);
+    expect(readPid('myapp')).toBeNull();
+  });
+});
 
 describe('runDrain', () => {
   it('throws for an unknown kshetra', async () => {

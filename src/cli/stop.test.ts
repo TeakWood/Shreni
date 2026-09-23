@@ -41,7 +41,9 @@ describe('stopWorker', () => {
     expect(mockKill).not.toHaveBeenCalled();
   });
 
-  it('sends SIGTERM and clears PID file when process is alive', () => {
+  // Shreni-beads-4w0: the owner releases its own claim on exit — a drain finishes
+  // its in-flight cycle after SIGTERM, so clearing here would unown a live worker.
+  it('sends SIGTERM and leaves the PID file for the exiting owner to release', () => {
     mockReadPid.mockReturnValue(1234);
     mockIsAlive.mockReturnValue(true);
 
@@ -49,6 +51,6 @@ describe('stopWorker', () => {
 
     expect(result).toEqual({ status: 'stopped', kshetraId: 'myapp', pid: 1234 });
     expect(mockKill).toHaveBeenCalledWith(1234, 'SIGTERM');
-    expect(mockClearPid).toHaveBeenCalledWith('myapp');
+    expect(mockClearPid).not.toHaveBeenCalled();
   });
 });

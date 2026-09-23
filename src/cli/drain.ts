@@ -13,6 +13,7 @@ import {
 import { classifyOpenBeads, type StalledBead } from './drain-classify';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
+import { claimForThisProcess } from './pid';
 
 // `shreni drain` (epic 7h3 / Study B3): run the REAL worker in the foreground
 // until every ready bead in scope is worked, then EXIT with a machine-readable
@@ -336,6 +337,28 @@ export async function runDrain(
     throw new Error(`Invalid max cycles "${opts.maxCycles}": expected a positive integer.`);
   }
 
+  // One kshetra, one worker (Shreni-beads-4w0): claim worker.pid BEFORE building
+  // the runtime, so a drain started on a kshetra a daemon (or another drain) is
+  // already working is refused before it can touch the shared working tree. The
+  // claim is also what makes this foreground worker visible to Phalaka and
+  // `shreni status`. Held for the whole drain and released however it ends
+  // (return, throw, or a signal-ended drain; an 'exit' backstop covers the rest).
+  const releaseOwnership = claimForThisProcess(kshetraId);
+  try {
+    return await runOwnedDrain(kshetra, opts, makeDriver, delay);
+  } finally {
+    releaseOwnership();
+  }
+}
+
+// The drain proper, run while this process owns the kshetra (see runDrain).
+async function runOwnedDrain(
+  kshetra: KshetraConfig,
+  opts: DrainOptions,
+  makeDriver: (k: KshetraConfig, o: DrainOptions) => Promise<DrainDriver>,
+  delay: (ms: number) => Promise<void>,
+): Promise<DrainResult> {
+  const kshetraId = kshetra.id;
   const driver = await makeDriver(kshetra, opts);
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
   const startedAtMs = Date.now();

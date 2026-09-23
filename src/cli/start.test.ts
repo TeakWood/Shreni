@@ -2,12 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockReadPid = vi.fn<(id: string) => number | null>();
 const mockIsAlive = vi.fn<(pid: number) => boolean>();
-const mockWritePid = vi.fn<(id: string, pid: number) => void>();
+const mockClaim = vi.fn<(id: string, pid: number) => { ok: true } | { ok: false; ownerPid: number }>(() => ({ ok: true }));
 
 vi.mock('./pid', () => ({
   readPid: mockReadPid,
-  isAlive: mockIsAlive,
-  writePid: mockWritePid,
+  isLiveWorker: mockIsAlive,
+  claimWorkerPid: mockClaim,
   clearPid: vi.fn(),
   kshetraDir: (id: string) => `/tmp/shreni/kshetra/${id}`,
   workerLogPath: (id: string) => `/tmp/shreni/kshetra/${id}/worker.log`,
@@ -28,6 +28,7 @@ function makeChild(pid: number) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockClaim.mockReturnValue({ ok: true });
 });
 
 describe('startWorker', () => {
@@ -50,7 +51,7 @@ describe('startWorker', () => {
     const result = startWorker('myapp', {}, false, { command: 'node', args: ['/path/to/worker.js', 'myapp'] });
 
     expect(result).toEqual({ status: 'started', kshetraId: 'myapp', pid: 5678 });
-    expect(mockWritePid).toHaveBeenCalledWith('myapp', 5678);
+    expect(mockClaim).toHaveBeenCalledWith('myapp', 5678);
     expect(child.unref).toHaveBeenCalled();
   });
 
@@ -76,6 +77,21 @@ describe('startWorker', () => {
       ['/path/to/worker.js', 'myapp'],
       expect.objectContaining({ detached: true, stdio: ['ignore', 3, 3] }),
     );
+  });
+
+  // Shreni-beads-4w0: a worker that claimed the kshetra between the liveness check
+  // and the spawn wins; start backs out instead of overwriting its identity.
+  it('kills its child and reports already_running when another worker wins the claim race', () => {
+    mockReadPid.mockReturnValue(null);
+    mockSpawn.mockReturnValue(makeChild(4321));
+    mockClaim.mockReturnValue({ ok: false, ownerPid: 777 });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const result = startWorker('myapp', {}, false, { command: 'node', args: ['/path/to/worker.js', 'myapp'] });
+
+    expect(result).toEqual({ status: 'already_running', kshetraId: 'myapp', pid: 777 });
+    expect(kill).toHaveBeenCalledWith(4321, 'SIGTERM');
+    kill.mockRestore();
   });
 
   it('throws when spawn returns no pid', () => {
