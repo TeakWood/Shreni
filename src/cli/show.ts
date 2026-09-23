@@ -139,7 +139,8 @@ function fmtEntry(e: LedgerEntry): string {
       body = `${label('CLAIMED')}${text(p.title)}`;
       break;
     case 'run_started':
-      body = `${label('RUN')}${text(p.agent)} ${text(p.provider)}/${text(p.model)}`;
+      // attempt ≥ 2 is a transient retry — a new session for the same dispatch.
+      body = `${label('RUN')}${text(p.agent)} ${text(p.provider)}/${text(p.model)}${(num(p.attempt) ?? 1) > 1 ? ` (attempt ${num(p.attempt)})` : ''}`;
       break;
     case 'policy_decision':
       body =
@@ -194,7 +195,13 @@ function fmtEntry(e: LedgerEntry): string {
     default:
       body = `${label(e.kind)}${JSON.stringify(p)}`;
   }
-  return `  ${fmtTs(e.ts)}  ${body}`;
+  // The agent execution this entry describes (Shreni-beads-228), printed IN FULL
+  // so the transcript is findable without reading raw JSONL — for the claude
+  // adapter it is the file name of ~/.claude/projects/<repo-slug>/<sessionId>.jsonl
+  // (for other providers, a Shreni correlation id only). Entries with no session
+  // (claim, gates, merge, pre-228 history) print nothing extra.
+  const session = typeof e.sessionId === 'string' && e.sessionId ? `  session=${e.sessionId}` : '';
+  return `  ${fmtTs(e.ts)}  ${body}${session}`;
 }
 
 // ── lot manifest header (epic yrk / Study B2, yrk.5) ─────────────────────────

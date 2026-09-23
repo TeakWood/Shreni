@@ -58,9 +58,19 @@ export const claudeAdapter: ProviderAdapter = {
       '--permission-mode', 'bypassPermissions',
       // Layer Shreni's prompt on top of the repo's native config (see header).
       '--append-system-prompt', opts.systemPrompt,
-      '--no-session-persistence',
       '--setting-sources', 'project',
     ];
+    // Session identity (Shreni-beads-228). Under runAgent every attempt carries a
+    // minted sessionId: pin it with --session-id (as suthradhara/session.ts does)
+    // and let Claude Code PERSIST the transcript, so the ledger's sessionId resolves
+    // to ~/.claude/projects/<cwd>/<sessionId>.jsonl — evidence referenced, never
+    // copied. With no sessionId (adapter driven directly) keep the old ephemeral
+    // --no-session-persistence behaviour: there is no id anything could resolve.
+    if (opts.sessionId) {
+      args.push('--session-id', opts.sessionId);
+    } else {
+      args.push('--no-session-persistence');
+    }
 
     // Executor MCP surface (pmb.8). Executors run under bypassPermissions, where
     // --allowedTools is a no-op (allow rules do nothing in bypass) — so the only

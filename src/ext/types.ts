@@ -65,6 +65,12 @@ export interface UsageRecord {
   // and producers that do not time the run (suthradhara's planning session),
   // omit it, and a reader treats absent as unknown, never as 0.
   durationMs?: number;
+  // The agent execution (session) this record meters (Shreni-beads-228) — the
+  // same id the ledger's run_usage entry carries, so the two join 1:1 (runId
+  // alone spans every session of a bead attempt). Additive OPTIONAL — no
+  // USAGE_SCHEMA_VERSION bump; absent before 228 and for producers that name no
+  // session (suthradhara's planning session).
+  sessionId?: string;
 }
 
 // Bump when the persisted UsageEntry shape changes in a way a consumer must
@@ -104,7 +110,7 @@ export interface UsageEntry extends UsageRecord {
 // without adding it to UsageRecord fails `pnpm typecheck` here, for EVERY
 // producer (runner.ts and suthradhara.ts alike). Fields shared today: kshetra,
 // beadId, agent, provider, model, inputTokens, outputTokens, costUsd, priced,
-// outcome, contextWindow?, durationMs? (plus the ts/schemaVersion/runId envelope).
+// outcome, contextWindow?, durationMs?, sessionId? (plus the ts/schemaVersion/runId envelope).
 type RunUsageFieldsMissingFromEntry = Exclude<
   keyof Extract<ActivityEvent, { type: 'run_usage' }>,
   keyof UsageEntry | 'type'

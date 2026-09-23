@@ -6,6 +6,7 @@ import type { AgentContext, Task, SilpiOutput, ViharapalaOutput } from './types.
 import { bd } from './beads.js';
 import { runSilpi } from '../agents/silpi.js';
 import { runViharapala } from '../agents/viharapala.js';
+import { sessionIdOf } from '../agents/runner.js';
 import { withRetry } from './retry.js';
 import { ParseError, AgentError } from './errors.js';
 import { emit } from './activity-log.js';
@@ -20,6 +21,14 @@ import { recordProgress, setHealthBaseline } from '../kshetra/state.js';
 import { loadRepoMap } from '../kshetra/repo-map.js';
 import { AgentAbortedError } from './errors.js';
 import { captureGuard, assertOnBranch, recoverOffBranch, OffBranchError, type BranchGuard } from './guard.js';
+
+// The `sessionId` field for a per-round executor event (Shreni-beads-228): the
+// session runAgent recorded for this exact output object, or nothing when there is
+// none (a mocked/synthesized output) — never a guess.
+function sessionFieldOf(output: SilpiOutput | ViharapalaOutput): { sessionId?: string } {
+  const sessionId = sessionIdOf(output);
+  return sessionId ? { sessionId } : {};
+}
 
 // Bail out of a round loop the instant a self-heal abort is requested, so the
 // worker's RECOVER isn't racing a fresh round starting between agent calls
@@ -265,6 +274,9 @@ export async function runSilpiViharapalaLoop(
       lintPassed: lint.passed,
       testsPassed: health.green,
       gatesElapsedMs,
+      // The Silpi session that produced this round (Shreni-beads-228) — lifted to
+      // the ledger envelope so the round resolves to its transcript.
+      ...sessionFieldOf(silpiOut),
     });
 
     // Decision-grade (4a2.2): one gate_result per gate at the point the gate
@@ -360,6 +372,7 @@ export async function runSilpiViharapalaLoop(
       verdict: feedback.verdict,
       score: feedback.overallScore,
       mustFix: feedback.mustFix,
+      ...sessionFieldOf(feedback),
     });
 
     for (const insight of feedback.insights) {
@@ -443,6 +456,7 @@ export async function runHealthRepairLoop(
       files: silpiOut.filesChanged.map(f => f.path),
       lintPassed: silpiOut.lintPassed,
       testsPassed: health.green,
+      ...sessionFieldOf(silpiOut),
     });
 
     if (health.green) {

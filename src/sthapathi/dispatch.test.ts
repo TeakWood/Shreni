@@ -26,6 +26,11 @@ vi.mock('../agents/silpi.js', () => ({ runSilpi: mockRunSilpi }));
 const mockRunViharapala = vi.fn<() => Promise<ViharapalaOutput>>();
 vi.mock('../agents/viharapala.js', () => ({ runViharapala: mockRunViharapala }));
 
+// Session lookup (Shreni-beads-228): the real one keys a WeakMap filled by
+// runAgent, which never runs here — tests map output objects to sessions directly.
+const { sessionByOutput } = vi.hoisted(() => ({ sessionByOutput: new Map<object, string>() }));
+vi.mock('../agents/runner.js', () => ({ sessionIdOf: (o: object) => sessionByOutput.get(o) }));
+
 const mockCreateTaskBranch = vi.fn<() => Promise<string>>();
 vi.mock('./branch.js', () => ({
   createTaskBranch: mockCreateTaskBranch,
@@ -299,6 +304,32 @@ describe('runSilpiViharapalaLoop', () => {
     const gateResults = events.filter(e => e.type === 'gate_result');
     expect(gateResults.length).toBeGreaterThan(0);
     for (const g of gateResults) expect(g.durationMs).toEqual(expect.any(Number));
+  });
+
+  it('stamps silpi_done / viharapala_done with the session that produced each output (Shreni-beads-228)', async () => {
+    const silpiOut = { ...SILPI_PASS };
+    const review = { ...VIHARAPALA_APPROVE };
+    sessionByOutput.set(silpiOut, 'sess-silpi');
+    sessionByOutput.set(review, 'sess-review');
+    mockRunSilpi.mockResolvedValueOnce(silpiOut);
+    mockRunViharapala.mockResolvedValueOnce(review);
+    emitSpy.mockClear();
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    const events = emitSpy.mock.calls.map((c: unknown[]) => c[0] as { type: string; [k: string]: unknown });
+    expect(events.find(e => e.type === 'silpi_done')?.sessionId).toBe('sess-silpi');
+    expect(events.find(e => e.type === 'viharapala_done')?.sessionId).toBe('sess-review');
+    // Kinds with no session never carry one.
+    for (const e of events.filter(ev => ['task_claimed', 'gate_result', 'task_done'].includes(ev.type))) {
+      expect(e).not.toHaveProperty('sessionId');
+    }
+  });
+
+  it('omits sessionId when an output has no recorded session (never guessed)', async () => {
+    emitSpy.mockClear();
+    await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
+    const events = emitSpy.mock.calls.map((c: unknown[]) => c[0] as { type: string; [k: string]: unknown });
+    expect(events.find(e => e.type === 'silpi_done')).not.toHaveProperty('sessionId');
+    expect(events.find(e => e.type === 'viharapala_done')).not.toHaveProperty('sessionId');
   });
 
   it('squash-merges on approval under the default push policy', async () => {

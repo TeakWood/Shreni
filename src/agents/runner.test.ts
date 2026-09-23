@@ -30,7 +30,7 @@ vi.mock('../ext/index.js', () => ({
   }),
 }));
 
-const { runAgent } = await import('./runner');
+const { runAgent, sessionIdOf } = await import('./runner');
 const { AgentAbortedError, RunNotPermittedError } = await import('../sthapathi/errors');
 const { AgentRunError } = await import('./providers/types');
 
@@ -374,5 +374,82 @@ describe('runAgent policy routing', () => {
     };
     await expect(runAgent(OPTS())).rejects.toBeInstanceOf(RunNotPermittedError);
     expect(mockGetAdapter).not.toHaveBeenCalled();
+  });
+});
+
+describe('runAgent session identity (Shreni-beads-228)', () => {
+  // Captures the opts each spawn was built with, so a test can assert the adapter
+  // saw the same sessionId the events carry.
+  function recordingAdapter(seen: AgentRunnerOpts[], finalize: (n: number) => unknown) {
+    let n = 0;
+    return {
+      name: 'anthropic' as const,
+      buildSpawn: (o: AgentRunnerOpts) => { seen.push(o); return { bin: 'true', args: [] }; },
+      createParser: (_o: AgentRunnerOpts, emit: { text: (t: string) => void; usage?: (u: unknown) => void; compacted?: (c: unknown) => void }) => {
+        emit.text('hello');
+        emit.usage?.({ messageId: 'm1', inputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, sidechain: false });
+        emit.compacted?.({ trigger: 'auto', preTokens: 10 });
+        const attempt = ++n;
+        return { onLine: () => {}, finalize: () => finalize(attempt) };
+      },
+    };
+  }
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('mints one sessionId per attempt, hands it to the adapter, and stamps every event with it', async () => {
+    mockEmitted.length = 0;
+    const seen: AgentRunnerOpts[] = [];
+    const output = { summary: 'ok' };
+    mockGetAdapter.mockReturnValue(recordingAdapter(seen, () => ({ structuredOutput: output, resultText: '', toolCallCount: 0 })));
+    const result = await runAgent(OPTS());
+
+    const started = mockEmitted.filter(e => e.type === 'run_started');
+    expect(started).toHaveLength(1);
+    const sid = started[0].sessionId as string;
+    expect(sid).toMatch(/^[0-9a-f-]{36}$/);
+    expect(started[0].attempt).toBe(1);
+    expect(seen[0].sessionId).toBe(sid);
+    expect(result.sessionId).toBe(sid);
+    // The usage.jsonl record names the same session as its ledger fold (1:1 join).
+    expect(mockRecord.mock.calls.at(-1)![0].sessionId).toBe(sid);
+    // The structured output resolves back to its session by identity.
+    expect(sessionIdOf(output)).toBe(sid);
+    expect(sessionIdOf({ summary: 'ok' })).toBeUndefined();
+    for (const type of ['agent_text', 'turn_usage', 'context_compacted', 'run_usage']) {
+      const ev = mockEmitted.find(e => e.type === type);
+      expect(ev, type).toBeDefined();
+      expect(ev!.sessionId, type).toBe(sid);
+    }
+    // policy_decision is per dispatch, not per session — it carries none.
+    for (const ev of mockEmitted.filter(e => e.type === 'policy_decision')) expect(ev).not.toHaveProperty('sessionId');
+  });
+
+  it('a transient retry is a NEW session: two run_started with distinct sessionIds and attempts 1, 2', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    mockEmitted.length = 0;
+    const seen: AgentRunnerOpts[] = [];
+    mockGetAdapter.mockReturnValue(recordingAdapter(seen, n => {
+      if (n === 1) throw new AgentRunError('silpi: API Error: 529 overloaded', { inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 }, 0);
+      return { structuredOutput: {}, resultText: '', toolCallCount: 0 };
+    }));
+    const p = runAgent(OPTS());
+    // Wait (on real I/O turns) for attempt 1 to fail into its backoff, then skip it.
+    const inBackoff = (): boolean => mockEmitted.some(e => e.type === 'agent_text' && String(e.text).includes('transient'));
+    for (let i = 0; i < 2000 && !inBackoff(); i++) await new Promise(r => setImmediate(r));
+    expect(inBackoff(), 'attempt 1 never reached its transient backoff').toBe(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await p;
+
+    const started = mockEmitted.filter(e => e.type === 'run_started');
+    expect(started.map(e => e.attempt)).toEqual([1, 2]);
+    const [s1, s2] = started.map(e => e.sessionId as string);
+    expect(s1).not.toBe(s2);
+    expect(seen.map(o => o.sessionId)).toEqual([s1, s2]);
+    // Each attempt's usage fold names its own session; the retry notice names the failed one.
+    expect(mockEmitted.filter(e => e.type === 'run_usage').map(e => [e.outcome, e.sessionId])).toEqual([['error', s1], ['ok', s2]]);
+    expect(mockEmitted.find(e => e.type === 'agent_text' && String(e.text).includes('transient'))!.sessionId).toBe(s1);
+    // turn_usage restarts at 0 for the new session.
+    expect(mockEmitted.filter(e => e.type === 'turn_usage').map(e => [e.sessionId, e.turnIndex])).toEqual([[s1, 0], [s2, 0]]);
   });
 });

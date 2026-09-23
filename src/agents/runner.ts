@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { emit, touchHeartbeat, getCurrentRunId } from '../sthapathi/activity-log.js';
 import { nowMs, elapsedMs } from '../sthapathi/timing.js';
 import { AgentAbortedError, RunNotPermittedError } from '../sthapathi/errors.js';
@@ -27,6 +27,24 @@ function manifestHashFor(opts: AgentRunnerOpts, selection: ModelSelection): stri
     mcp: opts.mcp?.configPaths ?? [],
   });
   return createHash('sha256').update(manifest).digest('hex');
+}
+
+// The session that produced a structured output (Shreni-beads-228). runAgent's
+// callers (runSilpi / runViharapala) return the bare parsed output object, and
+// dispatch emits silpi_done / viharapala_done from it — so the sessionId rides
+// alongside keyed by the OUTPUT OBJECT'S IDENTITY, not by kshetra. That is the
+// point: a per-kshetra "current session" (like currentRunId) could be overwritten
+// by an overlapping run (a post-merge Parikshaka), mislabeling the round; an
+// identity key cannot. A WeakMap, so it never retains an output past its use and
+// never leaks into the output itself (which is serialized into later prompts).
+const sessionByOutput = new WeakMap<object, string>();
+
+// The sessionId of the runAgent attempt that returned `output` as its
+// structuredOutput, or undefined for anything runAgent did not produce (a mocked
+// output, a synthesized review). Callers treat undefined as "no session" and omit
+// the field — never guess.
+export function sessionIdOf(output: unknown): string | undefined {
+  return typeof output === 'object' && output !== null ? sessionByOutput.get(output) : undefined;
 }
 
 export type { AgentRunnerOpts, AgentRunResult };
@@ -120,33 +138,47 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
   });
   if (!decision.allowed) throw new RunNotPermittedError(opts.agentName, decision.reason);
 
-  // The run is permitted and about to begin. run_started fingerprints the exact
-  // inputs (prompts + provider/model/tools) so the run is reproducible and two
-  // runs are comparable; the per-token stream lands in activity.jsonl under the
-  // same runId. Emitted only after mayProceed allows — a denied run never starts.
-  emit({
-    type: 'run_started',
-    kshetra: opts.kshetraId,
-    beadId: opts.beadId,
-    agent: opts.agentName,
-    provider: selection.provider,
-    model: selection.model,
-    manifestHash: manifestHashFor(opts, selection),
-  });
-
   // The effective run uses the policy-selected provider/model (identical to
   // opts under the default policy). Retry/backoff/failover stay here.
-  const runOpts: AgentRunnerOpts = { ...opts, provider: selection.provider, model: selection.model };
-  let lastErr = new Error(`${runOpts.agentName}: no attempt made`);
+  const baseOpts: AgentRunnerOpts = { ...opts, provider: selection.provider, model: selection.model };
+  const manifestHash = manifestHashFor(opts, selection);
+  let lastErr = new Error(`${baseOpts.agentName}: no attempt made`);
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // One SESSION per attempt (Shreni-beads-228 / 408.2 part 0): every attempt is
+    // a fresh provider subprocess with a fresh context window. Minted here and
+    // captured in this attempt's opts — never a global "current session" — so an
+    // overlapping run can never mislabel it. The claude adapter pins it as
+    // --session-id, making it Claude Code's own session id.
+    const sessionId = randomUUID();
+    const runOpts: AgentRunnerOpts = { ...baseOpts, sessionId };
+    // The session is permitted and about to begin — one run_started per session.
+    // It fingerprints the exact inputs (prompts + provider/model/tools) so the run
+    // is reproducible and two runs are comparable (the hash is per dispatch, so a
+    // retry carries the same one); the per-token stream lands in activity.jsonl
+    // under the same runId + sessionId. Emitted only after mayProceed allows — a
+    // denied run never starts.
+    emit({
+      type: 'run_started',
+      kshetra: opts.kshetraId,
+      beadId: opts.beadId,
+      agent: opts.agentName,
+      provider: selection.provider,
+      model: selection.model,
+      manifestHash,
+      sessionId,
+      attempt,
+    });
     // Time the provider subprocess for THIS attempt (spawn → exit), at the site,
     // with a monotonic clock (epic hto / Study A3). Captured on both the ok and
     // error path — a failed session still consumed real time.
     const attemptStart = nowMs();
     try {
-      const result = await runAttempt(runOpts);
-      reportUsage(runOpts, 'ok', result.usage, result.toolCallCount, elapsedMs(attemptStart));
+      const attemptResult = await runAttempt(runOpts);
+      reportUsage(runOpts, 'ok', attemptResult.usage, attemptResult.toolCallCount, elapsedMs(attemptStart));
+      const result: AgentRunResult = { ...attemptResult, sessionId };
+      const out = result.structuredOutput;
+      if (typeof out === 'object' && out !== null) sessionByOutput.set(out, sessionId);
       return result;
     } catch (err) {
       lastErr = err as Error;
@@ -168,6 +200,8 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
           kshetra: runOpts.kshetraId,
           beadId: runOpts.beadId,
           agent: runOpts.agentName,
+          // The failed session this notice is about.
+          sessionId,
           text: `[transient error — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${MAX_ATTEMPTS}): ${msg.slice(0, 200)}]`,
         });
         await sleep(waitMs, runOpts.signal);
@@ -198,6 +232,8 @@ function reportUsage(
   // Monotonic ms this attempt's provider subprocess ran (epic hto / Study A3).
   durationMs: number,
 ): void {
+  // The metered session (Shreni-beads-228): opts is the per-attempt runOpts.
+  const sessionId = opts.sessionId;
   const record: UsageRecord = {
     kshetra: opts.kshetraId,
     beadId: opts.beadId,
@@ -220,6 +256,9 @@ function reportUsage(
     // (Shreni-beads-dt7): the ledger entry is a projection of this record and
     // must never hold a field the record lacks.
     durationMs,
+    // The metered session (Shreni-beads-228): the usage.jsonl record names the
+    // exact attempt, not just the runId (which spans every session of the bead).
+    ...(sessionId ? { sessionId } : {}),
   };
   try {
     // usage.jsonl (epic g2k): the full per-run record with the price snapshot.
@@ -262,6 +301,9 @@ function reportUsage(
       // Session duration for time attribution (epic hto / Study A3) — read off
       // the record so the two shapes carry the same value (dt7).
       durationMs: record.durationMs,
+      // The metered session (Shreni-beads-228), read off the record like
+      // durationMs, so the ledger entry and its usage.jsonl record join 1:1.
+      ...(record.sessionId ? { sessionId: record.sessionId } : {}),
     });
   } catch {
     // A ledger-fold failure must never fail an otherwise-successful agent run.
@@ -284,15 +326,18 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
     // is a fresh stream and starts over).
     let mainTurnIndex = 0;
     let sideTurnIndex = 0;
+    // Every event this attempt emits carries its own session (Shreni-beads-228),
+    // captured from the per-attempt opts — omitted only when driven without one.
+    const sessionField = opts.sessionId ? { sessionId: opts.sessionId } : {};
     const adapterEmit: AdapterEmit = {
       text(text: string) {
         if (!text.trim()) return;
         touchHeartbeat(opts.kshetraId);
-        emit({ type: 'agent_text', kshetra: opts.kshetraId, beadId: opts.beadId, agent: opts.agentName, text });
+        emit({ type: 'agent_text', kshetra: opts.kshetraId, beadId: opts.beadId, agent: opts.agentName, text, ...sessionField });
       },
       toolCall(tool: string, detail: string) {
         touchHeartbeat(opts.kshetraId);
-        emit({ type: 'agent_tool_call', kshetra: opts.kshetraId, beadId: opts.beadId, agent: opts.agentName, tool, detail });
+        emit({ type: 'agent_tool_call', kshetra: opts.kshetraId, beadId: opts.beadId, agent: opts.agentName, tool, detail, ...sessionField });
       },
       usage(u) {
         // opts here is runOpts: provider/model are the policy-resolved selection.
@@ -311,6 +356,7 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
           cacheReadTokens: u.cacheReadTokens,
           cacheCreationTokens: u.cacheCreationTokens,
           sidechain: u.sidechain,
+          ...sessionField,
         });
       },
       compacted(c) {
@@ -329,6 +375,7 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
           trigger: c.trigger,
           preTokens: c.preTokens,
           turnIndex: Math.max(0, mainTurnIndex - 1),
+          ...sessionField,
         });
       },
     };

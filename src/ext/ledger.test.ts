@@ -173,6 +173,39 @@ describe('toLedgerEntry lifts lotId alongside runId (epic yrk / Study B2)', () =
   });
 });
 
+describe('toLedgerEntry lifts sessionId to the envelope (Shreni-beads-228)', () => {
+  const SID = '0b7c1a52-7e1d-4c4f-9a57-2f0d3b1e9c11';
+
+  it.each([
+    ['run_started', { agent: 'silpi', provider: 'anthropic', model: 'm', manifestHash: 'h', attempt: 1 }],
+    ['run_usage', { agent: 'silpi', provider: 'anthropic', model: 'm', inputTokens: 1, outputTokens: 1, costUsd: 0, priced: true, outcome: 'ok' }],
+    ['context_compacted', { agent: 'silpi', provider: 'anthropic', model: 'm', trigger: 'auto', preTokens: 9, turnIndex: 3 }],
+    ['silpi_done', { round: 2, summary: 's', confidence: 90, files: [], lintPassed: true, testsPassed: true }],
+    ['viharapala_done', { round: 1, verdict: 'APPROVE', score: 9, mustFix: [] }],
+  ] as const)('%s carries the session on the envelope, not in the payload', (type, fields) => {
+    const entry = toLedgerEntry(ev({ type, beadId: 'b1', runId: 'r1', sessionId: SID, ...fields } as unknown as LoggedEvent));
+    expect(entry).toMatchObject({ beadId: 'b1', runId: 'r1', sessionId: SID, kind: type });
+    expect('sessionId' in entry.payload).toBe(false);
+  });
+
+  it('omits sessionId for kinds with no session', () => {
+    for (const e of [
+      ev({ type: 'task_claimed', beadId: 'b1', title: 't', runId: 'r1' } as unknown as LoggedEvent),
+      ev({ type: 'merge_done', beadId: 'b1', mergePolicy: 'push', sha: 'abc', runId: 'r1' } as unknown as LoggedEvent),
+      ev({ type: 'worker_started', lotId: 'l1', entrypoint: 'worker', subject: {}, process: {}, labels: {} } as unknown as LoggedEvent),
+    ]) {
+      expect(toLedgerEntry(e)).not.toHaveProperty('sessionId');
+    }
+  });
+
+  it('parses a pre-228 ledger line with no sessionId', () => {
+    const raw = JSON.stringify({ ts: 'x', schemaVersion: 1, kshetra: 'k', beadId: 'b1', runId: 'r1', kind: 'run_started', payload: { agent: 'silpi' } }) + '\n';
+    const [entry] = parseLedgerLines(raw);
+    expect(entry.kind).toBe('run_started');
+    expect(entry.sessionId).toBeUndefined();
+  });
+});
+
 describe('readLedger never surfaces context_compacted to an agent (408.1)', () => {
   it('withholds context_compacted from an agent-clearance reader', () => {
     const entries: LedgerEntry[] = [

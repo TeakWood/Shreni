@@ -119,6 +119,24 @@ describe('claudeAdapter.buildSpawn', () => {
     expect(spec.args).not.toContain('');
   });
 
+  it('pins --session-id and persists the transcript when runAgent supplies a sessionId (Shreni-beads-228)', () => {
+    const SID = '11111111-2222-4333-8444-555555555555';
+    const spec = claudeAdapter.buildSpawn({ ...BASE_OPTS, sessionId: SID });
+    const idx = spec.args.indexOf('--session-id');
+    expect(idx).toBeGreaterThan(-1);
+    expect(spec.args[idx + 1]).toBe(SID);
+    // The transcript must be written, or the ledger's sessionId resolves to nothing.
+    expect(spec.args).not.toContain('--no-session-persistence');
+    // The prompt is still the sole trailing positional.
+    expect(spec.args[spec.args.length - 1]).toBe('USER');
+  });
+
+  it('keeps the ephemeral --no-session-persistence when driven without a sessionId', () => {
+    const spec = claudeAdapter.buildSpawn(BASE_OPTS);
+    expect(spec.args).toContain('--no-session-persistence');
+    expect(spec.args).not.toContain('--session-id');
+  });
+
   it('omits --disallowedTools when none are requested', () => {
     const spec = claudeAdapter.buildSpawn(BASE_OPTS);
     expect(spec.args).not.toContain('--disallowedTools');

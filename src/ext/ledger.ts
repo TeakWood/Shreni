@@ -64,6 +64,18 @@ export interface LedgerEntry {
   // carries it, joining that entry to the manifest that recorded the conditions it
   // ran under. Absent on entries written before B2 (readers tolerate its absence).
   lotId?: string;
+  // The agent execution this entry describes (Shreni-beads-228), lifted from the
+  // event the same way runId/lotId are. runId names the whole attempt at a bead —
+  // several sessions (silpi R1, viharapala R1, silpi R2, …) — so it cannot say
+  // WHICH execution produced a decision; sessionId can. For the claude adapter it
+  // is Claude Code's own session id (--session-id), so the evidence reference
+  // resolves to ~/.claude/projects/<cwd-slug>/<sessionId>.jsonl (cwd = the kshetra
+  // repo); for other providers it is a Shreni-only correlation id into
+  // activity.jsonl with no provider-side transcript. Present on run_started,
+  // run_usage, context_compacted, silpi_done and viharapala_done; absent on kinds
+  // with no session (task_claimed, gate_result, merge_done, worker_started, …) and
+  // on entries written before 228 (readers tolerate its absence).
+  sessionId?: string;
   kind: LoggedEvent['type'];
   payload: Record<string, unknown>;
 }
@@ -289,7 +301,7 @@ export function parseLedgerLines(raw: string): LedgerEntry[] {
 }
 
 // Map a decision-grade LoggedEvent to its LedgerEntry envelope. Lifts the
-// envelope fields (ts, kshetra, beadId, runId, type) out and folds the rest of
+// envelope fields (ts, kshetra, beadId, runId, lotId, sessionId, type) out and folds the rest of
 // the event into `payload`, so the entry carries the decision without the caller
 // re-specifying the correlation keys. Every decision-grade kind's shape includes
 // `beadId`, so it is always present here. The source event's own `schemaVersion`
@@ -304,8 +316,12 @@ export function toLedgerEntry(ev: LoggedEvent): LedgerEntry {
     type,
     schemaVersion: _activityVersion,
     beadId,
+    // Only the agent-execution kinds carry one (see LedgerEntry.sessionId). The
+    // suthradhara_* kinds' sessionId is a planning-session id, but those kinds are
+    // never decision-grade, so they never reach this mapping.
+    sessionId,
     ...payload
-  } = ev as LoggedEvent & { beadId?: string };
+  } = ev as LoggedEvent & { beadId?: string; sessionId?: string };
   return {
     ts,
     schemaVersion: LEDGER_SCHEMA_VERSION,
@@ -316,6 +332,7 @@ export function toLedgerEntry(ev: LoggedEvent): LedgerEntry {
     beadId: beadId ?? '',
     ...(runId ? { runId } : {}),
     ...(lotId ? { lotId } : {}),
+    ...(sessionId ? { sessionId } : {}),
     kind: type,
     payload,
   };

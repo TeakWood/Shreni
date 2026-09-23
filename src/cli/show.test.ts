@@ -68,6 +68,32 @@ describe('renderShow', () => {
     expect(out.indexOf('CLAIMED')).toBeLessThan(out.indexOf('MERGE'));
   });
 
+  it('prints the full sessionId on each agent-execution entry, nothing on the rest (Shreni-beads-228)', () => {
+    const SID1 = '0b7c1a52-7e1d-4c4f-9a57-2f0d3b1e9c11';
+    const SID2 = 'f3e2d1c0-b9a8-4765-8432-10fedcba9876';
+    const out = renderShow(
+      { id: 'b1', title: 'Fix auth', status: 'closed', type: 'task', priority: 2, criteria: '' },
+      [
+        entry('task_claimed', '2026-09-16T00:00:01.000Z', { title: 'Fix auth' }),
+        { ...entry('run_started', '2026-09-16T00:00:02.000Z', { agent: 'silpi', provider: 'anthropic', model: 'm', attempt: 1 }), sessionId: SID1 },
+        { ...entry('silpi_done', '2026-09-16T00:00:03.000Z', { round: 1, confidence: 90, lintPassed: true, testsPassed: true }), sessionId: SID1 },
+        { ...entry('run_started', '2026-09-16T00:00:04.000Z', { agent: 'viharapala', provider: 'anthropic', model: 'm', attempt: 2 }), sessionId: SID2 },
+        // A pre-228 entry: no sessionId — renders exactly as before.
+        entry('run_usage', '2026-09-16T00:00:05.000Z', { agent: 'viharapala', inputTokens: 1, outputTokens: 1, costUsd: 0, priced: true, outcome: 'ok' }),
+        entry('merge_done', '2026-09-16T00:00:06.000Z', { mergePolicy: 'push', sha: 'abc' }),
+      ],
+    );
+    const line = (needle: string): string => out.split('\n').find(l => l.includes(needle)) ?? '';
+    expect(line('RUN       silpi')).toContain(`session=${SID1}`);
+    expect(line('SILPI')).toContain(`session=${SID1}`);
+    expect(line('RUN       viharapala')).toContain(`session=${SID2}`);
+    expect(line('RUN       viharapala')).toContain('(attempt 2)');
+    expect(line('RUN       silpi')).not.toContain('attempt');
+    expect(line('CLAIMED')).not.toContain('session=');
+    expect(line('USAGE')).not.toContain('session=');
+    expect(line('MERGE')).not.toContain('session=');
+  });
+
   it('renders a clear line when the bead has no ledger entries', () => {
     const out = renderShow(
       { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },

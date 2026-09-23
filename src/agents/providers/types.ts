@@ -30,6 +30,14 @@ export interface AgentRunnerOpts {
   // rejects with AgentAbortedError; the retry loop also stops honoring transient
   // backoff. Absent for normal runs, which never cancel.
   signal?: AbortSignal;
+  // The Shreni sessionId of THIS attempt (Shreni-beads-228 / 408.2 part 0). Minted
+  // by runAgent once per attempt — every attempt is a fresh provider subprocess
+  // with a fresh context window, i.e. one session. The claude adapter passes it as
+  // `--session-id`, so it EQUALS Claude Code's own session id and the transcript at
+  // ~/.claude/projects/<cwd>/<sessionId>.jsonl resolves from any ledger entry that
+  // carries it. Adapters that cannot accept a caller-supplied id ignore it. Absent
+  // only when an adapter is driven directly (tests), not through runAgent.
+  sessionId?: string;
 }
 
 // Per-run token accounting recovered from a provider's output stream (the
@@ -54,6 +62,9 @@ export interface AgentRunResult {
   resultText: string | null;
   toolCallCount: number;
   usage?: TokenUsage;
+  // The sessionId of the attempt that produced this result (Shreni-beads-228).
+  // Stamped by runAgent, never by a parser.
+  sessionId?: string;
 }
 
 // Thrown by a parser's finalize() on an agent/transport error, carrying any

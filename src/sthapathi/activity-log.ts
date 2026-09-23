@@ -10,18 +10,30 @@ import { kshetraDir, legacyLogPath } from '../kshetra/state-locations.js';
 
 export { legacyLogPath };
 
+// `sessionId` (Shreni-beads-228): the Shreni sessionId of ONE agent execution —
+// one provider subprocess, one context window, one runAgent attempt. For the
+// claude adapter it is also Claude Code's own session id (passed as --session-id),
+// so it resolves to the transcript; for other providers it is a Shreni-only
+// correlation id (it still joins the session's activity.jsonl events, but names
+// no provider-side transcript — run_started.provider says which). It is carried on every kind that describes an
+// agent execution (the run-log kinds, run_started, run_usage, turn_usage,
+// context_compacted, and the per-round silpi_done / viharapala_done) and lifted to
+// the ledger envelope by toLedgerEntry. Additive OPTIONAL: absent on data written
+// before 228 and on events whose producer cannot name a session; readers tolerate
+// its absence, so no SCHEMA_VERSION bump. Distinct from the suthradhara_* kinds'
+// required `sessionId`, which is the shreni planning-session id (not a Claude id).
 export type ActivityEvent =
   | { type: 'task_claimed';     kshetra: string; beadId: string; title: string }
   | { type: 'round_start';      kshetra: string; beadId: string; round: number; agent: 'silpi' | 'viharapala' }
-  | { type: 'agent_text';       kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; text: string }
-  | { type: 'agent_tool_call';  kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; tool: string; detail: string }
+  | { type: 'agent_text';       kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; text: string; sessionId?: string }
+  | { type: 'agent_tool_call';  kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; tool: string; detail: string; sessionId?: string }
   // `gatesElapsedMs` (epic hto / Study A3): the round-level elapsed time of the
   // whole gate block (measureHealth start → evaluateGates resolved), the value
   // totals use — per-gate durations (on gate_result) are attribution-only and must
   // NOT be summed, since parallel gates overlap. Additive optional; absent on the
   // PR-followup path (no gate block) and on pre-A3 data.
-  | { type: 'silpi_done';       kshetra: string; beadId: string; round: number; summary: string; confidence: number; files: string[]; lintPassed: boolean; testsPassed: boolean; gatesElapsedMs?: number }
-  | { type: 'viharapala_done';  kshetra: string; beadId: string; round: number; verdict: 'APPROVE' | 'REJECT'; score: number; mustFix: string[] }
+  | { type: 'silpi_done';       kshetra: string; beadId: string; round: number; summary: string; confidence: number; files: string[]; lintPassed: boolean; testsPassed: boolean; gatesElapsedMs?: number; sessionId?: string }
+  | { type: 'viharapala_done';  kshetra: string; beadId: string; round: number; verdict: 'APPROVE' | 'REJECT'; score: number; mustFix: string[]; sessionId?: string }
   | { type: 'task_done';        kshetra: string; beadId: string; title: string; approved: boolean; rounds: number }
   // `durationMs` (epic hto / Study A3): monotonic time spent in the sync,
   // measured at the site (beads.ts). Additive optional — absent on pre-A3 data.
@@ -38,7 +50,10 @@ export type ActivityEvent =
   // exact run inputs (prompts + provider/model/tools) so two runs are comparable
   // and a run is reproducible; the per-token stream lives in activity.jsonl under
   // the same runId.
-  | { type: 'run_started';      kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; manifestHash: string }
+  // ONE run_started per session (Shreni-beads-228): emitted per runAgent attempt
+  // with that attempt's `sessionId` and 1-based `attempt` (2+ for a transient
+  // retry), so a retried round is legible. Both additive optional.
+  | { type: 'run_started';      kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; manifestHash: string; sessionId?: string; attempt?: number }
   // policy_decision: one PolicySource call and its resolved answer. `policy` names
   // which call — 'selectModel' carries the resolved provider/model; 'mayProceed'
   // carries allow/deny + reason.
@@ -86,7 +101,7 @@ export type ActivityEvent =
   // INVARIANT (dt7): this entry is a PROJECTION of the UsageEntry — every
   // non-envelope field here must also exist on UsageEntry. Add a field to the
   // record first; the type guard in ext/types.ts fails typecheck otherwise.
-  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error'; contextWindow?: number; durationMs?: number }
+  | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error'; contextWindow?: number; durationMs?: number; sessionId?: string }
   // turn_usage (RUN-LOG, epic 408/A1): per-MODEL-CALL context usage, the raw input
   // to Figure 1 (effective_context vs. assistant-turn index). It is O(turns) —
   // strictly run-log, activity.jsonl only, NOT decision-grade and NOT usage.jsonl
@@ -101,7 +116,7 @@ export type ActivityEvent =
   // (inputTokens + cacheReadTokens + cacheCreationTokens), never stored — same
   // store-raw-counters principle as run_usage. Provider-neutral; only the Claude
   // adapter populates it today (408.2), other adapters stay no-ops.
-  | { type: 'turn_usage';       kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; turnIndex: number; messageId: string; inputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; sidechain: boolean }
+  | { type: 'turn_usage';       kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; turnIndex: number; messageId: string; inputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; sidechain: boolean; sessionId?: string }
   // context_compacted (DECISION-GRADE, epic 408/A1): the provider CLI compacted
   // the run's context — from this point the agent works from a summary of its own
   // earlier work. It is rare (0–few per run) so ledger volume stays bounded, and
@@ -113,7 +128,7 @@ export type ActivityEvent =
   // boundary; `turnIndex` is the last main-thread turn before it. It must NOT be
   // visible to the 'agent' audience — it describes the agent's own memory loss,
   // not task context. Provider-neutral; only the Claude adapter populates it (408.3).
-  | { type: 'context_compacted'; kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; trigger: 'auto' | 'manual' | 'unknown'; preTokens: number; turnIndex: number }
+  | { type: 'context_compacted'; kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; trigger: 'auto' | 'manual' | 'unknown'; preTokens: number; turnIndex: number; sessionId?: string }
   // worker_started — the LOT MANIFEST (epic yrk / Study B2): one entry per worker
   // process (or `shreni drain` / its one-cycle `shreni run` alias) start, recording everything in force
   // for that lot. A lot is the set of work produced under identical conditions —
