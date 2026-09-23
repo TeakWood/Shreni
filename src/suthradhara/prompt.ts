@@ -149,7 +149,8 @@ present a DECOMPOSITION PROPOSAL for the operator to review — do not file anyt
      alternatives considered, risks, and any open questions (including deferred rubric items). This
      is the DESIGN DOC you will write on approval, as deep as the feature warrants (a short note for
      a small feature, a full technical design for a substantial one), never a stub.
-  2. Epic — a parent bead (title, type epic or feature, priority 0-4).
+  2. Epic — a parent bead (title, type epic, priority 0-4). The epic is a container: it is never
+     worked itself, and Shreni closes it automatically once all its children are closed.
   3. Children — one bead per unit of work, each with title, type (task/feature/bug), priority (0-4),
      and acceptance criteria, sized by the SIZING RUBRIC below.
   4. Dependency edges — the ordering between children (which child is blocked by which).
@@ -175,7 +176,10 @@ function completionProtocol(kshetra: KshetraConfig): string {
 
 GATE ① — the operator APPROVES THE PLAN. Then, in order:
   a. File the epic, then each child, with \`bd create\` (set --type, --priority, --description,
-     --acceptance). Capture the ids. Add the dependency edges with \`bd dep add <blocked> <blocker>\`.
+     --acceptance). File the epic with \`--type epic\` explicitly — never feature or task: Sthapathi
+     never works an epic and auto-closes it when its last child closes. Children keep their own type
+     (task/feature/bug) and are filed with \`--parent <epic id>\` so they are linked to the epic.
+     Capture the ids. Add the dependency edges with \`bd dep add <blocked> <blocker>\`.
      bd auto-resolves its database from BEADS_DIR — do not pass a path.
   b. Write the design note as a NEW dated ADR at \`${DESIGN_DIR}/<YYYY-MM-DD>-<slug>.md\` in your cwd,
      where <YYYY-MM-DD> is today's date and <slug> is a lowercase-hyphen slug of the feature. Open it with

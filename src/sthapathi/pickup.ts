@@ -10,6 +10,7 @@ import { isAblated } from '../kshetra/ablation.js';
 import { REPO_MAP_RELATIVE_PATH } from '../kshetra/repo-map.js';
 import { loadState, pauseKshetra, recordProgress, recordStall, MISSING_BASE_BRANCH_REASON } from '../kshetra/state.js';
 import { appendNotification } from './notifications.js';
+import { hasOpenChildren } from './epics.js';
 
 // Re-exported for back-compat: .4 first exported this from pickup, and the
 // approval CLI (.5) imports it here. The definition now lives in state.js (see
@@ -21,6 +22,11 @@ export { MISSING_BASE_BRANCH_REASON };
 // may still exist in a Kshetra's DB, so Sthapathi keeps filtering them out of
 // its pickup queue rather than trying to "work" one.
 const SUTHRADHARA_SESSION_TYPE = 'suthradhara-session';
+// An epic is a CONTAINER, never executable work (Shreni-beads-q08). Working one
+// made Silpi implement children under the epic's id (then again as themselves)
+// and then bd refused the close ("cannot close epic: open children"), pausing the
+// kshetra. Sthapathi closes an epic itself once its children finish (epics.ts).
+const EPIC_TYPE = 'epic';
 
 export class PreFlightError extends Error {
   constructor(
@@ -115,11 +121,63 @@ export function parseReadyOutput(raw: string): Task[] {
 // bearing, race-proof guarantee and is asserted directly by test. This is the
 // single Suthradhara-driven touch to Sthapathi — a selection-path line, not a
 // state-machine change (§13.1).
+//
+// EPICS (Shreni-beads-q08) are excluded the same way and for the same reason: an
+// epic is a container, never work. `bd ready` DOES list epics (the ready() call
+// passes --exclude-type=epic as a belt), but this filter is the authoritative,
+// race-proof guard and is asserted directly by test (via pickNext).
+export function rankCandidates(tasks: Task[]): Task[] {
+  return tasks
+    .filter(t => t.type !== SUTHRADHARA_SESSION_TYPE && t.type !== EPIC_TYPE)
+    .sort((a, b) => a.priority - b.priority);
+}
+
+// The type filter alone (no structural children check) — a pure, synchronous view
+// kept for the queue-isolation tests. Production pickup uses pickNextWorkable.
 export function pickNext(tasks: Task[]): Task | null {
-  const eligible = tasks.filter(t => t.type !== SUTHRADHARA_SESSION_TYPE);
-  if (eligible.length === 0) return null;
-  const sorted = eligible.slice().sort((a, b) => a.priority - b.priority);
-  return sorted[0] ?? null;
+  return rankCandidates(tasks)[0] ?? null;
+}
+
+// Structural guard (q08): rankCandidates' type filter trusts the bead's type, but a
+// parent filed with the wrong type (Suthradhara once filed epics as `feature`)
+// would slip through. So the candidate about to be picked is also checked for
+// OPEN children — whatever its type — and skipped in favour of the next one if it
+// has any. One bd lookup per candidate actually considered (usually one).
+// A lookup that FAILS skips the candidate too (logged): working a parent is the
+// failure this guard exists to prevent, and bd errors here are transient — the
+// next poll re-evaluates it. If NO candidate was workable and any lookup failed,
+// the error is rethrown rather than reported as an empty queue.
+// This — not pickNext — is what production pickup (selectNext) calls.
+const parentSkipLogged = new Set<string>();
+
+export async function pickNextWorkable(kshetra: KshetraConfig, tasks: Task[]): Promise<Task | null> {
+  let lookupError: unknown;
+  for (const task of rankCandidates(tasks)) {
+    let parent: boolean;
+    try {
+      parent = await hasOpenChildren(kshetra, task.id);
+    } catch (err) {
+      lookupError = err;
+      console.warn(`[shreni pickup:${kshetra.id}] skipping ${task.id}: children lookup failed — ${(err as Error).message}`);
+      continue;
+    }
+    if (parent) {
+      // Logged once per bead per process, not every 30s poll.
+      const key = `${kshetra.id}:${task.id}`;
+      if (!parentSkipLogged.has(key)) {
+        parentSkipLogged.add(key);
+        console.log(`[shreni pickup:${kshetra.id}] skipping ${task.id} (${task.type ?? 'untyped'}): it has open children — a parent is never worked`);
+      }
+      continue;
+    }
+    return task;
+  }
+  // Nothing workable, but a lookup FAILED: that is a bd error, not an empty queue.
+  // Rethrow so the cycle takes the error path (as a failing `bd ready` does) —
+  // returning null would read as 'no-work' and let a drain exit 'drained' on a
+  // transient bd hiccup.
+  if (lookupError !== undefined) throw lookupError;
+  return null;
 }
 
 export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promise<void> {
@@ -182,7 +240,7 @@ export async function selectNext(
 ): Promise<Task | null> {
   const raw = await bd(kshetra).ready();
   const tasks = parseReadyOutput(raw);
-  return pickNext(inScope ? tasks.filter(inScope) : tasks);
+  return pickNextWorkable(kshetra, inScope ? tasks.filter(inScope) : tasks);
 }
 
 // PREPARE (the ONLY mutator in the pickup path) + bd claim. Syncs beads, runs

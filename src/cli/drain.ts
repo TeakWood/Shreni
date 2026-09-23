@@ -1,6 +1,7 @@
 import { loadRegistry } from '../kshetra/registry';
 import { bd } from '../sthapathi/beads';
-import { parseReadyOutput } from '../sthapathi/pickup';
+import { parseReadyOutput, rankCandidates } from '../sthapathi/pickup';
+import { parentsWithOpenChildren } from '../sthapathi/epics';
 import { DEFAULT_INTERVAL_MS, type CycleOutcome } from '../sthapathi/index';
 import { emit, getCurrentLotId } from '../sthapathi/activity-log';
 import { loadState } from '../kshetra/state';
@@ -240,10 +241,11 @@ export async function driveDrain(
 }
 
 // Non-closed, non-epic bead ids from a `bd list` JSON payload, optionally scoped.
-// Epic containers are dropped: an epic stays OPEN after all its children close
-// (bd does not auto-close it) and is never itself worked (bd ready omits it), so
-// counting one would report a fully-drained epic as stalled — and it also drops
-// the --epic scope root, which is itself an epic. Exported for direct testing.
+// Epic containers are dropped: an epic is never itself worked (pickup excludes it,
+// Shreni-beads-q08) and is closed by Sthapathi only once its children are all
+// closed (at the child's close, or by the drain-exit sweep), so counting one would
+// report a fully-drained epic as stalled — and it also drops the --epic scope
+// root, which is itself an epic. Exported for direct testing.
 export function openBeadIds(listJson: string, scope?: Set<string>): string[] {
   const ids = parseReadyOutput(listJson)
     .filter(t => t.type !== 'epic')
@@ -272,11 +274,12 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
       // (in_progress from a crash, blocked behind a needs-human bead, deferred)
       // are separate stored statuses, so they must be named explicitly or a
       // stalled drain would report complete. See `bd list --help` (--status).
-      const raw = await client.list({ status: 'open,in_progress,blocked,deferred' });
-      // Exclude epic containers: an epic bead stays OPEN after all its children
-      // close (bd does not auto-close it) and is never itself worked (bd ready
-      // omits it), so counting it would report a fully-drained epic as stalled.
-      // This also drops the --epic scope root, which is itself an epic.
+      // `all`: bd list caps at 50 rows by default — a large kshetra would under-count.
+      const raw = await client.list({ status: 'open,in_progress,blocked,deferred', all: true });
+      // Exclude epic containers: an epic is never itself worked (pickup excludes
+      // it, q08) and may still be open here — the drain-exit sweep that closes it
+      // runs after this — so counting it would report a fully-drained epic as
+      // stalled. This also drops the --epic scope root, which is itself an epic.
       const beads = parseReadyOutput(raw).filter(t => t.type !== 'epic');
       return idsInScope(beads);
     },
@@ -284,7 +287,17 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
       // ANY pause (manual or watchdog-escalated) explains an unworked bead — read
       // the raw flag, not isKshetraManuallyPaused (which requires manual resume).
       const paused = loadState().kshetras[kshetra.id]?.paused === true;
-      const readyIds = new Set(idsInScope(parseReadyOutput(await client.ready())));
+      // "Ready" means what PICKUP would select (q08): rankCandidates drops epics
+      // and session beads, and a parent with open children is skipped by pickup's
+      // structural guard — so neither may read as the "ready but unworked"
+      // anomaly.
+      // One bd list yields every parent-with-open-children at once. If it fails,
+      // no ready bead is excluded (the pre-q08 behaviour) — classification only.
+      let parents = new Set<string>();
+      try { parents = await parentsWithOpenChildren(kshetra); } catch { /* classify without it */ }
+      const readyIds = new Set(
+        idsInScope(rankCandidates(parseReadyOutput(await client.ready()))).filter(id => !parents.has(id)),
+      );
       return classifyOpenBeads(kshetra, openIds, { paused, readyIds });
     },
     async counts(sinceMs: number): Promise<{ filed: number; merged: number; outOfScopeFiled: string[] }> {
@@ -293,7 +306,7 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
       // strings: bd's created_at/closed_at are second-granular ('…:28Z') while a
       // drain starts at ms precision, so a lexical string compare would count a
       // bead created earlier in the same wall-clock second as "during the drain".
-      const raw = await client.list({ status: 'open,in_progress,blocked,deferred,closed' });
+      const raw = await client.list({ status: 'open,in_progress,blocked,deferred,closed', all: true });
       let arr: unknown;
       try { arr = JSON.parse(raw); } catch { arr = []; }
       const rows: Record<string, unknown>[] = Array.isArray(arr) ? (arr as Record<string, unknown>[]) : [];
@@ -313,7 +326,9 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
           if (inScope) filed++;
           else outOfScopeFiled.push(id);
         }
-        if (atOrAfter(r.closed_at) && inScope) merged++;
+        // An epic is a container, never merged work (q08) — its auto-close at the
+        // end of its subtree must not inflate the merged count.
+        if (atOrAfter(r.closed_at) && inScope && r.issue_type !== 'epic') merged++;
       }
       return { filed, merged, outOfScopeFiled };
     },
@@ -379,6 +394,13 @@ async function runOwnedDrain(
       { intervalMs, signalled: () => signal, maxCycles: opts.maxCycles },
       delay,
     );
+    // Drain-exit epic sweep (Shreni-beads-q08): an --epic scope root (or any epic)
+    // whose subtree just finished is closed here — never worked, so nothing else
+    // would. Skipped on a signal (state is left to recovery; the next startup's
+    // sweep covers it). Its closes ride the FINAL sync below. Epics are excluded
+    // from openInScope and from the merged count, so this never shifts the
+    // drain's classification.
+    if (core.reason !== 'signal') await driver.runtime.sweepEpics();
     const cnt =
       core.reason === 'signal'
         ? { filed: 0, merged: 0, outOfScopeFiled: [] }

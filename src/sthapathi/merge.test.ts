@@ -10,8 +10,11 @@ const mockCommit = vi.fn<(message: string, ...args: string[]) => Promise<void>>(
 const mockPush = vi.fn<(...args: string[]) => Promise<void>>();
 const mockDeleteBranch = vi.fn<(branch: string) => Promise<void>>();
 const mockHeadSha = vi.fn<(ref?: string) => Promise<string>>();
-const mockClose = vi.fn<() => Promise<string>>();
+const mockClose = vi.fn<(id: string, note: string) => Promise<string>>();
 const mockSyncBeads = vi.fn<() => Promise<void>>();
+// bd show / children, read by the q08 epic auto-close (the REAL epics.ts runs).
+const mockShow = vi.fn<(id: string) => Promise<string>>();
+const mockChildren = vi.fn<(id: string) => Promise<string>>();
 
 vi.mock('./git.js', () => ({
   git: vi.fn(() => ({
@@ -30,7 +33,7 @@ const mockEmit = vi.fn();
 vi.mock('./activity-log.js', () => ({ emit: mockEmit }));
 
 vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ close: mockClose })),
+  bd: vi.fn(() => ({ close: mockClose, show: mockShow, children: mockChildren })),
   syncBeads: mockSyncBeads,
 }));
 
@@ -93,6 +96,9 @@ beforeEach(() => {
   mockDeleteBranch.mockResolvedValue(undefined);
   mockHeadSha.mockResolvedValue('deadbeefcafe');
   mockClose.mockResolvedValue('');
+  // Default: the merged bead has no parent, so no epic lookup follows.
+  mockShow.mockImplementation(async (id: string) => JSON.stringify([{ id, status: 'closed', issue_type: 'task' }]));
+  mockChildren.mockResolvedValue('[]');
   mockSyncBeads.mockResolvedValue(undefined);
   mockDispatchParikshakaAsync.mockImplementation(() => {});
 });
@@ -253,5 +259,48 @@ describe('squashMergeAndClose', () => {
     mockPush.mockRejectedValue(new Error('remote rejected'));
     await squashMergeAndClose(TASK, KSHETRA, OUTPUT).catch(() => {});
     expect(mockDispatchParikshakaAsync).not.toHaveBeenCalled();
+  });
+});
+// -- epic auto-close on the push path (Shreni-beads-q08) --
+describe('squashMergeAndClose epic auto-close (q08)', () => {
+  // proj-42 (TASK) is a child of epic proj-40, alongside proj-41.
+  function epicGraph(siblingStatus: string): void {
+    const rows: Record<string, Record<string, unknown>> = {
+      'proj-40': { id: 'proj-40', status: 'open', issue_type: 'epic' },
+      'proj-41': { id: 'proj-41', status: siblingStatus, issue_type: 'task', parent: 'proj-40' },
+      'proj-42': { id: 'proj-42', status: 'closed', issue_type: 'task', parent: 'proj-40' },
+    };
+    mockShow.mockImplementation(async (id: string) => JSON.stringify([rows[id]]));
+    mockChildren.mockImplementation(async (id: string) =>
+      JSON.stringify(Object.values(rows).filter(r => r.parent === id)));
+  }
+
+  it('closes the epic when its last child merges, before the beads sync, and records epic_closed', async () => {
+    epicGraph('closed');
+    const order: string[] = [];
+    mockClose.mockImplementation(async (id: string) => { order.push(`close:${id}`); return ''; });
+    mockSyncBeads.mockImplementation(async () => { order.push('sync'); });
+    await squashMergeAndClose(TASK, KSHETRA, OUTPUT);
+    expect(mockClose).toHaveBeenCalledWith('proj-40', 'all 2 children closed: proj-41, proj-42');
+    expect(order).toEqual(['close:proj-42', 'close:proj-40', 'sync']);
+    expect(mockEmit).toHaveBeenCalledWith({
+      type: 'epic_closed', kshetra: 'myapp', beadId: 'proj-40', epicId: 'proj-40', children: ['proj-41', 'proj-42'],
+    });
+  });
+
+  it('leaves the epic open while a sibling child is still open', async () => {
+    epicGraph('open');
+    await squashMergeAndClose(TASK, KSHETRA, OUTPUT);
+    expect(mockClose).toHaveBeenCalledTimes(1);
+    expect(mockClose).toHaveBeenCalledWith('proj-42', expect.any(String));
+    expect(mockEmit).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'epic_closed' }));
+  });
+
+  it('an epic lookup failure never fails the already-pushed merge', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockShow.mockRejectedValue(new Error('bd show failed: db locked'));
+    await expect(squashMergeAndClose(TASK, KSHETRA, OUTPUT)).resolves.toBeUndefined();
+    expect(mockSyncBeads).toHaveBeenCalled();
+    expect(mockDeleteBranch).toHaveBeenCalled();
   });
 });

@@ -125,6 +125,9 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     // ledger must be distinguishable from one that lost history).
     case 'state_frozen':
     case 'state_restored':
+    // epic_closed (Shreni-beads-q08): an epic auto-closed when its last child
+    // closed — the only record of an epic's completion (an epic is never worked).
+    case 'epic_closed':
       return true;
     case 'round_start':
     case 'agent_text':
@@ -183,6 +186,8 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
       return 'operator';
     // Pure provenance — what landed on main and how. An accountability record.
     case 'merge_done':
+    // epic_closed (q08): lifecycle provenance about a container, not task context.
+    case 'epic_closed':
     // context_compacted is a decision-grade provenance record of the agent's own
     // memory loss (epic 408). It is audit-relevant, and — critically — must NOT
     // be visible to the 'agent' audience: it describes the agent's lost context,

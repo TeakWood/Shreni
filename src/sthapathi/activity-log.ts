@@ -84,6 +84,13 @@ export type ActivityEvent =
   // open) took, measured at the site (merge.ts). Additive optional; absent on
   // pre-A3 data.
   | { type: 'merge_done';       kshetra: string; beadId: string; mergePolicy: 'push' | 'pr'; sha?: string; pr?: number; durationMs?: number }
+  // epic_closed (DECISION-GRADE, Shreni-beads-q08): Sthapathi auto-closed an epic
+  // because every one of its (>= 1) children is closed — right after the last
+  // child's close (push or PR-reconcile path) or by the startup/drain-exit sweep.
+  // An epic is never worked, so this is the ONLY record of its completion.
+  // `beadId` === `epicId` (the ledger join key, so `shreni show <epic>` finds it);
+  // `children` lists the closed child ids named in the close reason.
+  | { type: 'epic_closed';      kshetra: string; beadId: string; epicId: string; children: string[] }
   // run_usage: a per-run token/cost SUMMARY folded from the UsageEntry the meter
   // writes to usage.jsonl (epic 4a2.5). Carries the headline totals + cost, not
   // the full record — the cache/tool breakdown stays in usage.jsonl, referenced

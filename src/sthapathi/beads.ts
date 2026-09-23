@@ -65,8 +65,13 @@ export function bd(kshetra: KshetraConfig) {
   const env: NodeJS.ProcessEnv = { ...process.env, BEADS_DIR: kshetra.beads.path };
 
   return {
+    // `--exclude-type=epic` is a belt (Shreni-beads-q08): an epic is a container,
+    // never work. pickNext's own epic filter is the authoritative guard.
+    // `--limit 0`: bd ready caps at 10 by default; pickup ranks + skips candidates
+    // (epics, parents with open children, out-of-scope beads), so it must see the
+    // whole queue or a skipped top-10 would starve the rest.
     ready(): Promise<string> {
-      return exec(['ready', '--json'], env);
+      return exec(['ready', '--json', '--exclude-type=epic', '--limit', '0'], env);
     },
 
     claim(id: string): Promise<string> {
@@ -77,10 +82,14 @@ export function bd(kshetra: KshetraConfig) {
       return exec(['show', id, '--json'], env);
     },
 
-    // Direct child beads of a parent (one level). `shreni drain --epic <id>`
-    // (epic 7h3) walks this recursively to build the epic's subtree scope.
+    // Direct child beads of a parent (one level), ALL statuses. `shreni drain
+    // --epic <id>` (epic 7h3) walks this recursively to build the epic's subtree
+    // scope; pickup's open-children guard and the epic auto-close (q08) read it.
+    // Spelled as the list form `bd children` aliases, because `bd children`
+    // accepts no --limit and bd list caps at 50 by default — a capped child list
+    // could read an epic with a 51st open child as complete.
     children(id: string): Promise<string> {
-      return exec(['children', id, '--json'], env);
+      return exec(['list', '--parent', id, '--status', 'all', '--limit', '0', '--json'], env);
     },
 
     prime(): Promise<string> {
@@ -141,11 +150,14 @@ export function bd(kshetra: KshetraConfig) {
       return exec(['update', id, '--remove-label', label], env);
     },
 
-    list(filters: { status?: string; label?: string; excludeLabel?: string }): Promise<string> {
+    // `all` lifts bd list's default 50-row cap (`--limit 0`).
+    list(filters: { status?: string; label?: string; excludeLabel?: string; type?: string; all?: boolean }): Promise<string> {
       const args = ['list', '--json'];
       if (filters.status) args.push('--status', filters.status);
+      if (filters.type) args.push('--type', filters.type);
       if (filters.label) args.push('--label', filters.label);
       if (filters.excludeLabel) args.push('--exclude-label', filters.excludeLabel);
+      if (filters.all) args.push('--limit', '0');
       return exec(args, env);
     },
   };

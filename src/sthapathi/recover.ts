@@ -4,6 +4,7 @@ import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
 import { branchName } from './branch.js';
 import { recordBeadAttempt, recordProgress } from '../kshetra/state.js';
+import { hasOpenChildren } from './epics.js';
 
 // Signature of the work loop a resume re-enters. Matches
 // runSilpiViharapalaLoop / runHealthRepairLoop so either can be injected.
@@ -37,6 +38,7 @@ export function parseInFlightTasks(raw: string): Task[] {
       priority: typeof item.priority === 'number' ? item.priority : 2,
       round: typeof item.round === 'number' ? item.round : 1,
       notes: typeof item.notes === 'string' ? item.notes : undefined,
+      type: typeof item.issue_type === 'string' ? item.issue_type : undefined,
     });
   }
   return tasks;
@@ -84,6 +86,21 @@ export async function recoverKshetra(
   );
   const resumable: Task[] = [];
   for (const task of inFlight) {
+    // Shreni-beads-q08: RESUME bypasses pickup, so it must apply pickup's
+    // never-work-a-parent rule itself. An epic (or a mis-typed parent with open
+    // children) left in_progress by a pre-q08 worker is reopened — back to the
+    // ready pool, where pickup skips it and the epic sweep closes it once its
+    // children are done — but NEVER resumed as work. A failed children lookup is
+    // treated the same way (conservative): the bead is reopened, not resumed, and
+    // pickup's own guard re-evaluates it on the next poll.
+    if (await isParentBead(kshetra, task)) {
+      await bd(kshetra).reopen(task.id);
+      await bd(kshetra).addNote(
+        task.id,
+        'Recovered after restart — reopened but NOT resumed: an epic/parent bead is never worked (q08).',
+      );
+      continue;
+    }
     const attempts = recordBeadAttempt(kshetra, task.id);
     if (attempts > maxAttempts) {
       await bd(kshetra).flag(
@@ -106,6 +123,17 @@ export async function recoverKshetra(
   // them via the work loop — bypassing the pickup health gate — instead of
   // waiting for the next gated poll to re-select them. See scheduleResume.
   return resumable;
+}
+
+// True for a bead RESUME must never re-enter the work loop with: an epic, or any
+// bead with open children (or one whose children cannot be read). See q08.
+async function isParentBead(kshetra: KshetraConfig, task: Task): Promise<boolean> {
+  if (task.type === 'epic') return true;
+  try {
+    return await hasOpenChildren(kshetra, task.id);
+  } catch {
+    return true;
+  }
 }
 
 // RESUME — re-enter the WORK phase for a bead that was already in flight, without

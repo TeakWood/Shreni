@@ -70,10 +70,10 @@ describe('bd() wrapper', () => {
     expect(envA).not.toBe(envB);
   });
 
-  it('ready() calls bd ready --json', async () => {
+  it('ready() calls bd ready --json, excluding epics and lifting the 10-row cap (q08)', async () => {
     mockSuccess('[]');
     const result = await bd(KSHETRA).ready();
-    expect(lastCall().args).toEqual(['ready', '--json']);
+    expect(lastCall().args).toEqual(['ready', '--json', '--exclude-type=epic', '--limit', '0']);
     expect(result).toBe('[]');
   });
 
@@ -185,6 +185,18 @@ describe('bd() wrapper', () => {
     mockSuccess('[]');
     await bd(KSHETRA).list({ status: 'in_progress', excludeLabel: 'awaiting-merge' });
     expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--exclude-label', 'awaiting-merge']);
+  });
+
+  it('list() passes the type filter and lifts the row cap when asked (q08 epic sweep)', async () => {
+    mockSuccess('[]');
+    await bd(KSHETRA).list({ status: 'open,in_progress', type: 'epic', all: true });
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'open,in_progress', '--type', 'epic', '--limit', '0']);
+  });
+
+  it('children() lists direct children of every status with no row cap (q08)', async () => {
+    mockSuccess('[]');
+    await bd(KSHETRA).children('ep-1');
+    expect(lastCall().args).toEqual(['list', '--parent', 'ep-1', '--status', 'all', '--limit', '0', '--json']);
   });
 
   it('addLabel() / removeLabel() call bd update with the label flags', async () => {

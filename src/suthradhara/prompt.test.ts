@@ -29,6 +29,17 @@ describe('buildPlanningPrompt', () => {
     expect(prompt).toContain('GATE ②');
   });
 
+  it('files the epic as --type epic and links children with --parent (Shreni-beads-q08)', () => {
+    // GATE ① step a names the epic type explicitly: Suthradhara once filed parents
+    // as `feature`, which Sthapathi then claimed and worked as a task.
+    const gate1 = prompt.slice(prompt.indexOf('GATE ①'), prompt.indexOf('GATE ②'));
+    expect(gate1).toContain('--type epic');
+    expect(gate1).toContain('--parent <epic id>');
+    // The proposal shape no longer offers "epic or feature" for the parent.
+    expect(prompt).not.toContain('type epic or feature');
+    expect(prompt).toContain('Epic — a parent bead (title, type epic,');
+  });
+
   it('grounds the beads-sync and doc-push in the real remotes/paths', () => {
     expect(prompt).toContain(KSHETRA.beads.remote);
     expect(prompt).toContain('bd export -o "$BEADS_DIR/issues.jsonl"');

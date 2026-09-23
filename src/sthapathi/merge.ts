@@ -11,6 +11,7 @@ import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
 import { regenerateRepoMapAsync } from '../kshetra/repo-map.js';
 import { getEntitlements } from '../ext/index.js';
 import { emit } from './activity-log.js';
+import { closeParentEpicIfComplete, AWAITING_MERGE_LABEL } from './epics.js';
 import { nowMs, elapsedMs } from './timing.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 import {
@@ -24,7 +25,8 @@ import {
 // (mergePolicy 'pr'). The bead stays open + in_progress so bd dependents stay
 // blocked; reconcilePullRequests keys on this label, and RECOVER excludes it so
 // a deferred bead is never reopened and re-worked on restart.
-export const AWAITING_MERGE_LABEL = 'awaiting-merge';
+// (Defined in epics.ts, which needs it too; re-exported here for existing callers.)
+export { AWAITING_MERGE_LABEL };
 
 // Resolve the effective merge policy: SHRENI_MERGE_POLICY overrides the config
 // (the "+CLI override" from yds.9/3r2 — set it in the environment `shreni start`
@@ -270,6 +272,12 @@ export async function squashMergeAndClose(
   // The bead succeeded — clear any recovery attempt count it accumulated.
   clearBeadAttempts(kshetra, task.id);
 
+  // Shreni-beads-q08: if this was the last open child of an epic, close the epic
+  // (epics are never worked, so nothing else would). Best-effort — never throws;
+  // a miss self-heals at the next startup/drain-exit sweep. Before syncBeads so
+  // the epic close rides the same sync.
+  await closeParentEpicIfComplete(kshetra, task.id);
+
   await syncBeads(kshetra);
 
   // Force-delete: after `git merge --squash` the bead branch's commits are not
@@ -444,6 +452,10 @@ export async function reconcilePullRequests(kshetra: KshetraConfig): Promise<voi
       deferredEpicsLogged.delete(`${kshetra.id}:${bead.id}`);
       emitTelemetry('task_merged', { policy: 'pr' });
       clearBeadAttempts(kshetra, bead.id);
+      // Shreni-beads-q08: the PR-path twin of squashMergeAndClose's epic close —
+      // this child landing may complete its epic. Best-effort, never throws; it
+      // rides the syncBeads below.
+      await closeParentEpicIfComplete(kshetra, bead.id);
       // Drop the merged branch locally and (best-effort) on the remote — GitHub
       // may already have auto-deleted the head branch, so ignore failures.
       try {

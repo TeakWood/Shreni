@@ -7,9 +7,11 @@ import type { Task } from './types.js';
 const mockReady = vi.fn<() => Promise<string>>();
 const mockClaim = vi.fn<() => Promise<string>>();
 const mockSyncBeads = vi.fn<() => Promise<void>>();
+// Direct children of a bead (`bd().children`), read by the q08 structural guard.
+const mockChildren = vi.fn<(id: string) => Promise<string>>();
 
 vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ ready: mockReady, claim: mockClaim })),
+  bd: vi.fn(() => ({ ready: mockReady, claim: mockClaim, children: mockChildren })),
   syncBeads: mockSyncBeads,
 }));
 
@@ -89,6 +91,7 @@ function makeIssue(overrides: Partial<Record<string, unknown>> = {}): Record<str
 beforeEach(() => {
   vi.clearAllMocks();
   mockReady.mockResolvedValue('[]');
+  mockChildren.mockResolvedValue('[]');
   mockClaim.mockResolvedValue('');
   mockSyncBeads.mockResolvedValue(undefined);
   mockStatus.mockResolvedValue({ modified: [], staged: [], untracked: [] });
@@ -218,6 +221,18 @@ describe('pickNext', () => {
     const session: Task = { id: 's', slug: 's', title: 'session', status: 'pending', priority: 0, type: 'suthradhara-session' };
     const real: Task = { id: 'r', slug: 'r', title: 'Real work', status: 'pending', priority: 2, type: 'task' };
     expect(pickNext([session, real])!.id).toBe('r');
+  });
+
+  // -- epics are never work (Shreni-beads-q08): the authoritative filter --
+  it('never returns an epic, even a lone ready P0 one', () => {
+    const epic: Task = { id: 'e', slug: 'e', title: 'Rollout epic', status: 'pending', priority: 0, type: 'epic' };
+    expect(pickNext([epic])).toBeNull();
+  });
+
+  it('skips an epic and picks the next-highest real task', () => {
+    const epic: Task = { id: 'e', slug: 'e', title: 'epic', status: 'pending', priority: 0, type: 'epic' };
+    const real: Task = { id: 'r', slug: 'r', title: 'Real work', status: 'pending', priority: 3, type: 'task' };
+    expect(pickNext([epic, real])!.id).toBe('r');
   });
 
   it('excludes session beads whatever their status (type is the guarantee, not status)', () => {
@@ -390,6 +405,70 @@ describe('selectNext (read-only)', () => {
     mockReady.mockResolvedValue(JSON.stringify([p2Issue, p0Issue]));
     const result = await selectNext(KSHETRA);
     expect(result?.id).toBe('p0-task');
+  });
+
+  // -- structural guard (Shreni-beads-q08) --
+  it('skips a candidate with OPEN children (a mis-typed parent) and returns the next eligible bead', async () => {
+    const parent = makeIssue({ id: 'feat', title: 'Mis-typed parent', priority: 0, issue_type: 'feature' });
+    const leaf = makeIssue({ id: 'leaf', title: 'Leaf task', priority: 2, issue_type: 'task' });
+    mockReady.mockResolvedValue(JSON.stringify([parent, leaf]));
+    mockChildren.mockImplementation(async (id: string) =>
+      id === 'feat' ? JSON.stringify([makeIssue({ id: 'feat.1', status: 'open' }), makeIssue({ id: 'feat.2', status: 'closed' })]) : '[]',
+    );
+    const result = await selectNext(KSHETRA);
+    expect(result?.id).toBe('leaf');
+  });
+
+  it('still picks a leaf feature with no children (an arm-A monolithic bead)', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'mono', title: 'Monolithic', issue_type: 'feature' })]));
+    expect((await selectNext(KSHETRA))?.id).toBe('mono');
+    expect(mockChildren).toHaveBeenCalledWith('mono');
+  });
+
+  it('picks a parent whose children are ALL closed (only OPEN children block)', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'p', issue_type: 'feature' })]));
+    mockChildren.mockResolvedValue(JSON.stringify([makeIssue({ id: 'p.1', status: 'closed' })]));
+    expect((await selectNext(KSHETRA))?.id).toBe('p');
+  });
+
+  it('never returns an epic from the ready queue, and never looks up its children', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([
+      makeIssue({ id: 'ep', title: 'Epic', priority: 0, issue_type: 'epic' }),
+      makeIssue({ id: 't', title: 'Task', priority: 2, issue_type: 'task' }),
+    ]));
+    expect((await selectNext(KSHETRA))?.id).toBe('t');
+    expect(mockChildren).not.toHaveBeenCalledWith('ep');
+  });
+
+  it('returns null when every candidate is a parent with open children', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'a', issue_type: 'feature' }), makeIssue({ id: 'b', issue_type: 'task' })]));
+    mockChildren.mockResolvedValue(JSON.stringify([makeIssue({ id: 'kid', status: 'in_progress' })]));
+    expect(await selectNext(KSHETRA)).toBeNull();
+  });
+
+  it('checks children lazily, only until a workable candidate is found', async () => {
+    mockReady.mockResolvedValue(JSON.stringify([
+      makeIssue({ id: 'first', priority: 0 }),
+      makeIssue({ id: 'second', priority: 1 }),
+    ]));
+    expect((await selectNext(KSHETRA))?.id).toBe('first');
+    expect(mockChildren).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a candidate whose children lookup fails (conservative) and falls through', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'x', priority: 0 }), makeIssue({ id: 'y', priority: 1 })]));
+    mockChildren.mockImplementation(async (id: string) => { if (id === 'x') throw new Error('bd list failed'); return '[]'; });
+    expect((await selectNext(KSHETRA))?.id).toBe('y');
+    warn.mockRestore();
+  });
+
+  it('throws (not "no work") when nothing is workable and a children lookup failed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'x' })]));
+    mockChildren.mockRejectedValue(new Error('bd list failed: db locked'));
+    await expect(selectNext(KSHETRA)).rejects.toThrow('db locked');
+    warn.mockRestore();
   });
 
   it('performs NO git ops, no claim, and no beads sync (pure read)', async () => {

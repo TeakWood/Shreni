@@ -19,6 +19,7 @@ import {
 } from '../kshetra/state';
 import { syncBeads } from '../sthapathi/beads';
 import { reconcilePullRequests } from '../sthapathi/merge';
+import { sweepCompleteEpics } from '../sthapathi/epics';
 import { selectFollowup } from '../sthapathi/pr-followup';
 import { runPrFollowupTask } from '../sthapathi/pr-followup-run';
 import { loadExtension, DEFAULT_EXT_MODULE } from '../ext/loader';
@@ -80,6 +81,10 @@ export interface WorkerRuntime {
   /** Commit + push the beads DB (incl. ledger.jsonl). Used by the periodic timer
    *  and by drain's FINAL sync before it classifies and exits. */
   sync(): Promise<void>;
+  /** Close every epic whose (>= 1) children are all closed (Shreni-beads-q08).
+   *  Run by startup and at drain exit; idempotent, never throws, does NOT sync
+   *  (callers sync after). Returns the epic ids closed. */
+  sweepEpics(): Promise<string[]>;
   /** Arm the background timers; returns a stop function that clears them all and
    *  flushes any coalesced idle-poll phase time. */
   startTimers(): () => void;
@@ -210,6 +215,19 @@ export function createWorkerRuntime(
     }
   }
 
+  // Epic sweep (Shreni-beads-q08): an epic is never worked, so Sthapathi closes it
+  // itself once its children are all closed. The per-child close in the merge
+  // paths covers the live case; this sweep self-heals a crash between a child's
+  // close and its epic's, and closes epics completed before q08. Logged per epic
+  // (inside sweepCompleteEpics). Never throws.
+  async function sweepEpics(): Promise<string[]> {
+    // A scoped drain (--epic) sweeps only its own subtree (trial isolation).
+    const scope = options.inScope;
+    const closed = await sweepCompleteEpics(kshetra, scope ? id => scope({ id } as Task) : undefined);
+    if (closed.length > 0) log(`epic sweep closed ${closed.length} complete epic(s): ${closed.join(', ')}`);
+    return closed;
+  }
+
   async function startup(): Promise<number> {
     // Load the optional extension FIRST, before any events are emitted or the
     // loop is driven, so a registered extension's sinks/meter are in place from
@@ -267,6 +285,9 @@ export function createWorkerRuntime(
     // Reconcile any PRs that merged/closed while this runtime was down, before the
     // loop starts picking up new work.
     await reconcile();
+    // Close already-complete epics (after reconcile, so children that just landed
+    // via PR count as closed) and push the closes before the first cycle.
+    if ((await sweepEpics()).length > 0) await sync();
     return resumable.length;
   }
 
@@ -333,6 +354,7 @@ export function createWorkerRuntime(
     hooks,
     startup,
     sync,
+    sweepEpics,
     startTimers,
     isInFlight: () => scheduler.isInFlight(kshetra.id),
     isHealing: () => healing,

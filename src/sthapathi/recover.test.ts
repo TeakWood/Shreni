@@ -9,9 +9,11 @@ const mockReopen = vi.fn<() => Promise<string>>();
 const mockFlag = vi.fn<() => Promise<string>>();
 const mockClaim = vi.fn<() => Promise<string>>();
 const mockSyncBeads = vi.fn<() => Promise<void>>();
+// Direct children, read by the q08 never-resume-a-parent guard.
+const mockChildren = vi.fn<(id?: string) => Promise<string>>();
 
 vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ list: mockList, addNote: mockAddNote, reopen: mockReopen, flag: mockFlag, claim: mockClaim })),
+  bd: vi.fn(() => ({ list: mockList, addNote: mockAddNote, reopen: mockReopen, flag: mockFlag, claim: mockClaim, children: mockChildren })),
   syncBeads: mockSyncBeads,
 }));
 
@@ -59,6 +61,7 @@ function inProgressJson(overrides: Record<string, unknown> = {}): Record<string,
 beforeEach(() => {
   vi.clearAllMocks();
   mockList.mockResolvedValue('[]');
+  mockChildren.mockResolvedValue('[]');
   mockAddNote.mockResolvedValue('ok');
   mockReopen.mockResolvedValue('ok');
   mockFlag.mockResolvedValue('ok');
@@ -122,6 +125,37 @@ describe('recoverKshetra', () => {
     await recoverKshetra(KSHETRA, { keepBranch: 'bead-active/x' });
     expect(mockDeleteBranch).toHaveBeenCalledWith('bead-1/a', { force: true });
     expect(mockDeleteBranch).not.toHaveBeenCalledWith('bead-active/x', expect.anything());
+  });
+
+  // Shreni-beads-q08: RESUME bypasses pickup, so it applies the never-work-a-parent
+  // rule itself. A pre-q08 worker could leave an epic in_progress.
+  it('reopens but NEVER resumes an in_progress epic (q08)', async () => {
+    mockList.mockResolvedValue(JSON.stringify([inProgressJson({ id: 'ep', issue_type: 'epic' })]));
+    const resumable = await recoverKshetra(KSHETRA);
+    expect(resumable).toEqual([]);
+    expect(mockReopen).toHaveBeenCalledWith('ep');
+    expect(mockAddNote).toHaveBeenCalledWith('ep', expect.stringContaining('NOT resumed'));
+    expect(mockRecordBeadAttempt).not.toHaveBeenCalled();
+  });
+
+  it('reopens but never resumes a mis-typed parent with open children; a leaf still resumes (q08)', async () => {
+    mockList.mockResolvedValue(JSON.stringify([
+      inProgressJson({ id: 'feat', issue_type: 'feature' }),
+      inProgressJson({ id: 'leaf', issue_type: 'task' }),
+    ]));
+    mockChildren.mockImplementation(async (id?: string) =>
+      id === 'feat' ? JSON.stringify([{ id: 'feat.1', title: 'k', status: 'open' }]) : '[]');
+    const resumable = await recoverKshetra(KSHETRA);
+    expect(resumable.map(t => t.id)).toEqual(['leaf']);
+    expect(mockReopen).toHaveBeenCalledWith('feat');
+  });
+
+  it('does not resume a bead whose children lookup fails (conservative, q08)', async () => {
+    mockList.mockResolvedValue(JSON.stringify([inProgressJson()]));
+    mockChildren.mockRejectedValue(new Error('bd list failed'));
+    const resumable = await recoverKshetra(KSHETRA);
+    expect(resumable).toEqual([]);
+    expect(mockReopen).toHaveBeenCalledWith('bead-42');
   });
 
   it('reopens an orphaned in_progress bead under the attempt budget', async () => {

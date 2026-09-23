@@ -52,6 +52,7 @@ function fakeDriver(script: {
     startup: vi.fn(async () => { log.push('startup'); return 0; }),
     sync: vi.fn(async () => { log.push('sync'); }),
     startTimers: () => () => {},
+    sweepEpics: vi.fn(async () => []),
     isInFlight: () => script.isInFlight?.() ?? false,
     isHealing: () => script.isHealing?.() ?? false,
   };

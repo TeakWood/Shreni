@@ -192,6 +192,12 @@ function fmtEntry(e: LedgerEntry): string {
       body = `${label('ABLATED')}round ${num(p.round)} — merged WITHOUT review (ablation: ${abls})`;
       break;
     }
+    case 'epic_closed': {
+      // q08: the epic was never worked — it closed because its children all did.
+      const kids = Array.isArray(p.children) ? (p.children as unknown[]).map(String) : [];
+      body = `${label('EPIC')}closed — all ${kids.length} children closed${kids.length ? `: ${kids.join(', ')}` : ''}`;
+      break;
+    }
     case 'state_frozen':
       body = `${label('FROZEN')}snapshot ${text(p.snapshotId)} (${num(p.beadCount)} beads, ${num(p.memoryCount)} memories)`;
       break;

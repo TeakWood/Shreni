@@ -46,6 +46,7 @@ function fakeDriver(openInScope: string[]): DrainDriver {
     startup: vi.fn(async () => 0),
     sync: vi.fn(async () => { order.push('sync'); }),
     startTimers: () => () => { order.push('stopTimers'); },
+    sweepEpics: vi.fn(async () => { order.push('sweepEpics'); return []; }),
     isInFlight: () => false,
     isHealing: () => false,
   };
@@ -128,6 +129,28 @@ describe('runDrain', () => {
     // Ordering: the drain_finished emit precedes the FINAL sync that pushes it.
     const lastSync = order.lastIndexOf('sync');
     expect(order.indexOf('emit:drain_finished')).toBeLessThan(lastSync);
+  });
+
+  it('sweeps complete epics at drain exit, before drain_finished and its final sync (Shreni-beads-q08)', async () => {
+    const driver = fakeDriver([]);
+    await runDrain('myapp', { intervalMs: 1, epic: 'epic-1' }, async () => driver, async () => {});
+    expect(driver.runtime.sweepEpics).toHaveBeenCalledTimes(1);
+    // The epic close rides the FINAL sync that pushes drain_finished.
+    expect(order.indexOf('sweepEpics')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('sweepEpics')).toBeLessThan(order.indexOf('emit:drain_finished'));
+    expect(order.indexOf('sweepEpics')).toBeLessThan(order.lastIndexOf('sync'));
+  });
+
+  it('does NOT sweep epics when a signal ends the drain (state is left to recovery)', async () => {
+    const driver = fakeDriver([]);
+    // Deliver SIGINT from inside the first cycle; runDrain's handler records it.
+    (driver.runtime.scheduler.runCycle as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      process.emit('SIGINT');
+      return 'no-work';
+    });
+    const result = await runDrain('myapp', { intervalMs: 1 }, async () => driver, async () => {});
+    expect(result.reason).toBe('signal');
+    expect(driver.runtime.sweepEpics).not.toHaveBeenCalled();
   });
 
   it('carries per-bead classification into drain_finished for a stalled drain', async () => {

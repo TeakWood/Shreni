@@ -24,7 +24,9 @@ const mockRemoveLabel = vi.fn<() => Promise<string>>();
 const mockClose = vi.fn<() => Promise<string>>();
 const mockFlag = vi.fn<() => Promise<string>>();
 const mockList = vi.fn<() => Promise<string>>();
-const mockShow = vi.fn<() => Promise<string>>();
+const mockShow = vi.fn<(id?: string) => Promise<string>>();
+// Direct children, read by the q08 epic auto-close (the REAL epics.ts runs).
+const mockChildren = vi.fn<(id?: string) => Promise<string>>(async () => '[]');
 const mockSyncBeads = vi.fn<() => Promise<void>>();
 vi.mock('./beads.js', async (importOriginal) => ({
   // parseAcceptanceCriteria is a pure parser — use the real implementation.
@@ -37,6 +39,7 @@ vi.mock('./beads.js', async (importOriginal) => ({
     flag: mockFlag,
     list: mockList,
     show: mockShow,
+    children: mockChildren,
   })),
   syncBeads: mockSyncBeads,
 }));
@@ -295,6 +298,48 @@ describe('reconcilePullRequests', () => {
     mockPush.mockRejectedValueOnce(new Error('remote ref does not exist'));
     await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
     expect(mockClose).toHaveBeenCalled();
+  });
+
+  // Shreni-beads-q08: a child landing via PR may complete its epic.
+  describe('epic auto-close on the PR path (q08)', () => {
+    function epicGraph(siblingStatus: string): void {
+      const rows: Record<string, Record<string, unknown>> = {
+        'proj-40': { id: 'proj-40', status: 'open', issue_type: 'epic' },
+        'proj-41': { id: 'proj-41', status: siblingStatus, issue_type: 'task', parent: 'proj-40' },
+        'proj-42': { id: 'proj-42', status: 'closed', issue_type: 'task', parent: 'proj-40' },
+      };
+      mockShow.mockImplementation(async (id?: string) => JSON.stringify([rows[id ?? '']]));
+      mockChildren.mockImplementation(async (id?: string) =>
+        JSON.stringify(Object.values(rows).filter(r => r.parent === id)));
+    }
+
+    afterEach(() => {
+      mockShow.mockReset();
+      mockChildren.mockReset();
+      mockChildren.mockResolvedValue('[]');
+    });
+
+    it('closes the epic once its last child merges via PR, before the beads sync', async () => {
+      epicGraph('closed');
+      const order: string[] = [];
+      mockClose.mockImplementation(async (id: string) => { order.push(`close:${id}`); return ''; });
+      mockSyncBeads.mockImplementation(async () => { order.push('sync'); });
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+      await reconcilePullRequests(KSHETRA);
+      expect(mockClose).toHaveBeenCalledWith('proj-40', 'all 2 children closed: proj-41, proj-42');
+      expect(order).toEqual(['close:proj-42', 'close:proj-40', 'sync']);
+    });
+
+    it('leaves the epic open while a sibling child is still open', async () => {
+      epicGraph('in_progress');
+      mockClose.mockResolvedValue('');
+      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+      await reconcilePullRequests(KSHETRA);
+      expect(mockClose).toHaveBeenCalledTimes(1);
+      expect(mockClose).toHaveBeenCalledWith('proj-42', expect.stringContaining('Merged via PR'));
+    });
   });
 
   // A merged epic bead whose children are still open (bug dpi): bd refuses to
