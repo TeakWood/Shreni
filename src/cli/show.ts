@@ -18,6 +18,7 @@ import { bd, parseAcceptanceCriteria } from '../sthapathi/beads';
 import { readLedger, parseLedgerLines } from '../ext/index';
 import type { LedgerEntry } from '../ext/index';
 import type { KshetraConfig } from '../kshetra/config';
+import { fmtDuration } from './report';
 
 export interface ShowOpts {
   args: string[];
@@ -160,6 +161,13 @@ function fmtEntry(e: LedgerEntry): string {
     case 'run_usage':
       body = `${label('USAGE')}${text(p.agent)} in=${num(p.inputTokens)} out=${num(p.outputTokens)} cost=${p.priced ? `$${(num(p.costUsd) ?? 0).toFixed(4)}` : 'unpriced'} (${text(p.outcome)})`;
       break;
+    case 'run_unmetered': {
+      // A session that ended with no usage record (Shreni-beads-27a) — its time
+      // still counts. e.g. "silpi aborted after 42.1s".
+      const ms = num(p.durationMs);
+      body = `${label('UNMETERED')}${text(p.agent)} ${text(p.cause)}${ms === undefined ? '' : ` after ${fmtDuration(ms)}`}`;
+      break;
+    }
     case 'merge_done':
       body = `${label('MERGE')}${text(p.mergePolicy)}${p.sha ? ` ${text(p.sha).slice(0, 12)}` : ''}${p.pr ? ` PR#${num(p.pr)}` : ''}`;
       break;

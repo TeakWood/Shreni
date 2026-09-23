@@ -102,6 +102,15 @@ export type ActivityEvent =
   // non-envelope field here must also exist on UsageEntry. Add a field to the
   // record first; the type guard in ext/types.ts fails typecheck otherwise.
   | { type: 'run_usage';        kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka' | 'suthradhara'; provider: string; model: string; inputTokens: number; outputTokens: number; costUsd: number; priced: boolean; outcome: 'ok' | 'error'; contextWindow?: number; durationMs?: number; sessionId?: string }
+  // run_unmetered (Shreni-beads-27a): a session that started (run_started) but
+  // ended WITHOUT a usage record — an abort (self-heal cancel / watchdog timeout),
+  // a spawn failure, or an error the provider returned with no token usage (every
+  // gemini error). It carries the attempt's elapsed time so the per-lot time
+  // attribution does not under-count exactly the trials that go wrong.
+  // INVARIANT: every run_started is closed by exactly ONE of run_usage or
+  // run_unmetered, so summing durationMs over both never double-counts. Not a
+  // UsageEntry projection — nothing is written to usage.jsonl (no tokens, no cost).
+  | { type: 'run_unmetered';    kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; cause: 'aborted' | 'spawn_failed' | 'error'; durationMs: number; sessionId?: string }
   // turn_usage (RUN-LOG, epic 408/A1): per-MODEL-CALL context usage, the raw input
   // to Figure 1 (effective_context vs. assistant-turn index). It is O(turns) —
   // strictly run-log, activity.jsonl only, NOT decision-grade and NOT usage.jsonl

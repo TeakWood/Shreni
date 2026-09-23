@@ -104,7 +104,9 @@ export interface BeadInteraction {
 }
 
 // Attribution of one agent role's session time within a lot. `durationMs` is the
-// sum of the KNOWN run_usage.durationMs (pre-A3 rows lack it); `unknownSessions`
+// sum of the KNOWN run_usage.durationMs (pre-A3 rows lack it) plus every
+// run_unmetered.durationMs (sessions that ended with no usage record,
+// Shreni-beads-27a); `unknownSessions`
 // counts sessions whose duration was not recorded (their time falls into the
 // lot's unexplained residual, never silently zeroed).
 export interface RoleTimeAttribution {
@@ -498,11 +500,14 @@ export function computeLotBreakdowns(
 
     // Agent sessions, by role — sum KNOWN run_usage.durationMs; a session with no
     // duration (pre-A3) is counted but its time falls into unexplained, not zeroed.
+    // run_unmetered closes the sessions that produced no usage record (abort,
+    // spawn failure, token-less error — Shreni-beads-27a); each run_started closes
+    // with exactly one of the two, so summing both never double-counts.
     const roleMap = new Map<string, RoleTimeAttribution>();
     let sessionsMs = 0;
     let hasUnknownDurations = false;
     for (const e of lotEvents) {
-      if (e.type !== 'run_usage') continue;
+      if (e.type !== 'run_usage' && e.type !== 'run_unmetered') continue;
       let r = roleMap.get(e.agent);
       if (!r) { r = { agent: e.agent, sessions: 0, durationMs: 0, unknownSessions: 0 }; roleMap.set(e.agent, r); }
       r.sessions++;

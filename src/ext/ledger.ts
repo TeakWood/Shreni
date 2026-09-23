@@ -72,7 +72,7 @@ export interface LedgerEntry {
   // resolves to ~/.claude/projects/<cwd-slug>/<sessionId>.jsonl (cwd = the kshetra
   // repo); for other providers it is a Shreni-only correlation id into
   // activity.jsonl with no provider-side transcript. Present on run_started,
-  // run_usage, context_compacted, silpi_done and viharapala_done; absent on kinds
+  // run_usage, run_unmetered, context_compacted, silpi_done and viharapala_done; absent on kinds
   // with no session (task_claimed, gate_result, merge_done, worker_started, …) and
   // on entries written before 228 (readers tolerate its absence).
   sessionId?: string;
@@ -102,6 +102,9 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     case 'gate_result':
     case 'merge_done':
     case 'run_usage':
+    // run_unmetered (Shreni-beads-27a) closes a decision-grade run_started that
+    // produced no run_usage — the ledger must account for that session's time too.
+    case 'run_unmetered':
     // context_compacted is decision-grade (epic 408 decision 5): rare, audit-
     // relevant, goes to the ledger. turn_usage is NOT — it is O(turns) run-log.
     case 'context_compacted':
@@ -172,6 +175,7 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     case 'policy_decision':
     case 'gate_result':
     case 'run_usage':
+    case 'run_unmetered':
     // phase_changed is operator-facing execution detail (epic hto) — scheduler
     // phase timing for the console/report. Not decision-grade, so it never reaches
     // the ledger; classified here only to keep this switch exhaustive.

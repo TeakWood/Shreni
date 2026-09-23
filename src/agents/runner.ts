@@ -185,9 +185,13 @@ export async function runAgent(opts: AgentRunnerOpts): Promise<AgentRunResult> {
       // Record the tokens a failed attempt spent, when the provider surfaced any
       // (Shreni-beads-1tg). This fires for every failed attempt — including ones
       // that are about to be retried — so discarded-retry spend is captured too.
-      // Aborts/spawn failures/no-result exits carry no usage and record nothing.
+      // Aborts/spawn failures/no-result exits carry no usage, so they write no
+      // usage record — but the session still took real time, so it closes with a
+      // run_unmetered carrying its duration instead (Shreni-beads-27a).
       if (lastErr instanceof AgentRunError && lastErr.usage) {
         reportUsage(runOpts, 'error', lastErr.usage, lastErr.toolCallCount, elapsedMs(attemptStart));
+      } else {
+        reportUnmetered(runOpts, lastErr, elapsedMs(attemptStart));
       }
       // A self-heal abort is terminal — never retry it (the run is being
       // cancelled on purpose so the worker can RECOVER).
@@ -310,6 +314,38 @@ function reportUsage(
   }
 }
 
+// Close a session that produced no usage record (Shreni-beads-27a): an abort, a
+// spawn failure, or an error with no token usage. Emits only the ledger's
+// run_unmetered — nothing goes to usage.jsonl, which holds metered (token/cost)
+// records only. With reportUsage this upholds the invariant that every
+// run_started closes with exactly one of run_usage / run_unmetered. Guarded like
+// the usage fold: it must never change how the failure propagates.
+function reportUnmetered(opts: AgentRunnerOpts, err: Error, durationMs: number): void {
+  const cause: 'aborted' | 'spawn_failed' | 'error' =
+    err instanceof AgentAbortedError || opts.signal?.aborted ? 'aborted'
+      : err instanceof SpawnFailedError ? 'spawn_failed'
+        : 'error';
+  try {
+    emit({
+      type: 'run_unmetered',
+      kshetra: opts.kshetraId,
+      beadId: opts.beadId,
+      agent: opts.agentName,
+      provider: opts.provider,
+      model: opts.model,
+      cause,
+      durationMs,
+      ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+    });
+  } catch {
+    // A ledger failure must never mask the run's own error.
+  }
+}
+
+// The provider CLI could not be started at all (ENOENT, EACCES, …). A distinct
+// class only so reportUnmetered can name the cause; the message is unchanged.
+class SpawnFailedError extends Error {}
+
 function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
   return new Promise((resolve, reject) => {
     const adapter = getAdapter(opts.provider);
@@ -424,7 +460,7 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
     });
 
     proc.on('error', (err: Error) => {
-      reject(new Error(`${opts.agentName}: failed to spawn ${spec.bin} CLI — ${err.message}`));
+      reject(new SpawnFailedError(`${opts.agentName}: failed to spawn ${spec.bin} CLI — ${err.message}`));
     });
 
     proc.on('close', (code: number | null) => {

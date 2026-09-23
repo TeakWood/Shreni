@@ -81,7 +81,7 @@ function fmtCost(usd: number): string {
 // A monotonic duration in ms → a compact, stable, locale-free string:
 // "1h 4m", "44m 12s", "2.3s", "180ms". null → "unknown" (pre-A3 data, epic hto) —
 // never silently rendered as 0.
-function fmtDuration(ms: number | null): string {
+export function fmtDuration(ms: number | null): string {
   if (ms === null) return 'unknown';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const totalSec = ms / 1000;

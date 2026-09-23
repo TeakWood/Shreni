@@ -436,6 +436,22 @@ describe('runPlanningLoop run_usage fold (fnd.6)', () => {
     expect(usageEvents[0]).not.toHaveProperty('cacheReadTokens');
   });
 
+  it('times the planning session and carries durationMs on both the meter record and run_usage (Shreni-beads-27a)', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const records: Array<Record<string, unknown>> = [];
+    const session = launched(WT);
+    session.wait = vi.fn(() => new Promise(r => setTimeout(() => r(0), 30)));
+    await runPlanningLoop(KSHETRA_A, session, {
+      log: () => {}, ask: async () => '3',
+      emit: (e) => events.push(e),
+      meter: { record: (r) => records.push(r) },
+      readUsage: () => ({ ...USAGE }),
+    });
+    expect(records[0].durationMs as number).toBeGreaterThanOrEqual(25);
+    const usageEvents = events.filter(e => e.type === 'run_usage');
+    expect(usageEvents[0].durationMs).toBe(records[0].durationMs);
+  });
+
   it('meters even if the run_usage fold throws, and logs the fold failure without crashing', async () => {
     // A meter that succeeds, but an emit that throws only on run_usage — the
     // record must still land and the loop must survive.

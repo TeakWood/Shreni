@@ -379,6 +379,21 @@ describe('computeLotBreakdowns (epic hto / Study A3)', () => {
     expect(lot.unexplainedMs).toBe(300000);
   });
 
+  it('counts run_unmetered sessions (abort/spawn failure/token-less error) in role time (Shreni-beads-27a)', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      le('run_usage', '2026-09-15T00:01:00.000Z', { beadId: 'b1', agent: 'silpi', provider: 'anthropic', model: 'm', inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, outcome: 'ok', durationMs: 60000 }),
+      // A timed-out silpi round: no usage record, but 90s of real time.
+      le('run_unmetered', '2026-09-15T00:03:00.000Z', { beadId: 'b1', agent: 'silpi', provider: 'anthropic', model: 'm', cause: 'aborted', durationMs: 90000 }),
+      le('task_done', '2026-09-15T00:05:00.000Z', { beadId: 'b1', title: 'b1', approved: false, rounds: 2 }),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.sessionsMs).toBe(150000);
+    expect(lot.roles[0]).toMatchObject({ agent: 'silpi', sessions: 2, durationMs: 150000, unknownSessions: 0 });
+    expect(lot.hasUnknownDurations).toBe(false);
+    expect(lot.unexplainedMs).toBe(150000); // 300000 − 150000
+  });
+
   it('reports no lots for pre-B2 events that carry no lotId', () => {
     const m = computeMetrics({ events: [taskDone('b1', true, 1)] }); // no lotId
     expect(m.lots).toEqual([]);

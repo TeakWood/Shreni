@@ -94,6 +94,20 @@ describe('renderShow', () => {
     expect(line('MERGE')).not.toContain('session=');
   });
 
+  it('renders a run_unmetered entry with its cause and duration (Shreni-beads-27a)', () => {
+    const out = renderShow(
+      { id: 'b1', title: 'Fix auth', status: 'open', type: 'task', priority: 2, criteria: '' },
+      [entry('run_unmetered', '2026-09-16T00:00:02.000Z', { agent: 'silpi', provider: 'anthropic', model: 'm', cause: 'aborted', durationMs: 42100 })],
+    );
+    expect(out).toContain('UNMETERED silpi aborted after 42.1s');
+    // Long sessions read the same as `shreni report` durations (fmtDuration).
+    const long = renderShow(
+      { id: 'b1', title: 'Fix auth', status: 'open', type: 'task', priority: 2, criteria: '' },
+      [entry('run_unmetered', '2026-09-16T00:00:02.000Z', { agent: 'silpi', provider: 'anthropic', model: 'm', cause: 'error', durationMs: 5_400_000 })],
+    );
+    expect(long).not.toContain('5400.0s');
+  });
+
   it('renders a clear line when the bead has no ledger entries', () => {
     const out = renderShow(
       { id: 'b1', title: 'X', status: 'open', type: 'task', priority: null, criteria: '' },

@@ -13,6 +13,7 @@ import {
 import { listSessions } from '../suthradhara/persistence';
 import { readHandoff, type Handoff } from '../suthradhara/handoff';
 import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-log';
+import { timed } from '../sthapathi/timing';
 import { getUsageMeter, getPolicySource, costFor, type UsageMeter, type PolicySource, type PolicyDecision } from '../ext/index';
 import { readSessionUsage, type SessionUsage } from '../suthradhara/usage';
 import { resolveAgentModel, type KshetraConfig } from '../kshetra/config';
@@ -384,8 +385,14 @@ async function runPlanningLoop(
 
     const swallow = (): void => {};
     process.on('SIGINT', swallow);
+    // Time the planning session at the site (Shreni-beads-27a): from the moment
+    // this loop takes over the live child (startSession/resumeSession spawned it
+    // just before) to its exit, on the same monotonic clock the executors use.
+    // Carried on its usage record and run_usage fold below. A wait() that throws
+    // meters nothing, so the success-path timed() is enough.
+    let sessionDurationMs: number;
     try {
-      await current.wait();
+      ({ durationMs: sessionDurationMs } = await timed(() => current.wait()));
     } finally {
       process.off('SIGINT', swallow);
     }
@@ -435,6 +442,7 @@ async function runPlanningLoop(
         cacheCreationTokens: usage.cacheCreationTokens,
         toolCallCount: usage.toolCallCount,
         outcome: 'ok' as const,
+        durationMs: sessionDurationMs,
       };
       meter.record(record);
       // Fold the same record into the run_usage stream (epic fnd.6), like
@@ -464,6 +472,8 @@ async function runPlanningLoop(
           costUsd,
           priced,
           outcome: 'ok',
+          // Read off the record so the two shapes carry the same value (dt7).
+          durationMs: record.durationMs,
         });
       } catch (err) {
         log(`suthradhara[${kshetra.id}]: run_usage fold failed — ${(err as Error).message}`);

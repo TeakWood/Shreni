@@ -60,10 +60,11 @@ export interface UsageRecord {
   // (runner.ts) around the provider run and carried on every metered
   // finalization, ok or error — a failed session still consumed real time
   // (Shreni-beads-dt7). A run that is not metered at all (abort, spawn failure,
-  // no-usage error) has no record, so no duration either. Additive
-  // OPTIONAL field — no USAGE_SCHEMA_VERSION bump; entries written before dt7,
-  // and producers that do not time the run (suthradhara's planning session),
-  // omit it, and a reader treats absent as unknown, never as 0.
+  // no-usage error) has no record here; its duration goes to the ledger's
+  // run_unmetered instead (Shreni-beads-27a). Suthradhara's planning session is
+  // timed from the loop taking over the live child to its exit (27a). Additive OPTIONAL field — no USAGE_SCHEMA_VERSION
+  // bump; entries written before dt7 (and suthradhara entries before 27a) omit
+  // it, and a reader treats absent as unknown, never as 0.
   durationMs?: number;
   // The agent execution (session) this record meters (Shreni-beads-228) — the
   // same id the ledger's run_usage entry carries, so the two join 1:1 (runId

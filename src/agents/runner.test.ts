@@ -208,6 +208,105 @@ describe('runAgent usage metering', () => {
   });
 });
 
+// Shreni-beads-27a: a session that ends with no usage record still carries its
+// elapsed time, on a run_unmetered — one per run_started that got no run_usage.
+describe('runAgent run_unmetered (Shreni-beads-27a)', () => {
+  const unmetered = () => mockEmitted.filter(e => e.type === 'run_unmetered');
+
+  it('an abort mid-run emits run_unmetered with cause:aborted and its elapsed time', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(sleepAdapter(30));
+    const controller = new AbortController();
+    const p = runAgent(OPTS(controller.signal));
+    setTimeout(() => controller.abort(), 50);
+    await expect(p).rejects.toBeInstanceOf(AgentAbortedError);
+    const ev = unmetered();
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({
+      kshetra: 'myapp', beadId: 'bd-1', agent: 'silpi', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      cause: 'aborted', sessionId: expect.any(String),
+    });
+    expect(ev[0].durationMs as number).toBeGreaterThanOrEqual(40);
+    // It closes the same session its run_started opened.
+    const started = mockEmitted.filter(e => e.type === 'run_started');
+    expect(ev[0].sessionId).toBe(started[0].sessionId);
+    expect(mockEmitted.filter(e => e.type === 'run_usage')).toHaveLength(0);
+  });
+
+  it('an abort before spawn still closes its run_started with cause:aborted', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(sleepAdapter(30));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(runAgent(OPTS(controller.signal))).rejects.toBeInstanceOf(AgentAbortedError);
+    expect(unmetered()).toEqual([expect.objectContaining({ cause: 'aborted', durationMs: expect.any(Number) })]);
+  });
+
+  it('a spawn failure emits run_unmetered with cause:spawn_failed; the error message is unchanged', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue({
+      name: 'anthropic' as const,
+      buildSpawn: () => ({ bin: '/nonexistent/shreni-27a-bin', args: [] }),
+      createParser: () => ({ onLine: () => {}, finalize: () => ({ structuredOutput: {}, resultText: '', toolCallCount: 0 }) }),
+    });
+    await expect(runAgent(OPTS())).rejects.toThrow(/silpi: failed to spawn \/nonexistent\/shreni-27a-bin CLI/);
+    expect(unmetered()).toEqual([expect.objectContaining({ cause: 'spawn_failed', durationMs: expect.any(Number) })]);
+  });
+
+  it('a token-less provider error emits run_unmetered with cause:error and no usage record', async () => {
+    mockEmitted.length = 0;
+    mockRecord.mockClear();
+    mockGetAdapter.mockReturnValue(failAdapter(undefined));
+    await expect(runAgent(OPTS())).rejects.toBeInstanceOf(AgentRunError);
+    expect(unmetered()).toEqual([expect.objectContaining({ cause: 'error', durationMs: expect.any(Number) })]);
+    // Nothing reaches usage.jsonl — it holds metered records only.
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  it('a metered failure (tokens surfaced) emits run_usage only — never both', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(failAdapter({ inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 }));
+    await expect(runAgent(OPTS())).rejects.toBeInstanceOf(AgentRunError);
+    expect(mockEmitted.filter(e => e.type === 'run_usage')).toHaveLength(1);
+    expect(unmetered()).toHaveLength(0);
+  });
+
+  it('each discarded transient attempt with no usage emits its own run_unmetered', async () => {
+    mockEmitted.length = 0;
+    // 'overloaded' is transient; no usage surfaced → every attempt is unmetered.
+    mockGetAdapter.mockReturnValue(failAdapter(undefined, 'silpi: API Error: 529 overloaded'));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const p = runAgent(OPTS());
+      const settled = p.then(() => 'ok', () => 'err');
+      // Advance through the 10s/30s/60s backoff ladder while real subprocesses exit.
+      let state: string | undefined;
+      void settled.then(v => { state = v; });
+      for (let i = 0; i < 400 && state === undefined; i++) {
+        await vi.advanceTimersByTimeAsync(1000);
+        await new Promise(r => setImmediate(r));
+      }
+      expect(state).toBe('err');
+    } finally {
+      vi.useRealTimers();
+    }
+    const started = mockEmitted.filter(e => e.type === 'run_started');
+    const ev = unmetered();
+    expect(started).toHaveLength(4);
+    expect(ev).toHaveLength(4);
+    // One per session, each closing its own run_started.
+    expect(ev.map(e => e.sessionId)).toEqual(started.map(e => e.sessionId));
+    expect(ev.every(e => e.cause === 'error')).toBe(true);
+  });
+
+  it('a successful run emits no run_unmetered', async () => {
+    mockEmitted.length = 0;
+    mockGetAdapter.mockReturnValue(okAdapter(undefined));
+    await runAgent(OPTS());
+    expect(unmetered()).toHaveLength(0);
+  });
+});
+
 describe('runAgent turn_usage (epic 408/A1)', () => {
   it('emits one turn_usage per call, counting main-thread and sidechain turnIndex separately', async () => {
     mockEmitted.length = 0;
