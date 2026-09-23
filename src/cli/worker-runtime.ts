@@ -42,15 +42,19 @@ import type { Task } from '../sthapathi/types';
 // watchdog, heartbeat, resume-watch). The only difference between the two callers
 // is the DRIVING loop: the daemon arms `scheduler.scheduleLoop` and never exits;
 // drain drives `scheduler.runCycle` itself so it can read each cycle's outcome and
-// run an exit sequence. A `drain` that looped around `shreni run` would study a
-// Shreni nobody deploys — none of this machinery runs there.
+// run an exit sequence. This is the ONLY place a scheduler is built for real work:
+// `shreni run` is `drain --max-cycles 1`, not a loop of its own (Shreni-beads-nhw),
+// so nothing can dispatch agents while skipping the ledger sink, persisted phase,
+// heartbeat, recovery, or timers wired here. src/cli/single-scheduler.test.ts
+// guards against a second createScheduler() call site returning.
 
 const BEADS_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const WATCHDOG_INTERVAL_MS = 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 const RESUME_WATCH_INTERVAL_MS = 5 * 1000;
 
-export type WorkerEntrypoint = 'worker' | 'drain';
+// 'run' is `shreni run`, a one-cycle drain (Shreni-beads-nhw) — same runtime.
+export type WorkerEntrypoint = 'worker' | 'drain' | 'run';
 
 export interface WorkerRuntimeOptions {
   // Opaque run labels (epic yrk / Study B2), forwarded to the lot manifest.

@@ -115,7 +115,7 @@ export type ActivityEvent =
   // not task context. Provider-neutral; only the Claude adapter populates it (408.3).
   | { type: 'context_compacted'; kshetra: string; beadId: string; agent: 'silpi' | 'viharapala' | 'parikshaka'; provider: string; model: string; trigger: 'auto' | 'manual' | 'unknown'; preTokens: number; turnIndex: number }
   // worker_started — the LOT MANIFEST (epic yrk / Study B2): one entry per worker
-  // process (or `shreni run` manual cycle) start, recording everything in force
+  // process (or `shreni drain` / its one-cycle `shreni run` alias) start, recording everything in force
   // for that lot. A lot is the set of work produced under identical conditions —
   // one worker process with its once-loaded config — and is ORTHOGONAL to the bead
   // hierarchy (a lot spans many beads; a bead can span lots on restart). So this
@@ -123,7 +123,9 @@ export type ActivityEvent =
   // field here — it rides the envelope like `runId` (see emit / getCurrentLotId),
   // so EVERY subsequent ledger/activity entry in the process joins back to this
   // manifest by lotId. `entrypoint` distinguishes the long-lived worker from a
-  // manual run. `subject` (what was changed: repo, base SHA, resolved config) and
+  // drain and from `shreni run` (a one-cycle drain since Shreni-beads-nhw; older
+  // 'run' records predate that and carry no ledger trail — readers must keep
+  // accepting the value either way). `subject` (what was changed: repo, base SHA, resolved config) and
   // `process` (what did the changing: build identity, CLI versions) start EMPTY
   // here (yrk.1 plumbing) and are populated by the collectors in yrk.2/yrk.3.
   // `labels` are opaque operator tags (--label k=v, yrk.4), recorded verbatim —
@@ -135,7 +137,7 @@ export type ActivityEvent =
   // each still-open in-scope bead with its stall reason. O(1) per drain,
   // audit-relevant provenance: the reason a trial ended belongs in the git-tracked
   // ledger, not only on a terminal that scrolls away. Decision-grade → ledger.
-  | { type: 'drain_finished';   kshetra: string; lotId: string; reason: string; scope: string | null; exitCode: number; counts: { filed: number; merged: number; open: number }; stalled: { beadId: string; reason: string }[]; outOfScopeFiled: string[] }
+  | { type: 'drain_finished';   kshetra: string; lotId: string; reason: string; scope: string | null; exitCode: number; counts: { filed: number; merged: number; open: number }; stalled: { beadId: string; reason: string }[]; outOfScopeFiled: string[]; maxCycles?: number }
   // state_frozen / state_restored (DECISION-GRADE, epic Shreni-beads-ius / Study B4):
   // freeze/restore provenance. Kshetra-level, not bead-level (no beadId — like
   // worker_started), audience 'audit' (about the whole kshetra's state, never an
@@ -279,15 +281,16 @@ export function getCurrentLotId(kshetraId: string): string {
 }
 
 // Emit the lot manifest (epic yrk / Study B2) — the SINGLE shared entrypoint for
-// both `shreni worker` startup and `shreni run`'s manual cycle. It mints a fresh
-// lotId, records it so emit() stamps it on this and every later envelope, then
-// emits one worker_started carrying the (initially empty) subject/process sections
-// and the opaque labels. Returns the minted lotId.
+// every worker-runtime startup (`shreni start`'s worker, `shreni drain`, and its
+// one-cycle `shreni run` alias). It mints a fresh lotId, records it so emit()
+// stamps it on this and every later envelope, then emits one worker_started
+// carrying the (initially empty) subject/process sections and the opaque labels.
+// Returns the minted lotId.
 //
-// Must be called AFTER the ledger sink is registered in the worker path so the
-// manifest reaches ledger.jsonl; in the `shreni run` path no ledger sink is
-// registered (consistent with the manual cycle not writing the ledger today), so
-// the manifest lands in activity.jsonl only. Subject/process are populated by the
+// Must be called AFTER the ledger sink is registered so the manifest reaches
+// ledger.jsonl (the worker runtime does both, in that order). 'run' stays in the
+// entrypoint union: it is still written by the alias, and pre-nhw 'run' records
+// (which had no ledger sink) exist in history and must keep parsing. Subject/process are populated by the
 // collectors (yrk.2/yrk.3); this foundation emits them empty so the plumbing —
 // envelope stamping, decision-grade routing, no-bead handling — is testable first.
 export function emitLotManifest(

@@ -515,7 +515,7 @@ shreni agents             # which agent is active per Kshetra and what it's work
 ```bash
 shreni pause --kshetra myapp    # pause without stopping other Kshetras
 shreni resume --kshetra myapp   # resume a paused Kshetra
-shreni run --kshetra myapp      # force one cycle immediately (useful for testing)
+shreni run --kshetra myapp      # work at most one cycle now — alias for `shreni drain --max-cycles 1`
 shreni sync --kshetra myapp     # force beads git pull + push
 ```
 

@@ -1,5 +1,5 @@
 // Opaque run labels (epic yrk / Study B2, yrk.4). Repeatable `--label key=value`
-// on `shreni start` / `shreni run` / the hidden `__worker` subcommand, recorded
+// on `shreni start` / `shreni drain` / `shreni run` / the hidden `__worker` subcommand, recorded
 // VERBATIM in the lot manifest's worker_started.labels. Shreni validates only the
 // SHAPE and never interprets a label — it must never learn what 'arm' or 'rep'
 // mean (decision 10). Labels also serve teams (e.g. change=CHG-1234).

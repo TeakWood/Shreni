@@ -156,7 +156,7 @@ export interface LotTimeBreakdown {
 // event. Surfaced per lot so a stalled trial can never be read as a completed one.
 export interface DrainOutcome {
   lotId: string;
-  reason: string;      // complete | stalled | budget
+  reason: string;      // complete | stalled | budget | capped
   exitCode: number;
   scope: string | null;
   counts: { filed: number; merged: number; open: number };

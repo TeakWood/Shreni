@@ -8,6 +8,7 @@ import {
   createWorkerRuntime,
   workerPreconditionError,
   type WorkerRuntime,
+  type WorkerEntrypoint,
 } from './worker-runtime';
 import { classifyOpenBeads, type StalledBead } from './drain-classify';
 import type { KshetraConfig } from '../kshetra/config';
@@ -15,11 +16,16 @@ import type { Task } from '../sthapathi/types';
 
 // `shreni drain` (epic 7h3 / Study B3): run the REAL worker in the foreground
 // until every ready bead in scope is worked, then EXIT with a machine-readable
-// reason. Unlike `shreni start` (a daemon that never exits) and `shreni run` (one
-// bare cycle with none of the worker's machinery), drain is a scripted, unattended
-// unit with a defined end and a stated reason for ending — the trial primitive the
-// study needs. It reuses the worker runtime verbatim (recover, sync, reconcile,
-// watchdog, heartbeat, self-heal) and differs only in the driving loop.
+// reason. Unlike `shreni start` (a daemon that never exits), drain is a scripted,
+// unattended unit with a defined end and a stated reason for ending — the trial
+// primitive the study needs. It reuses the worker runtime verbatim (recover, sync,
+// reconcile, watchdog, heartbeat, self-heal) and differs only in the driving loop.
+//
+// `shreni run` is NOT a second execution path: it is `drain --max-cycles 1`
+// (Shreni-beads-nhw). It once built its own scheduler + hooks and so skipped every
+// wiring the worker runtime performs (ledger sink, persisted phase, heartbeat,
+// recovery, timers) — a task it merged left no ledger trail. A cycle cap is a STOP
+// CONDITION on this loop, so the one-cycle command gets all of that for free.
 //
 // B3.3 delivered the command + loop + exit sequence; B3.4 adds the decision-grade
 // end: per-bead stall classification, exit codes (0/10/11/130·143), the stdout
@@ -33,14 +39,22 @@ export interface DrainOptions {
   epic?: string;
   // Poll/backoff interval. Defaults to the scheduler's 30s. Injectable for tests.
   intervalMs?: number;
+  // Stop after this many scheduler cycles (`--max-cycles <n>`, a positive
+  // integer). Unset = no cap. The normal exit sequence still runs on a capped stop.
+  maxCycles?: number;
+  // Which command started the drain, recorded in the lot manifest. `shreni run`
+  // (the one-cycle alias) passes 'run' so its lots stay attributable as such.
+  entrypoint?: Exclude<WorkerEntrypoint, 'worker'>;
 }
 
 //   complete — every in-scope bead closed (exit 0)
 //   stalled  — open beads remain, none workable (exit 10)
 //   budget   — the budget policy stopped work (exit 11); a stalled bead's note
 //              names the cap
+//   capped   — the --max-cycles cap stopped the loop while at least one open
+//              bead is still READY, i.e. workable but not reached (exit 12)
 //   signal   — SIGINT/SIGTERM interrupted the drain (exit 130/143)
-export type DrainReason = 'complete' | 'stalled' | 'budget' | 'signal';
+export type DrainReason = 'complete' | 'stalled' | 'budget' | 'capped' | 'signal';
 
 export interface DrainCounts {
   filed: number;   // in-scope beads created during the drain
@@ -63,6 +77,7 @@ export interface DrainResult extends DrainCore {
   lotId: string;
   scope: string | null;               // epic id, or null for the whole queue
   labels: Record<string, string>;
+  maxCycles: number | null;           // the --max-cycles cap, or null when uncapped
   elapsedMs: number;
   counts: DrainCounts;
   outOfScopeFiled: string[];          // beads filed during the drain OUTSIDE scope
@@ -115,15 +130,30 @@ export async function collectEpicScope(kshetra: KshetraConfig, epicId: string): 
 // Drive the drain to completion. Pure control flow over the injected driver — no
 // process, git, or bd calls of its own — so every branch (immediate re-tick on a
 // completed task, interval backoff on the failure path, the exit sequence, the
-// classification, and a clean signal stop) is exercised directly by tests.
+// classification, the cycle cap, and a clean signal stop) is exercised directly
+// by tests.
+//
+// `maxCycles` counts EVERY scheduler cycle, including the post-sync probe. When
+// the cap is reached the loop stops (skipping any probe) and the normal exit
+// sequence runs. On a capped stop a still-READY open bead is expected, not an
+// anomaly: it is reclassified 'not-reached', and its presence makes the drain
+// 'capped' (exit 12). A capped stop that leaves only unworkable beads is 'stalled'
+// (10) and one that leaves none is 'complete' (0), exactly as uncapped.
 export async function driveDrain(
   driver: DrainDriver,
-  opts: { intervalMs: number; signalled: () => NodeJS.Signals | undefined },
+  opts: { intervalMs: number; signalled: () => NodeJS.Signals | undefined; maxCycles?: number },
   delay: (ms: number) => Promise<void> = defaultDelay,
 ): Promise<DrainCore> {
   const { runtime } = driver;
-  const { intervalMs, signalled } = opts;
-  const runOne = (): Promise<CycleOutcome> => runtime.scheduler.runCycle(runtime.kshetra, runtime.hooks);
+  const { intervalMs, signalled, maxCycles } = opts;
+  let cycles = 0;
+  const runOne = (): Promise<CycleOutcome> => {
+    cycles++;
+    return runtime.scheduler.runCycle(runtime.kshetra, runtime.hooks);
+  };
+  const atCap = (): boolean => maxCycles !== undefined && cycles >= maxCycles;
+  // Set when the cap (not the queue) ended the loop.
+  let capped = false;
   // Async work (an in-flight task or a Parikshaka backfill that may yet file a
   // bead) or a self-heal is still settling — wait one interval before re-checking.
   const settling = (): boolean => runtime.isInFlight() || runtime.isHealing();
@@ -135,6 +165,9 @@ export async function driveDrain(
   while (!signalled()) {
     const outcome = await runOne();
     if (signalled()) break;
+
+    // Cycle cap reached: stop driving and fall through to the exit sequence.
+    if (atCap()) { capped = true; break; }
 
     // A task completed — the next bead may be ready NOW. Re-tick immediately
     // (mirrors scheduleLoop's 'ran' fast-path); no interval, no exit check.
@@ -157,11 +190,18 @@ export async function driveDrain(
     await runtime.sync();
     if (signalled()) break;
     const recheck = await runOne();
+    if (signalled()) break;
+    if (atCap()) { capped = true; break; }
     if (recheck === 'ran') continue;             // backfill surfaced fresh work
     if (settling()) { await delay(intervalMs); continue; }
     if (recheck === 'declined') { await delay(intervalMs); continue; }
     break;                                        // 'no-work' after the sync → drained
   }
+
+  // A capped stop may leave async work settling (a Parikshaka backfill still
+  // writing test beads, a self-heal). Let it finish before classifying, exactly as
+  // the uncapped loop would, so the exit never races an agent still at work.
+  while (!signalled() && settling()) await delay(intervalMs);
 
   const signal = signalled();
   if (signal) {
@@ -176,11 +216,23 @@ export async function driveDrain(
   }
   // Open beads remain → classify each. A budget denial (persisted in a bead's
   // note) flips the whole drain to exit 11; everything else is exit-10 'stalled'.
-  const stalled = await driver.classify(openInScope);
+  // On a capped stop a ready bead was simply not reached: relabel it (it is NOT
+  // the "should not happen" anomaly) and let it make the drain 'capped' — unless
+  // a budget denial, the more severe signal, is present.
+  const classified = await driver.classify(openInScope);
+  const stalled = capped
+    ? classified.map(s =>
+        s.category === 'ready-but-unworked'
+          ? { beadId: s.beadId, category: 'not-reached' as const, reason: 'ready — not reached before the --max-cycles cap' }
+          : s,
+      )
+    : classified;
   const budget = stalled.some(s => s.category === 'budget');
+  const notReached = stalled.some(s => s.category === 'not-reached');
+  const reason: DrainReason = budget ? 'budget' : notReached ? 'capped' : 'stalled';
   return {
-    exitCode: budget ? 11 : 10,
-    reason: budget ? 'budget' : 'stalled',
+    exitCode: reason === 'budget' ? 11 : reason === 'capped' ? 12 : 10,
+    reason,
     openInScope,
     stalled,
   };
@@ -205,7 +257,7 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
   const runtime = createWorkerRuntime(kshetra, {
     labels: opts.labels,
     allowAblation: opts.allowAblation,
-    entrypoint: 'drain',
+    entrypoint: opts.entrypoint ?? 'drain',
     inScope,
   });
   const client = bd(kshetra);
@@ -280,6 +332,9 @@ export async function runDrain(
   // so the dispatcher exits 1.
   const precondErr = workerPreconditionError(kshetra, opts.allowAblation ?? false);
   if (precondErr) throw new Error(`${kshetraId}: ${precondErr}`);
+  if (opts.maxCycles !== undefined && !(Number.isInteger(opts.maxCycles) && opts.maxCycles >= 1)) {
+    throw new Error(`Invalid max cycles "${opts.maxCycles}": expected a positive integer.`);
+  }
 
   const driver = await makeDriver(kshetra, opts);
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
@@ -296,7 +351,11 @@ export async function runDrain(
 
   const stopTimers = driver.runtime.startTimers();
   try {
-    const core = await driveDrain(driver, { intervalMs, signalled: () => signal }, delay);
+    const core = await driveDrain(
+      driver,
+      { intervalMs, signalled: () => signal, maxCycles: opts.maxCycles },
+      delay,
+    );
     const cnt =
       core.reason === 'signal'
         ? { filed: 0, merged: 0, outOfScopeFiled: [] }
@@ -307,6 +366,7 @@ export async function runDrain(
       lotId: getCurrentLotId(kshetraId),
       scope: opts.epic ?? null,
       labels: opts.labels ?? {},
+      maxCycles: opts.maxCycles ?? null,
       elapsedMs: Date.now() - startedAtMs,
       counts: { filed: cnt.filed, merged: cnt.merged, open: core.openInScope.length },
       outOfScopeFiled: cnt.outOfScopeFiled,
@@ -325,6 +385,7 @@ export async function runDrain(
         counts: result.counts,
         stalled: result.stalled.map(s => ({ beadId: s.beadId, reason: s.reason })),
         outOfScopeFiled: result.outOfScopeFiled,
+        ...(result.maxCycles !== null ? { maxCycles: result.maxCycles } : {}),
       });
       // FINAL sync: the drain_finished record reaches the git-tracked ledger
       // BEFORE the process exits — a trial's outcome belongs in the pushed store.
@@ -349,6 +410,7 @@ export function drainResultJson(result: DrainResult): string {
       exitCode: result.exitCode,
       scope: result.scope,
       labels: result.labels,
+      maxCycles: result.maxCycles,
       elapsedMs: result.elapsedMs,
       counts: result.counts,
       stalled: result.stalled.map(s => ({ beadId: s.beadId, category: s.category, reason: s.reason })),
@@ -371,7 +433,9 @@ export function formatDrainResult(result: DrainResult): string {
         ? `drain complete for "${result.kshetra}" — every in-scope bead closed (exit ${result.exitCode})`
         : result.reason === 'budget'
           ? `drain stopped for "${result.kshetra}" — budget policy denied work (exit ${result.exitCode})`
-          : `drain stalled for "${result.kshetra}" — ${result.counts.open} bead(s) open, none workable (exit ${result.exitCode})`;
+          : result.reason === 'capped'
+            ? `drain stopped for "${result.kshetra}" after ${result.maxCycles} cycle(s) (--max-cycles) — ${result.counts.open} bead(s) still open (exit ${result.exitCode})`
+            : `drain stalled for "${result.kshetra}" — ${result.counts.open} bead(s) open, none workable (exit ${result.exitCode})`;
   const lines = [
     head,
     `  lot ${lot} · scope ${result.scope ?? 'all'} · labels ${labelStr} · elapsed ${Math.round(result.elapsedMs / 1000)}s`,

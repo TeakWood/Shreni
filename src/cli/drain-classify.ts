@@ -17,6 +17,11 @@ export type StallCategory =
   | 'blocked'
   | 'paused'
   | 'ready-but-unworked'
+  // Ready and workable, but the drain's --max-cycles cap stopped the loop before
+  // reaching it (Shreni-beads-nhw). Assigned by driveDrain on a capped stop in
+  // place of 'ready-but-unworked' — expected, not an anomaly — and it is what
+  // makes a capped drain exit 12 rather than 10.
+  | 'not-reached'
   | 'open';
 
 export interface StalledBead {

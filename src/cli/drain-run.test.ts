@@ -77,4 +77,41 @@ describe('runDrain', () => {
       stalled: [{ beadId: 'mid', reason: 'needs-human' }],
     }));
   });
+
+  // --max-cycles (Shreni-beads-nhw): the cap drives the loop through the injected
+  // driver and the FULL exit sequence still runs — classification, exit code,
+  // drain_finished (carrying the cap), then the final sync that pushes it.
+  it('--max-cycles caps the loop and still records + pushes drain_finished', async () => {
+    const driver = fakeDriver(['b2']);
+    (driver.classify as ReturnType<typeof vi.fn>).mockImplementation(async (ids: string[]) =>
+      ids.map(id => ({ beadId: id, category: 'ready-but-unworked' as const, reason: 'READY BUT UNWORKED' })));
+    (driver.runtime.scheduler.runCycle as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('cycle');
+      return 'ran' as const;
+    });
+    const result = await runDrain('myapp', { intervalMs: 1, maxCycles: 3 }, async () => driver, async () => {});
+    expect(order.filter(o => o === 'cycle')).toHaveLength(3);
+    expect(driver.classify).toHaveBeenCalledWith(['b2']);
+    expect(result).toMatchObject({ exitCode: 12, reason: 'capped', maxCycles: 3, counts: { open: 1 } });
+    expect(mockEmit).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'drain_finished', reason: 'capped', exitCode: 12, maxCycles: 3,
+      stalled: [{ beadId: 'b2', reason: 'ready — not reached before the --max-cycles cap' }],
+    }));
+    expect(order.indexOf('emit:drain_finished')).toBeLessThan(order.lastIndexOf('sync'));
+    expect(order.at(-1)).toBe('stopTimers');
+  });
+
+  it('omits maxCycles from drain_finished when uncapped', async () => {
+    await runDrain('myapp', { intervalMs: 1 }, async () => fakeDriver([]), async () => {});
+    const ev = mockEmit.mock.calls.map(c => c[0]).find(e => e.type === 'drain_finished');
+    expect(ev).toBeDefined();
+    expect('maxCycles' in (ev as object)).toBe(false);
+  });
+
+  it('rejects a non-positive or fractional --max-cycles before driving anything', async () => {
+    for (const bad of [0, -1, 1.5]) {
+      await expect(runDrain('myapp', { maxCycles: bad }, async () => fakeDriver([]))).rejects.toThrow(/positive integer/);
+    }
+    expect(order).toEqual([]);
+  });
 });

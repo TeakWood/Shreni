@@ -15,8 +15,8 @@ import { pauseKshetraById, resumeKshetraById } from './pause';
 import { createBaseBranchForKshetra } from './base-branch';
 import { runAgents } from './agents';
 import { runLogs } from './logs';
-import { runRun } from './run';
-import { runDrain, formatDrainResult, drainResultJson } from './drain';
+import { runDrain, formatDrainResult, drainResultJson, type DrainOptions } from './drain';
+import type { CommandContext } from './registry';
 import { runFreeze } from './freeze';
 import { runExport } from './export';
 import { runRestore } from './restore';
@@ -38,6 +38,50 @@ import { runTelemetry } from './telemetry';
 import { parseLabels } from './labels';
 import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
+
+const DRAIN_USAGE = '--kshetra <id> [--epic <id>] [--max-cycles <n>] [--label key=value ...] [--allow-ablation] [--json]';
+const RUN_USAGE = '--kshetra <id> [--label key=value ...] [--allow-ablation] [--json]';
+const DRAIN_EXIT_CODES =
+  'Exit codes: 0 complete · 10 stalled · 11 budget · 12 capped by --max-cycles with beads still open · 130/143 signal';
+const RUN_HELP = [
+  'shreni run is `shreni drain --max-cycles 1`: it starts the real worker runtime',
+  '(recovery, ledger, persisted phase, heartbeat, timers), works at most one cycle,',
+  'then runs drain\'s exit sequence (final sync, stall classification, drain_finished).',
+  'Startup recovery may first resume WIP beads a crash left in progress, as the worker',
+  'does. Do not run it beside a `shreni start` daemon on the same kshetra. SIGINT/SIGTERM',
+  'stop it at the next check-point, after the in-flight task. Use `shreni drain`',
+  'directly for --epic scoping or a larger --max-cycles.',
+  DRAIN_EXIT_CODES,
+].join('\n');
+
+function wantsHelp(ctx: CommandContext): boolean {
+  return ctx.has('--help') || ctx.has('-h');
+}
+
+// `--max-cycles <n>`: a positive integer, or undefined when absent. Malformed
+// input fails fast here rather than silently running uncapped.
+export function parseMaxCycles(ctx: CommandContext): number | undefined {
+  if (!ctx.has('--max-cycles')) return undefined;
+  const raw = ctx.flag('--max-cycles');
+  const n = raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    throw new Error(`Invalid --max-cycles "${raw ?? ''}": expected a positive integer.`);
+  }
+  return n;
+}
+
+// The shared body of `drain` and its `run` alias: run the drain, print the
+// summary, and exit with its code. drain owns its exit code (0 complete / 10
+// stalled / 11 budget / 12 capped / 130·143 signal) — the whole point is a
+// machine-readable end — so it exits directly rather than returning to the
+// dispatcher (which only distinguishes 0 from 1).
+async function drainAndExit(ctx: CommandContext, id: string, opts: DrainOptions): Promise<void> {
+  // Opaque run labels (epic yrk / Study B2); malformed --label fails fast here.
+  const labels = parseLabels(ctx.args);
+  const result = await runDrain(id, { ...opts, labels, allowAblation: ctx.has('--allow-ablation') });
+  console.log(ctx.has('--json') ? drainResultJson(result) : formatDrainResult(result));
+  process.exit(result.exitCode);
+}
 
 export const COMMANDS: Command[] = [
   {
@@ -212,37 +256,35 @@ export const COMMANDS: Command[] = [
   },
   {
     name: 'run',
-    summary: 'Run a single manual work cycle for a kshetra',
-    usage: '--kshetra <id> [--label key=value ...] [--allow-ablation]',
+    summary: 'Work at most one cycle for a kshetra — an alias for `drain --max-cycles 1` (same worker runtime, ledger, exit codes)',
+    usage: RUN_USAGE,
     run(ctx) {
+      if (wantsHelp(ctx)) { console.log(RUN_HELP); return; }
+      // A thin alias, NOT a second execution path (Shreni-beads-nhw): exactly one
+      // drain cycle through the real worker runtime. Only --label,
+      // --allow-ablation and --json are forwarded (drain-only flags are refused);
+      // the lot records entrypoint 'run' so one-cycle lots stay distinguishable.
       const id = ctx.flag('--kshetra');
-      if (!id) throw new Error('Usage: shreni run --kshetra <id> [--label key=value ...]');
-      // Opaque run labels (epic yrk / Study B2); malformed --label fails fast here.
-      const labels = parseLabels(ctx.args);
-      // Ablation guard (epic 8wi) is enforced inside runManualCycle, which has the
-      // resolved config; thread the flag through.
-      return runRun(id, labels, ctx.has('--allow-ablation'));
+      if (!id) throw new Error(`Usage: shreni run ${RUN_USAGE}\n${RUN_HELP}`);
+      // Refuse drain-only flags rather than silently running an unscoped cycle.
+      for (const f of ['--epic', '--max-cycles']) {
+        if (ctx.has(f)) throw new Error(`shreni run does not take ${f} — use \`shreni drain ${f} …\` instead.`);
+      }
+      return drainAndExit(ctx, id, { maxCycles: 1, entrypoint: 'run' });
     },
   },
   {
     name: 'drain',
-    summary: 'Run the worker in the foreground until every ready bead is worked, then exit with a reason',
-    usage: '--kshetra <id> [--epic <id>] [--label key=value ...] [--allow-ablation] [--json]',
-    async run(ctx) {
+    summary: 'Run the worker in the foreground until every ready bead is worked (or --max-cycles is reached), then exit with a reason',
+    usage: DRAIN_USAGE,
+    run(ctx) {
+      if (wantsHelp(ctx)) { console.log(`Usage: shreni drain ${DRAIN_USAGE}\n${DRAIN_EXIT_CODES}`); return; }
       const id = ctx.flag('--kshetra');
-      if (!id) throw new Error('Usage: shreni drain --kshetra <id> [--epic <id>] [--label key=value ...] [--allow-ablation] [--json]');
-      // Opaque run labels (epic yrk / Study B2); malformed --label fails fast here.
-      const labels = parseLabels(ctx.args);
-      const result = await runDrain(id, {
-        labels,
+      if (!id) throw new Error(`Usage: shreni drain ${DRAIN_USAGE}`);
+      return drainAndExit(ctx, id, {
         epic: ctx.flag('--epic'),
-        allowAblation: ctx.has('--allow-ablation'),
+        maxCycles: parseMaxCycles(ctx),
       });
-      console.log(ctx.has('--json') ? drainResultJson(result) : formatDrainResult(result));
-      // drain owns its exit code (0 complete / 10 stalled / 11 budget / 130·143
-      // signal) — the whole point is a machine-readable end. Exit directly rather
-      // than returning to the dispatcher (which only distinguishes 0 from 1).
-      process.exit(result.exitCode);
     },
   },
   {
