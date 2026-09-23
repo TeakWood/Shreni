@@ -115,13 +115,13 @@ describe('bd() wrapper', () => {
   it('create() calls bd create with title, priority, and optional type', async () => {
     mockSuccess('bd-456');
     await bd(KSHETRA).create('Fix login', 1, 'bug');
-    expect(lastCall().args).toEqual(['create', 'Fix login', '-p', '1', '-t', 'bug']);
+    expect(lastCall().args).toEqual(['create', '--title=Fix login', '-p', '1', '-t', 'bug']);
   });
 
   it('create() omits -t when type is not provided', async () => {
     mockSuccess('bd-457');
     await bd(KSHETRA).create('Add feature', 2);
-    expect(lastCall().args).toEqual(['create', 'Add feature', '-p', '2']);
+    expect(lastCall().args).toEqual(['create', '--title=Add feature', '-p', '2']);
   });
 
   it('remember() calls bd remember <insight>', async () => {
@@ -151,7 +151,19 @@ describe('bd() wrapper', () => {
   it('create() appends -l when labels are provided', async () => {
     mockSuccess('bd-9');
     await bd(KSHETRA).create('Gap', 2, 'bug', ['parikshaka']);
-    expect(lastCall().args).toEqual(['create', 'Gap', '-p', '2', '-t', 'bug', '-l', 'parikshaka']);
+    expect(lastCall().args).toEqual(['create', '--title=Gap', '-p', '2', '-t', 'bug', '-l', 'parikshaka']);
+  });
+
+  it('create() uses --title= so a title starting with "-" is never read as a flag (Shreni-beads-51c)', async () => {
+    mockSuccess('bd-9');
+    await bd(KSHETRA).create('- Cover the retry path', 2);
+    expect(lastCall().args).toEqual(['create', '--title=- Cover the retry path', '-p', '2']);
+  });
+
+  it('create() passes a description via --description= when given (Shreni-beads-51c)', async () => {
+    mockSuccess('bd-9');
+    await bd(KSHETRA).create('Gap', 2, 'bug', ['parikshaka'], 'long prose');
+    expect(lastCall().args).toEqual(['create', '--title=Gap', '-p', '2', '-t', 'bug', '-l', 'parikshaka', '--description=long prose']);
   });
 
   it('search() calls bd search <query> --status all --json', async () => {

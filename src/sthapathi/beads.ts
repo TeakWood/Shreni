@@ -93,10 +93,15 @@ export function bd(kshetra: KshetraConfig) {
       return exec(['close', id, '--reason', note], env);
     },
 
-    create(title: string, priority: number, type?: string, labels?: string[]): Promise<string> {
-      const args = ['create', title, '-p', String(priority)];
+    // `description` (Shreni-beads-51c) carries long prose into the bead body, so a
+    // caller never has to overload the title (bd caps titles at 500 chars).
+    // Title and description use the `--flag=value` form so free text that starts
+    // with '-' (an LLM bullet, "- Cover the retry path") is never parsed as a flag.
+    create(title: string, priority: number, type?: string, labels?: string[], description?: string): Promise<string> {
+      const args = ['create', `--title=${title}`, '-p', String(priority)];
       if (type) args.push('-t', type);
       if (labels && labels.length) args.push('-l', labels.join(','));
+      if (description) args.push(`--description=${description}`);
       return exec(args, env);
     },
 
