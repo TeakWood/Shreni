@@ -87,7 +87,7 @@ conversation.
 |---|---|---|---|
 | **1 · Discovery** | Product | Capture the raw idea: intent, the user and their problem, the "why now", rough success criteria; **detect new-feature vs. change-to-existing**, and if a change, locate the existing design doc. | The problem/outcome are stated in the operator's words and reflected back; any existing doc is loaded. |
 | **2 · Clarify** | Product → Technical | Active interview: resolve ambiguity, enumerate edge cases, non-functional requirements, explicit **in/out of scope**, priorities, constraints. | The readiness rubric is satisfied; open questions answered or explicitly deferred. |
-| **3 · Decompose** | Technical | Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized for one `Silpi ↔ Viharapala` pass, ordered by dependency. | Every child has title, description, acceptance criteria, priority; deps drawn; nothing is "and then figure out X". |
+| **3 · Decompose** | Technical | Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized by the sizing rubric for one reviewable `Silpi ↔ Viharapala` pass, ordered by dependency edges. | Every child has title, description, acceptance criteria, priority; deps drawn; the coverage check passes; nothing is "and then figure out X". |
 | **4 · Design** | Technical | Synthesise the decisions into a design note: chosen approach, key components and their touch-points in real files, alternatives, risks. | The note explains *why* the decomposition looks the way it does, referencing real files. |
 | **5 · Confirm & commit** | — | Present the full bundle; operator edits/approves; only then file the beads, write the doc, sync beads, and push the doc branch. | Operator approves; artifacts filed and pushed; bead ids echoed. |
 
@@ -375,7 +375,7 @@ Standalone in `src/suthradhara/`, plus the CLI and the one Sthapathi touch-point
 | `src/cli/suthradhara.ts` | CLI dispatch (`start`/`resume`/`stop`/`status`/`list`), Kshetra + session-id resolution, and the **launcher control loop** (`runPlanningLoop`, `renderSummary`, `parseMenuChoice`) |
 | `lifecycle.ts` | Launch/resume/stop/status: (reap +) create the worktree, spawn the **interactive** `claude` in it, track the pid, block on exit |
 | `session.ts` | `buildPlanningSession` — the interactive spawn spec (`--session-id`/`--resume`, `--append-system-prompt`, MCP config, `--model`, `BEADS_DIR`); `defaultKickoff` |
-| `prompt.ts` | `buildPlanningPrompt` — the composed-once planning system-prompt: role boundary, five stages, rubric, proposal shape, and the two-gate completion protocol |
+| `prompt.ts` | `buildPlanningPrompt` — the composed-once planning system-prompt: role boundary, five stages, rubric, proposal shape (with the sizing rubric — the unit of a bead is the review — and the coverage check), and the two-gate completion protocol |
 | `handoff.ts` | The JSON handoff contract (`readHandoff`/`writeHandoff`/`clearHandoff`) between a session and the launcher |
 | `state.ts` / `persistence.ts` | The slim on-disk session record (schema + I/O): id ↔ Claude Code session id ↔ worktree + status; `list`/`save`/`load` |
 | `pid.ts` | PID file under `~/.shreni/suthradhara.*` — one live session per Kshetra |

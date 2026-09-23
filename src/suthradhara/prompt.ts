@@ -3,12 +3,13 @@
 // per-turn distilled prompt, this is composed ONCE at launch: Claude Code holds
 // the conversation itself, so there is no live state to splice in. What it
 // carries is the five-stage rubric, the role boundary, the design rules, the
-// proposal shape, and — new in the launched-session model — the two-gate
+// proposal shape (with its sizing rubric + coverage check), and — new in the
+// launched-session model — the two-gate
 // COMPLETION PROTOCOL the session executes itself (file beads, write the doc,
 // sync beads, push the doc branch, write the handoff), grounded in this
 // Kshetra's real remotes and paths.
 
-import type { KshetraConfig } from '../kshetra/config';
+import { DEFAULT_MAX_ROUNDS_PER_BEAD, GATES_DEFAULTS, type KshetraConfig } from '../kshetra/config';
 import { handoffRelPath } from './handoff';
 
 // Where per-feature design docs live, relative to the repo root. A distinct
@@ -39,8 +40,8 @@ const STAGES: { name: string; hat: string; purpose: string; exit: string }[] = [
     name: 'decompose',
     hat: 'Technical',
     purpose:
-      'Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized for one Silpi ↔ Viharapala pass, ordered by dependency.',
-    exit: 'Every child has a title, description, acceptance criteria, priority; dependencies are drawn; nothing is left as "and then figure out X".',
+      'Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized by the SIZING RUBRIC for one reviewable Silpi ↔ Viharapala pass, ordered by dependency edges.',
+    exit: 'Every child has a title, description, acceptance criteria, priority; dependencies are drawn; the coverage check passes; nothing is left as "and then figure out X".',
   },
   {
     name: 'design',
@@ -102,17 +103,66 @@ function renderRubric(): string {
   return ['Readiness rubric (satisfy or explicitly defer each before decomposing):', ...RUBRIC_ITEMS.map(r => `  - ${r}`)].join('\n');
 }
 
-const PROPOSAL_SHAPE = `When (and only when) the rubric is satisfied and you reach the decompose/design stages, present a
-DECOMPOSITION PROPOSAL for the operator to review — do not file anything until they approve:
+// How to SIZE a child (a32). The only prior guidance was "sized for a single
+// Silpi ↔ Viharapala pass", which let a real plan ship a coverage gap (an
+// unannotated 3k-line chokepoint), a ~284-file bead, batching prose smuggled
+// into a task, and operator-named hard files folded into directory beads. The
+// rubric and the coverage check below close each of those. Grounded in this
+// Kshetra's own diffSize gate and review-round budget so the numbers are real.
+// Defaults are merged under (not substituted for) the config so a hand-built,
+// unparsed config missing one field still renders a number, never `undefined`.
+function sizingRubric(kshetra: KshetraConfig): string {
+  const { maxFiles, maxLines } = { ...GATES_DEFAULTS.diffSize, ...kshetra.gates?.diffSize };
+  const rounds = kshetra.agents?.maxRoundsPerBead ?? DEFAULT_MAX_ROUNDS_PER_BEAD;
+  // The ~20-file smell never exceeds the real gate, so the two can't disagree.
+  const fileSmell = Math.min(20, maxFiles);
+  return `SIZING RUBRIC — the unit of a bead is the REVIEW, not the directory. A child is correctly sized
+when a reviewer can hold its whole diff in one pass and reach a defensible verdict. Apply it when you
+decompose, and re-check it before presenting:
+  1. One decision per bead. A choice of type, interface, or abstraction that other work depends on is
+     its own bead with nothing mechanical bundled in — forty mechanical edits plus one contested
+     decision get approved on the strength of the forty.
+  2. Difficulty, not directory, sets the boundary. Same-folder files with different risk go in
+     different beads; cross-folder files taking the same mechanical change may share one.
+  3. Name the hard files. Each file that is hard for a REASON (runtime polymorphism, prototype surgery,
+     value-dependent return types, very large state machines) gets its own bead whose description
+     states that reason, so the reviewer knows what to look for. Files the operator names as
+     pathological are ALWAYS their own beads — non-negotiable.
+  4. Chokepoints first. A file imported by many others is its own bead, states its dependent count,
+     and every bead touching its importers depends on it.
+  5. No batching prose inside a bead. If a description needs "in batches", "in groups", or
+     "alphabetically", the bead is too big: file those batches as separate beads. Ordering is
+     expressed ONLY as dependency edges, never as prose inside one task.
+  6. Smell tests — each forces a split unless you justify it in the proposal: more than
+     ~${fileSmell} files; more than two distinct kinds of change; a diff that would trip this Kshetra's
+     diffSize gate (more than ${maxFiles} files or ${maxLines} changed lines, insertions + deletions).
+  7. Independently mergeable. Each child's acceptance criteria hold with the base suite green, without
+     the next child landing.
+  8. Prefer more, smaller beads. A rejected small bead costs one round; a rejected large bead costs
+     everything in it — and each bead gets only ${rounds} review rounds.`;
+}
+
+function proposalShape(kshetra: KshetraConfig): string {
+  return `When (and only when) the readiness rubric is satisfied and you reach the decompose/design stages,
+present a DECOMPOSITION PROPOSAL for the operator to review — do not file anything until they approve:
   1. Design note — the chosen approach, key components and their touch-points in real files,
      alternatives considered, risks, and any open questions (including deferred rubric items). This
      is the DESIGN DOC you will write on approval, as deep as the feature warrants (a short note for
      a small feature, a full technical design for a substantial one), never a stub.
   2. Epic — a parent bead (title, type epic or feature, priority 0-4).
   3. Children — one bead per unit of work, each with title, type (task/feature/bug), priority (0-4),
-     and acceptance criteria, sized for a single Silpi ↔ Viharapala pass.
+     and acceptance criteria, sized by the SIZING RUBRIC below.
   4. Dependency edges — the ordering between children (which child is blocked by which).
+  5. Coverage check — run it before presenting and show the result: every file/module in scope is
+     covered, each change it needs owned by exactly one child (no gaps, no overlaps; a file two
+     children must touch is ordered by an edge between them); list anything in scope the plan
+     deliberately does NOT touch, and why. State the child count and one sentence on why the graph
+     has this shape.
+
+${sizingRubric(kshetra)}
+
 Then ask the operator to Approve / Edit / Cancel. Edit reopens the interview; Cancel discards.`;
+}
 
 // The load-bearing addition: the exact steps the session runs ITSELF once the
 // operator approves, grounded in this Kshetra's remotes/paths. Two gates: (1)
@@ -203,7 +253,7 @@ export function buildPlanningPrompt(
     '',
     DESIGN_RULES,
     '',
-    PROPOSAL_SHAPE,
+    proposalShape(kshetra),
     '',
     completionProtocol(kshetra),
   ].join('\n');

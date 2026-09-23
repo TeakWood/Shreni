@@ -73,4 +73,80 @@ describe('buildPlanningPrompt', () => {
     expect(extended).toContain('NEW dated ADR that supersedes');
     expect(extended).toContain('do not rewrite the prior ADR');
   });
+
+  describe('sizing rubric + coverage check (a32)', () => {
+    // The decompose stage points at the rubric, and the rubric lives inside the
+    // proposal shape — one structure, not a parallel system.
+    const proposalAt = prompt.indexOf('DECOMPOSITION PROPOSAL');
+    const rubricAt = prompt.indexOf('SIZING RUBRIC —');
+    const protocolAt = prompt.indexOf('COMPLETION PROTOCOL');
+
+    it('carries the rubric inside the proposal shape, before the approval ask and the protocol', () => {
+      expect(proposalAt).toBeGreaterThan(-1);
+      expect(rubricAt).toBeGreaterThan(proposalAt);
+      expect(prompt.indexOf('Approve / Edit / Cancel')).toBeGreaterThan(rubricAt);
+      expect(protocolAt).toBeGreaterThan(rubricAt);
+      expect(prompt).toContain('the unit of a bead is the REVIEW, not the directory');
+      expect(prompt).toContain('sized by the SIZING RUBRIC for one reviewable Silpi ↔ Viharapala pass');
+    });
+
+    it('keeps every rule of the rubric', () => {
+      for (const rule of [
+        'One decision per bead',
+        'Difficulty, not directory, sets the boundary',
+        'Name the hard files',
+        'pathological are ALWAYS their own beads',
+        'Chokepoints first',
+        'states its dependent count',
+        'No batching prose inside a bead',
+        'ONLY as dependency edges',
+        'Smell tests',
+        'Independently mergeable',
+        'Prefer more, smaller beads',
+      ]) {
+        expect(prompt).toContain(rule);
+      }
+    });
+
+    it('requires an explicit coverage result, exclusions, child count, and shape rationale', () => {
+      expect(prompt).toContain('Coverage check');
+      const flat = prompt.replace(/\s+/g, ' ');
+      expect(flat).toContain('each change it needs owned by exactly one child (no gaps, no overlaps');
+      expect(flat).toContain('deliberately does NOT touch, and why');
+      expect(prompt).toContain('State the child count');
+      expect(prompt).toContain('the coverage check passes');
+    });
+
+    it('grounds the smell test and round budget in the Kshetra config, defaulting when absent', () => {
+      // The fixture carries no gates/maxRoundsPerBead — the schema defaults apply.
+      const flat = (p: string) => p.replace(/\s+/g, ' ');
+      expect(flat(prompt)).toContain('more than ~20 files');
+      expect(flat(prompt)).toContain('(more than 40 files or 1500 changed lines');
+      expect(prompt).toContain('only 3 review rounds');
+      const tuned = buildPlanningPrompt({
+        ...KSHETRA,
+        gates: { diffSize: { level: 'block', maxFiles: 12, maxLines: 400 } },
+        agents: { ...KSHETRA.agents, maxRoundsPerBead: 5 },
+      } as unknown as KshetraConfig);
+      // The file smell never exceeds the real gate.
+      expect(flat(tuned)).toContain('more than ~12 files');
+      expect(flat(tuned)).toContain('(more than 12 files or 400 changed lines');
+      expect(tuned).toContain('only 5 review rounds');
+      // A partial, unparsed diffSize still renders numbers, never `undefined`.
+      const partial = buildPlanningPrompt({
+        ...KSHETRA,
+        gates: { diffSize: { maxFiles: 12 } },
+      } as unknown as KshetraConfig);
+      expect(flat(partial)).toContain('(more than 12 files or 1500 changed lines');
+      expect(partial).not.toContain('undefined');
+    });
+
+    it('stays within its size envelope', () => {
+      // Pre-a32 the prompt was ~7.6k chars, ~10k with the rubric (short-path
+      // fixture, so this bounds the template, not a real Kshetra's interpolated
+      // paths). The rubric must stay short enough to survive alongside the
+      // completion protocol — growing past this is a deliberate decision.
+      expect(prompt.length).toBeLessThan(11_000);
+    });
+  });
 });

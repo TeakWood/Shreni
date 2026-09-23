@@ -178,10 +178,14 @@ const AgentRoleConfigSchema = z.object({
 // superRefine so a new role is validated automatically once added here.
 export const AGENT_ROLES = ['suthradhara', 'silpi', 'viharapala', 'parikshaka'] as const;
 
+// The per-bead Silpi ↔ Viharapala round budget when a config omits it. Exported
+// so Suthradhara's sizing rubric (a32) quotes the same number Sthapathi enforces.
+export const DEFAULT_MAX_ROUNDS_PER_BEAD = 3;
+
 const AgentsConfigSchema = z.object({
   provider: ProviderSchema.default('anthropic'),
   model: z.string().default(DEFAULT_AGENT_MODEL),
-  maxRoundsPerBead: z.number().int().min(1).default(3),
+  maxRoundsPerBead: z.number().int().min(1).default(DEFAULT_MAX_ROUNDS_PER_BEAD),
   suthradhara: AgentRoleConfigSchema.optional(),
   silpi: AgentRoleConfigSchema.optional(),
   viharapala: AgentRoleConfigSchema.optional(),
@@ -268,7 +272,7 @@ export const KshetraConfigSchema = z.object({
   // at runtime — the pack's values were written into stack.* at init.
   pack: z.string().regex(/^[a-z0-9-]+@\d+$/, 'pack must be "<name>@<version>"').optional(),
   conventions: ConventionsConfigSchema.default({ styleGuide: undefined, architecture: undefined }),
-  agents: AgentsConfigSchema.default({ provider: 'anthropic', model: DEFAULT_AGENT_MODEL, maxRoundsPerBead: 3 }),
+  agents: AgentsConfigSchema.default({ provider: 'anthropic', model: DEFAULT_AGENT_MODEL, maxRoundsPerBead: DEFAULT_MAX_ROUNDS_PER_BEAD }),
   priority: PriorityConfigSchema.default({ p0AutoAssign: true, maxConcurrentBeads: 1 }),
   gates: GatesConfigSchema.default(GATES_DEFAULTS),
   watchdog: WatchdogConfigSchema.optional(),
