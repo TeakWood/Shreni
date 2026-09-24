@@ -175,12 +175,21 @@ export interface LotTimeBreakdown {
   lotId: string;
   entrypoint: string | null;
   shreniElapsedMs: number | null;
-  roles: RoleTimeAttribution[];      // agent sessions, by role
-  sessionsMs: number;                // sum of known session durations
+  roles: RoleTimeAttribution[];      // agent sessions, by role — FULL durations (cost view)
+  // Session time on the serial scheduler timeline: the part of each known session
+  // duration that falls inside a WORKING window (Shreni-beads-qqq). Summed.
+  sessionsMs: number;
+  // Session time OUTSIDE any WORKING window — e.g. the un-awaited post-merge
+  // Parikshaka overlapping the drain's IDLE wait. Concurrent with the partition,
+  // so NOT summed (it would double-count). roles[] still includes it.
+  concurrentSessionsMs: number;
   gatesMs: number;                   // sum of round-level gatesElapsedMs (not per-gate)
   gates: GateTimeAttribution[];      // per-gate attribution (not summed into total)
   mergeMs: number;
-  syncMs: number;
+  syncMs: number;                    // syncs that overlap no other counted interval
+  // beads_synced time that overlapped another counted interval (background timer
+  // or prepare sync inside a session/gate/phase) — NOT summed (Shreni-beads-qqq).
+  concurrentSyncMs: number;
   selectMs: number;
   prepareMs: number;
   idleMs: number;                    // idle (poll) time, minus waiting-on-human
@@ -562,11 +571,132 @@ function mergeIntervalsMs(intervals: Array<[number, number]>): number {
   return total;
 }
 
+// A set of wall-clock intervals kept as sorted, disjoint, merged [start,end)
+// pairs (Shreni-beads-qqq) — the part of the timeline already counted.
+class IntervalSet {
+  private readonly segs: Array<[number, number]> = [];
+
+  // Index of the first segment whose end is after `t`.
+  private firstEndingAfter(t: number): number {
+    let lo = 0, hi = this.segs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.segs[mid][1] <= t) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+
+  add(start: number, end: number): void {
+    if (!(end > start)) return;
+    const i = this.firstEndingAfter(start - 1);
+    let j = i;
+    let s = start, e = end;
+    while (j < this.segs.length && this.segs[j][0] <= end) {
+      s = Math.min(s, this.segs[j][0]);
+      e = Math.max(e, this.segs[j][1]);
+      j++;
+    }
+    this.segs.splice(i, j - i, [s, e]);
+  }
+
+  overlaps(start: number, end: number): boolean {
+    const i = this.firstEndingAfter(start);
+    return i < this.segs.length && this.segs[i][0] < end;
+  }
+
+  // The parts of [start,end] not covered by the set.
+  uncovered(start: number, end: number): Array<[number, number]> {
+    const out: Array<[number, number]> = [];
+    let cur = start;
+    for (let i = this.firstEndingAfter(start); i < this.segs.length && this.segs[i][0] < end; i++) {
+      if (this.segs[i][0] > cur) out.push([cur, this.segs[i][0]]);
+      cur = Math.max(cur, this.segs[i][1]);
+    }
+    if (end > cur) out.push([cur, end]);
+    return out;
+  }
+}
+
+// WORKING windows of one lot (Shreni-beads-qqq): from each phase_changed INTO
+// WORKING to the next one OUT of it. A window still open at the lot's last event
+// closes there; an out-of-WORKING transition with no recorded entry (the lot's
+// feed began mid-WORKING) opens at ts - heldMs.
+function workingWindowsOf(
+  lotEvents: LoggedEvent[],
+  parseTs: (ts: string | undefined) => number | null,
+  lastMs: number | null,
+): Array<[number, number]> {
+  const windows: Array<[number, number]> = [];
+  let openAt: number | null = null;
+  for (const e of lotEvents) {
+    if (e.type !== 'phase_changed') continue;
+    const t = parseTs(e.ts);
+    if (t === null) continue;
+    if (e.from === 'WORKING') {
+      const from = openAt ?? t - e.heldMs;
+      if (t > from) windows.push([from, t]);
+      openAt = null;
+    }
+    if (e.to === 'WORKING') openAt = t;
+  }
+  if (openAt !== null && lastMs !== null && lastMs > openAt) windows.push([openAt, lastMs]);
+  return windows;
+}
+
+// The parts of [start,end] that fall inside the given (disjoint) windows.
+function clipToWindows([start, end]: [number, number], windows: Array<[number, number]>): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const [a, b] of windows) {
+    const s = Math.max(start, a), e = Math.min(end, b);
+    if (e > s) out.push([s, e]);
+  }
+  return out;
+}
+
+// Pairs each session closer (run_usage / run_unmetered) with its run_started ts:
+// by sessionId when both carry one, else the oldest unclaimed run_started for the
+// same (runId, beadId, agent). null when no run_started matches.
+function pairableRunStarts(
+  lotEvents: LoggedEvent[],
+  parseTs: (ts: string | undefined) => number | null,
+): { take(closer: LoggedEvent): number | null } {
+  type Start = { ms: number | null; sessionId?: string; used: boolean };
+  const bySession = new Map<string, Start>();
+  const byKey = new Map<string, Start[]>();
+  const keyOf = (e: LoggedEvent): string => {
+    const x = e as { runId?: string; beadId?: string; agent?: string };
+    return `${x.runId ?? ''}|${x.beadId ?? ''}|${x.agent ?? ''}`;
+  };
+  for (const e of lotEvents) {
+    if (e.type !== 'run_started') continue;
+    const st: Start = { ms: parseTs(e.ts), sessionId: e.sessionId, used: false };
+    if (e.sessionId) bySession.set(e.sessionId, st);
+    const k = keyOf(e);
+    let q = byKey.get(k);
+    if (!q) { q = []; byKey.set(k, q); }
+    q.push(st);
+  }
+  return {
+    take(closer: LoggedEvent): number | null {
+      const sid = (closer as { sessionId?: string }).sessionId;
+      let st = sid ? bySession.get(sid) : undefined;
+      if (st?.used) st = undefined;
+      if (!st) st = byKey.get(keyOf(closer))?.find(x => !x.used && (!sid || !x.sessionId || x.sessionId === sid));
+      if (!st) return null;
+      st.used = true;
+      return st.ms;
+    },
+  };
+}
+
 // Per-lot time breakdown (epic hto / Study A3). PURE over the feeds. For each lot
 // (worker_started, keyed by envelope lotId) it computes Shreni elapsed (wall-clock
 // span) and the process-time breakdown beneath it from durations recorded at the
 // site — never re-measured. `unexplainedMs` = elapsed minus the attributed parts,
 // so parts + unexplained == elapsed by construction (the validity check).
+// The summed parts are the SERIAL scheduler timeline (Shreni-beads-qqq): work
+// that runs concurrently with it — session time outside WORKING, syncs that
+// overlap another counted interval — is reported in concurrent*Ms, never summed.
 export function computeLotBreakdowns(
   events: LoggedEvent[],
   notifications: Notification[],
@@ -610,6 +740,13 @@ export function computeLotBreakdowns(
     // run_unmetered closes the sessions that produced no usage record (abort,
     // spawn failure, token-less error — Shreni-beads-27a); each run_started closes
     // with exactly one of the two, so summing both never double-counts.
+    // roles[] keeps FULL durations (the cost view); the summed sessionsMs is the
+    // serial slice only, derived below once the other counted intervals are known.
+    const starts = pairableRunStarts(lotEvents, parseTs);
+    // Intervals already counted in the summed partition (Shreni-beads-qqq).
+    const counted = new IntervalSet();
+    // Sessions with a known duration, placed on the wall clock when possible.
+    const placedSessions: Array<{ agent: string; start: number; end: number; durationMs: number }> = [];
     const roleMap = new Map<string, RoleTimeAttribution>();
     let sessionsMs = 0;
     let hasUnknownDurations = false;
@@ -618,8 +755,21 @@ export function computeLotBreakdowns(
       let r = roleMap.get(e.agent);
       if (!r) { r = { agent: e.agent, sessions: 0, durationMs: 0, unknownSessions: 0 }; roleMap.set(e.agent, r); }
       r.sessions++;
-      if (typeof e.durationMs === 'number') { r.durationMs += e.durationMs; sessionsMs += e.durationMs; }
-      else { r.unknownSessions++; hasUnknownDurations = true; }
+      const sessionStartMs = starts.take(e);
+      if (typeof e.durationMs !== 'number') {
+        r.unknownSessions++; hasUnknownDurations = true;
+        continue;
+      }
+      r.durationMs += e.durationMs;
+      const endMs = parseTs(e.ts);
+      if (sessionStartMs !== null && endMs !== null && endMs >= sessionStartMs) {
+        placedSessions.push({ agent: e.agent, start: sessionStartMs, end: endMs, durationMs: e.durationMs });
+      } else {
+        // Unplaceable (no matching run_started — pre-228 data, a suthradhara run):
+        // legacy behaviour, its whole duration counts in the partition.
+        sessionsMs += e.durationMs;
+        if (endMs !== null) counted.add(endMs - e.durationMs, endMs);
+      }
     }
     const roles = [...roleMap.values()].sort((a, b) => a.agent.localeCompare(b.agent));
 
@@ -628,7 +778,11 @@ export function computeLotBreakdowns(
     // per-gate figures are attribution only.
     let gatesMs = 0;
     for (const e of lotEvents) {
-      if (e.type === 'silpi_done' && typeof e.gatesElapsedMs === 'number') gatesMs += e.gatesElapsedMs;
+      if (e.type === 'silpi_done' && typeof e.gatesElapsedMs === 'number') {
+        gatesMs += e.gatesElapsedMs;
+        const t = parseTs(e.ts); // silpi_done is emitted as the gate block ends
+        if (t !== null) counted.add(t - e.gatesElapsedMs, t);
+      }
     }
     const gateMap = new Map<string, GateTimeAttribution>();
     for (const e of lotEvents) {
@@ -641,21 +795,36 @@ export function computeLotBreakdowns(
     }
     const gates = [...gateMap.values()].sort((a, b) => a.gate.localeCompare(b.gate));
 
-    let mergeMs = 0, syncMs = 0;
+    let mergeMs = 0;
     for (const e of lotEvents) {
-      if (e.type === 'merge_done' && typeof e.durationMs === 'number') mergeMs += e.durationMs;
-      else if (e.type === 'beads_synced' && typeof e.durationMs === 'number') syncMs += e.durationMs;
+      if (e.type === 'merge_done' && typeof e.durationMs === 'number') {
+        mergeMs += e.durationMs;
+        const t = parseTs(e.ts);
+        if (t !== null) counted.add(t - e.durationMs, t);
+      }
     }
 
     // Select / prepare / idle from phase_changed heldMs, keyed by the phase LEFT.
     // WORKING heldMs is intentionally NOT a line: that time is decomposed into
     // sessions/gates/merge, and any remainder is the agent overhead in unexplained.
+    // Each phase is placed at [ts - heldMs, ts] — except a coalesced IDLE→SELECTING
+    // (empty polls folded into one event, emitted late at the next real transition
+    // or at shutdown): its idle is spread over the whole span since the scheduler
+    // last entered IDLE, so that span is what it covers on the wall clock.
     let selectMs = 0, prepareMs = 0, idleMs = 0;
+    let idleEnteredAt: number | null = null;
     for (const e of lotEvents) {
       if (e.type !== 'phase_changed') continue;
+      const t = parseTs(e.ts);
       if (e.from === 'SELECTING') selectMs += e.heldMs;
       else if (e.from === 'PREPARING') prepareMs += e.heldMs;
       else if (e.from === 'IDLE') idleMs += e.heldMs;
+      if (t !== null && (e.from === 'SELECTING' || e.from === 'PREPARING' || e.from === 'IDLE')) {
+        const from = e.from === 'IDLE' && idleEnteredAt !== null ? Math.min(idleEnteredAt, t - e.heldMs) : t - e.heldMs;
+        counted.add(from, t);
+      }
+      if (t !== null && e.to === 'IDLE') idleEnteredAt = t;
+      else if (e.from === 'IDLE') idleEnteredAt = null;
     }
 
     // Waiting on human: from each escalation/stuck notification within this lot's
@@ -665,6 +834,9 @@ export function computeLotBreakdowns(
     // and OVERLAPPING windows are merged, so it is counted once — not double-counted
     // across escalations that share one resolution (epic hto decision 6).
     let waitingOnHumanMs = 0;
+    // Kept out of `counted` until the sessions are placed: other beads keep
+    // working while one waits on a human, and those sessions are serial work.
+    const waitingWindows: Array<[number, number]> = [];
     if (startMs !== null) {
       const lotEndMs = lastMs ?? startMs;
       const windows: Array<[number, number]> = [];
@@ -684,6 +856,55 @@ export function computeLotBreakdowns(
         if (endMs > notifMs) windows.push([notifMs, endMs]);
       }
       waitingOnHumanMs = mergeIntervalsMs(windows);
+      waitingWindows.push(...windows);
+    }
+
+    // Sessions on the serial timeline (Shreni-beads-qqq): a session runs from its
+    // run_started.ts to its closer's ts. Only the part inside a WORKING window,
+    // and not already covered by other counted work, is summed — so the un-awaited
+    // post-merge Parikshaka's overlap with the drain's IDLE, or with the next
+    // bead's WORKING, is never counted twice. The rest is concurrentSessionsMs.
+    // With no phase data at all (pre-A3 feeds) sessions keep the legacy full count.
+    let concurrentSessionsMs = 0;
+    const hasPhases = lotEvents.some(e => e.type === 'phase_changed');
+    const workingWindows = workingWindowsOf(lotEvents, parseTs, lastMs);
+    // Awaited sessions first, then the fire-and-forget Parikshaka: where they
+    // overlap, the un-awaited one is the concurrent side.
+    const deferred = (a: { agent: string }): number => (a.agent === 'parikshaka' ? 1 : 0);
+    placedSessions.sort((a, b) => deferred(a) - deferred(b) || a.start - b.start);
+    for (const sess of placedSessions) {
+      if (!hasPhases) {
+        sessionsMs += sess.durationMs;
+        counted.add(sess.end - sess.durationMs, sess.end);
+        continue;
+      }
+      const serial = clipToWindows([sess.start, sess.end], workingWindows)
+        .flatMap(([a, b]) => counted.uncovered(a, b));
+      const serialMs = Math.min(sess.durationMs, serial.reduce((acc, [a, b]) => acc + (b - a), 0));
+      sessionsMs += serialMs;
+      concurrentSessionsMs += sess.durationMs - serialMs;
+      for (const [a, b] of serial) counted.add(a, b);
+    }
+    for (const [a, b] of waitingWindows) counted.add(a, b);
+
+    // Syncs: the 5-min background timer and prepareTask's own sync run DURING
+    // other counted work (sessions, gates, prepare, idle). A sync counts toward
+    // the partition only when it overlaps no already-counted interval; otherwise
+    // it is concurrent (Shreni-beads-qqq). Accepted syncs join the counted set in
+    // start order, so two syncs overlapping each other count once.
+    let syncMs = 0, concurrentSyncMs = 0;
+    const syncs: Array<[number, number, number]> = [];
+    for (const e of lotEvents) {
+      if (e.type !== 'beads_synced' || typeof e.durationMs !== 'number') continue;
+      const t = parseTs(e.ts);
+      if (t === null) { syncMs += e.durationMs; continue; } // unplaceable: legacy
+      syncs.push([t - e.durationMs, t, e.durationMs]);
+    }
+    syncs.sort((a, b) => a[0] - b[0]);
+    for (const [s0, s1, d] of syncs) {
+      if (counted.overlaps(s0, s1)) { concurrentSyncMs += d; continue; }
+      syncMs += d;
+      counted.add(s0, s1);
     }
     // The wait happened while the worker polled (phase IDLE), so subtract it from
     // idle to attribute it once — to waiting-on-human, not idle (epic hto).
@@ -702,8 +923,8 @@ export function computeLotBreakdowns(
       lotId,
       entrypoint: typeof entrypointRaw === 'string' ? entrypointRaw : null,
       shreniElapsedMs,
-      roles, sessionsMs, gatesMs, gates,
-      mergeMs, syncMs, selectMs, prepareMs,
+      roles, sessionsMs, concurrentSessionsMs, gatesMs, gates,
+      mergeMs, syncMs, concurrentSyncMs, selectMs, prepareMs,
       idleMs: idleReported, waitingOnHumanMs,
       unexplainedMs, unexplainedPct, hasUnknownDurations,
     });

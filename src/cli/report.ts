@@ -252,7 +252,9 @@ function renderLotTime(lot: LotTimeBreakdown): string[] {
   const sessionsDetail = lot.roles.length
     ? lot.roles.map(r => `${r.agent} ${fmtDuration(r.durationMs)} (${r.sessions})${r.unknownSessions ? ` +${r.unknownSessions} unknown` : ''}`).join(', ')
     : '';
-  lines.push(`    agent sessions    ${fmtDuration(lot.sessionsMs)}${sessionsDetail ? `   ${sessionsDetail}` : ''}`);
+  // The headline is the serial slice (summed); the per-role detail is the FULL
+  // session time incl. concurrent work (the cost view), so it is labelled as such.
+  lines.push(`    agent sessions    ${fmtDuration(lot.sessionsMs)}${sessionsDetail ? `   by role (full): ${sessionsDetail}` : ''}`);
   const gatesDetail = lot.gates.length
     ? lot.gates.map(g => `${g.gate} ${fmtDuration(g.durationMs)} (${g.runs})`).join(', ')
     : '';
@@ -261,6 +263,11 @@ function renderLotTime(lot: LotTimeBreakdown): string[] {
   lines.push(`    select / prepare  ${fmtDuration(lot.selectMs)} / ${fmtDuration(lot.prepareMs)}`);
   lines.push(`    idle (poll)       ${fmtDuration(lot.idleMs)}`);
   lines.push(`    waiting on human  ${fmtDuration(lot.waitingOnHumanMs)}`);
+  // Concurrent with the serial timeline above (Shreni-beads-qqq) — shown for
+  // completeness but NOT part of the sum, so it never inflates the residual.
+  lines.push(
+    `    concurrent        sessions ${fmtDuration(lot.concurrentSessionsMs)} + sync ${fmtDuration(lot.concurrentSyncMs)}   (overlapping; not summed)`,
+  );
   const pct = lot.unexplainedPct === null ? '' : `  (${fmtPct(lot.unexplainedPct)})`;
   lines.push(`    unexplained       ${fmtDuration(lot.unexplainedMs)}${pct}`);
   if (lot.hasUnknownDurations) {

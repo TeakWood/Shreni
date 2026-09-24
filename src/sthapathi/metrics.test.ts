@@ -575,6 +575,161 @@ describe('computeLotBreakdowns (epic hto / Study A3)', () => {
     const [lot] = computeMetrics({ events, notifications, interactions }).lots;
     expect(lot.waitingOnHumanMs).toBe(30 * 60 * 1000); // 00:30 → 01:00 (lot end), not → 05:00
   });
+
+  // ── concurrent work is not double-counted (Shreni-beads-qqq) ──
+  const runStarted = (ts: string, agent: string, sessionId: string): LoggedEvent =>
+    le('run_started', ts, { beadId: 'b1', agent, provider: 'anthropic', model: 'm', manifestHash: 'h', sessionId, runId: 'r1' });
+  const runUsage = (ts: string, agent: string, sessionId: string, durationMs: number): LoggedEvent =>
+    le('run_usage', ts, { beadId: 'b1', agent, provider: 'anthropic', model: 'm', inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, outcome: 'ok', durationMs, sessionId, runId: 'r1' });
+  const phase = (ts: string, from: string, to: string, heldMs: number): LoggedEvent =>
+    le('phase_changed', ts, { from, to, heldMs });
+  const sync = (ts: string, durationMs: number): LoggedEvent => le('beads_synced', ts, { durationMs });
+  const partSum = (lot: ReturnType<typeof computeMetrics>['lots'][number]): number =>
+    lot.sessionsMs + lot.gatesMs + lot.mergeMs + lot.syncMs + lot.selectMs +
+    lot.prepareMs + lot.idleMs + lot.waitingOnHumanMs;
+
+  it('(a) does not double-count a background sync that runs inside a session', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'drain', subject: {}, process: {}, labels: {} }),
+      phase('2026-09-15T00:00:00.000Z', 'PREPARING', 'WORKING', 0),
+      runStarted('2026-09-15T00:00:00.000Z', 'silpi', 's1'),
+      sync('2026-09-15T00:01:00.000Z', 6000),          // inside the session
+      runUsage('2026-09-15T00:02:00.000Z', 'silpi', 's1', 120000),
+      sync('2026-09-15T00:02:30.000Z', 5000),          // after it: overlaps nothing counted
+      phase('2026-09-15T00:03:00.000Z', 'WORKING', 'IDLE', 180000),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.sessionsMs).toBe(120000);
+    expect(lot.syncMs).toBe(5000);
+    expect(lot.concurrentSyncMs).toBe(6000);
+    expect(lot.concurrentSessionsMs).toBe(0);
+    expect(lot.unexplainedMs).toBe(180000 - 125000);
+    expect(partSum(lot) + (lot.unexplainedMs ?? 0)).toBe(lot.shreniElapsedMs);
+  });
+
+  it('counts two mutually-overlapping syncs outside other work once', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'drain', subject: {}, process: {}, labels: {} }),
+      sync('2026-09-15T00:00:10.000Z', 6000),  // [4s,10s]
+      sync('2026-09-15T00:00:12.000Z', 6000),  // [6s,12s] overlaps the first
+      phase('2026-09-15T00:00:20.000Z', 'IDLE', 'SELECTING', 5000),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.syncMs).toBe(6000);
+    expect(lot.concurrentSyncMs).toBe(6000);
+  });
+
+  it('(b) does not double-count a Parikshaka session that outlives WORKING into IDLE', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'drain', subject: {}, process: {}, labels: {} }),
+      phase('2026-09-15T00:00:00.000Z', 'PREPARING', 'WORKING', 0),
+      runStarted('2026-09-15T00:00:00.000Z', 'silpi', 's1'),
+      runUsage('2026-09-15T00:01:00.000Z', 'silpi', 's1', 60000),
+      // post-merge, not awaited: starts 10s before WORKING ends, runs 4m into IDLE
+      runStarted('2026-09-15T00:01:00.000Z', 'parikshaka', 'p1'),
+      phase('2026-09-15T00:01:10.000Z', 'WORKING', 'IDLE', 70000),
+      runUsage('2026-09-15T00:05:10.000Z', 'parikshaka', 'p1', 250000),
+      phase('2026-09-15T00:06:00.000Z', 'IDLE', 'SELECTING', 290000),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    // Only the 10s inside WORKING is on the serial timeline; IDLE owns the rest.
+    expect(lot.sessionsMs).toBe(60000 + 10000);
+    expect(lot.concurrentSessionsMs).toBe(240000);
+    expect(lot.idleMs).toBe(290000);
+    // Per-role totals keep the full duration (cost view).
+    expect(lot.roles.find(r => r.agent === 'parikshaka')).toMatchObject({ sessions: 1, durationMs: 250000 });
+    expect(lot.unexplainedMs).toBe(360000 - (70000 + 290000)); // 0 — no double count
+    expect(partSum(lot) + (lot.unexplainedMs ?? 0)).toBe(lot.shreniElapsedMs);
+  });
+
+  it('does not double-count a Parikshaka that overlaps the NEXT bead\'s WORKING window', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'drain', subject: {}, process: {}, labels: {} }),
+      phase('2026-09-15T00:00:00.000Z', 'PREPARING', 'WORKING', 0),
+      runStarted('2026-09-15T00:00:00.000Z', 'silpi', 's1'),
+      runUsage('2026-09-15T00:01:00.000Z', 'silpi', 's1', 60000),
+      runStarted('2026-09-15T00:01:00.000Z', 'parikshaka', 'p1'),
+      phase('2026-09-15T00:01:10.000Z', 'WORKING', 'IDLE', 70000),
+      phase('2026-09-15T00:01:10.000Z', 'IDLE', 'SELECTING', 0),
+      phase('2026-09-15T00:01:10.000Z', 'SELECTING', 'PREPARING', 0),
+      phase('2026-09-15T00:01:10.000Z', 'PREPARING', 'WORKING', 0),
+      runStarted('2026-09-15T00:01:10.000Z', 'silpi', 's2'),
+      runUsage('2026-09-15T00:02:10.000Z', 'parikshaka', 'p1', 70000), // 60s inside bead 2's silpi
+      runUsage('2026-09-15T00:03:10.000Z', 'silpi', 's2', 120000),
+      phase('2026-09-15T00:03:10.000Z', 'WORKING', 'IDLE', 120000),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.sessionsMs).toBe(60000 + 10000 + 120000);
+    expect(lot.concurrentSessionsMs).toBe(60000); // Parikshaka's overlap with s2
+    expect(lot.unexplainedMs).toBe(0);
+  });
+
+  it('places a coalesced (late-emitted) idle over the whole IDLE span when classifying syncs', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'worker', subject: {}, process: {}, labels: {} }),
+      phase('2026-09-15T00:00:00.000Z', 'PREPARING', 'WORKING', 0),
+      phase('2026-09-15T00:01:00.000Z', 'WORKING', 'IDLE', 60000),
+      sync('2026-09-15T00:02:00.000Z', 5000), // a background sync during the real idle
+      // Empty polls coalesced and flushed at shutdown: 3m of idle, 1m of discarded
+      // empty-poll select time, so [ts - heldMs, ts] would miss the sync.
+      le('phase_changed', '2026-09-15T00:05:00.000Z', { from: 'IDLE', to: 'SELECTING', heldMs: 180000, polls: 4 }),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.syncMs).toBe(0);
+    expect(lot.concurrentSyncMs).toBe(5000);
+  });
+
+  it('keeps other beads\' sessions serial while an escalated bead waits on a human', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'drain', subject: {}, process: {}, labels: {} }),
+      phase('2026-09-15T00:01:00.000Z', 'PREPARING', 'WORKING', 0),
+      runStarted('2026-09-15T00:01:00.000Z', 'silpi', 's1'),
+      runUsage('2026-09-15T00:03:00.000Z', 'silpi', 's1', 120000),
+      phase('2026-09-15T00:03:00.000Z', 'WORKING', 'IDLE', 120000),
+    ];
+    // b0 escalated before b1's session and was never answered within the lot.
+    const notifications: Notification[] = [
+      { ts: '2026-09-15T00:00:30.000Z', event: ESCALATION_EVENT, beadId: 'b0', message: 'e' },
+    ];
+    const [lot] = computeMetrics({ events, notifications }).lots;
+    expect(lot.sessionsMs).toBe(120000);
+    expect(lot.concurrentSessionsMs).toBe(0);
+  });
+
+  it('pairs sessions without a sessionId by run/bead/agent in order', () => {
+    const events: LoggedEvent[] = [
+      le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'drain', subject: {}, process: {}, labels: {} }),
+      phase('2026-09-15T00:00:00.000Z', 'PREPARING', 'WORKING', 0),
+      le('run_started', '2026-09-15T00:00:00.000Z', { beadId: 'b1', agent: 'silpi', provider: 'a', model: 'm', manifestHash: 'h', runId: 'r1' }),
+      le('run_unmetered', '2026-09-15T00:00:30.000Z', { beadId: 'b1', agent: 'silpi', provider: 'a', model: 'm', cause: 'aborted', durationMs: 30000, runId: 'r1' }),
+      phase('2026-09-15T00:00:20.000Z', 'WORKING', 'IDLE', 20000),
+      phase('2026-09-15T00:01:00.000Z', 'IDLE', 'SELECTING', 40000),
+    ];
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.sessionsMs).toBe(20000);
+    expect(lot.concurrentSessionsMs).toBe(10000);
+  });
+
+  it('(c) golden: the archived Bantu lot cf5d9478 reconciles to ~+78,862 ms (+2.08%)', () => {
+    // Trimmed from the archived shakedown feed (2026-09-23): only the events the
+    // breakdown reads, with identifiers and free text redacted.
+    const path = join(__dirname, '__fixtures__', 'lot-cf5d9478-golden.jsonl');
+    const events = readFileSync(path, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l) as LoggedEvent);
+    const [lot] = computeMetrics({ events }).lots;
+    expect(lot.shreniElapsedMs).toBe(3785836);
+    // Per-role totals are unchanged (cost view): 2,010,194 + 639,000 + 270,772.
+    expect(lot.roles.reduce((a, r) => a + r.durationMs, 0)).toBe(2919966);
+    // Parikshaka: 8,339 ms inside WORKING, the rest overlaps the drain's IDLE.
+    expect(lot.sessionsMs).toBe(2657533);
+    expect(lot.concurrentSessionsMs).toBe(262433);
+    // 2 of 19 syncs sit outside every other counted interval.
+    expect(lot.syncMs).toBe(12779);
+    expect(lot.concurrentSyncMs).toBe(104329);
+    expect(lot).toMatchObject({ gatesMs: 498186, mergeMs: 3815, selectMs: 6926, prepareMs: 251914, idleMs: 275821 });
+    expect(lot.unexplainedMs).toBe(78862);
+    expect(lot.unexplainedPct).toBeCloseTo(0.0208, 4);
+    expect(partSum(lot) + (lot.unexplainedMs ?? 0)).toBe(lot.shreniElapsedMs);
+  });
 });
 
 // ── ablation exclusion + reporting (epic 8wi / Study B1) ──────────────────────

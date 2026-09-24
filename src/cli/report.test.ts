@@ -199,6 +199,18 @@ const LOT_EVENTS: LoggedEvent[] = [
   le('silpi_done', '2026-09-15T00:02:00.000Z', { beadId: 'b1', round: 1, summary: '', confidence: 1, files: [], lintPassed: true, testsPassed: true, gatesElapsedMs: 50000 }),
   le('task_done', '2026-09-15T00:05:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
 ];
+// A post-merge Parikshaka that outlives WORKING by 60s into IDLE, and a sync
+// inside that IDLE (Shreni-beads-qqq): both concurrent, neither summed.
+const CONCURRENT_EVENTS: LoggedEvent[] = [
+  le('worker_started', '2026-09-15T00:00:00.000Z', { entrypoint: 'drain', subject: {}, process: {}, labels: {} }),
+  le('phase_changed', '2026-09-15T00:00:00.000Z', { from: 'PREPARING', to: 'WORKING', heldMs: 0 }),
+  le('run_started', '2026-09-15T00:01:00.000Z', { beadId: 'b1', agent: 'parikshaka', provider: 'anthropic', model: 'm', manifestHash: 'h', sessionId: 'p1' }),
+  le('phase_changed', '2026-09-15T00:01:10.000Z', { from: 'WORKING', to: 'IDLE', heldMs: 70000 }),
+  le('beads_synced', '2026-09-15T00:01:30.000Z', { durationMs: 5000 }),
+  le('run_usage', '2026-09-15T00:02:10.000Z', { beadId: 'b1', agent: 'parikshaka', provider: 'anthropic', model: 'm', inputTokens: 0, outputTokens: 0, costUsd: 0, priced: true, outcome: 'ok', durationMs: 70000, sessionId: 'p1' }),
+  le('phase_changed', '2026-09-15T00:03:00.000Z', { from: 'IDLE', to: 'SELECTING', heldMs: 110000 }),
+  le('task_done', '2026-09-15T00:03:00.000Z', { beadId: 'b1', title: 'b1', approved: true, rounds: 1 }),
+];
 
 describe('renderReport — time breakdown (epic hto)', () => {
   it('renders a per-lot breakdown with elapsed, sessions, and the unexplained residual', () => {
@@ -208,6 +220,13 @@ describe('renderReport — time breakdown (epic hto)', () => {
     expect(out).toContain('agent sessions    2m 0s');
     expect(out).toContain('gates             50.0s');
     expect(out).toContain('unexplained');
+  });
+
+  it('renders the concurrent (not-summed) session and sync time (Shreni-beads-qqq)', () => {
+    const out = renderReport(K, computeMetrics({ events: CONCURRENT_EVENTS }));
+    expect(out).toContain('agent sessions    10.0s');
+    expect(out).toContain('by role (full): parikshaka 1m 10s (1)');
+    expect(out).toContain('concurrent        sessions 1m 0s + sync 5.0s   (overlapping; not summed)');
   });
 
   it('omits the breakdown for pre-B2 data (no lots)', () => {
@@ -260,6 +279,23 @@ describe('runReport --json (epic hto)', () => {
     expect(parsed.lots[0].shreniElapsedMs).toBe(300000);
     expect(parsed.lots[0].sessionsMs).toBe(120000);
     expect(typeof parsed.lots[0].unexplainedMs).toBe('number');
+    expect(parsed.lots[0]).toMatchObject({ concurrentSessionsMs: 0, concurrentSyncMs: 0 });
+  });
+
+  it('includes the concurrent fields in --json (Shreni-beads-qqq)', () => {
+    mockLoadRegistry.mockReturnValue([KSHETRA]);
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path.endsWith('activity.jsonl')) return CONCURRENT_EVENTS.map(e => JSON.stringify(e)).join('\n') + '\n';
+      const e = new Error('ENOENT') as NodeJS.ErrnoException;
+      e.code = 'ENOENT';
+      throw e;
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
+    const printed = log.mock.calls.map(c => c[0]).join('\n');
+    log.mockRestore();
+    const parsed = JSON.parse(printed) as { lots: Array<Record<string, number>> };
+    expect(parsed.lots[0]).toMatchObject({ sessionsMs: 10000, concurrentSessionsMs: 60000, syncMs: 0, concurrentSyncMs: 5000 });
   });
 
   it('exposes perSessionContext, one row per agent session of a run (Shreni-beads-6eg)', () => {
