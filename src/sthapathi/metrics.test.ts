@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { computeMetrics, computeTurnSeries, ESCALATION_EVENT, STUCK_EVENT } from './metrics.js';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { computeMetrics, computeTurnSeries, ESCALATION_EVENT, MIXED_AGENT, STUCK_EVENT } from './metrics.js';
 import type { LoggedEvent } from './activity-log.js';
 import type { Notification } from './notifications.js';
 import type { UsageEntry } from '../ext/types.js';
@@ -108,9 +110,9 @@ describe('computeTurnSeries (epic 408/A1 — E1 Figure 1 input)', () => {
       turn('b1', 'run-1', 1, 2000),
     ]);
     expect(rows).toEqual([
-      { runId: 'run-1', beadId: 'b1', agent: 'silpi', turnIndex: 0, effectiveContext: 1000, sidechain: false, compactedAfter: false },
-      { runId: 'run-1', beadId: 'b1', agent: 'silpi', turnIndex: 0, effectiveContext: 300, sidechain: true, compactedAfter: false },
-      { runId: 'run-1', beadId: 'b1', agent: 'silpi', turnIndex: 1, effectiveContext: 2000, sidechain: false, compactedAfter: false },
+      { runId: 'run-1', sessionId: null, beadId: 'b1', agent: 'silpi', turnIndex: 0, effectiveContext: 1000, sidechain: false, compactedAfter: false },
+      { runId: 'run-1', sessionId: null, beadId: 'b1', agent: 'silpi', turnIndex: 0, effectiveContext: 300, sidechain: true, compactedAfter: false },
+      { runId: 'run-1', sessionId: null, beadId: 'b1', agent: 'silpi', turnIndex: 1, effectiveContext: 2000, sidechain: false, compactedAfter: false },
     ]);
   });
 
@@ -131,6 +133,151 @@ describe('computeTurnSeries (epic 408/A1 — E1 Figure 1 input)', () => {
   });
 });
 
+// --- Shreni-beads-6eg: per-session context metrics ---
+// A trimmed copy of a real run from the Bantu shakedown archive: every
+// context-bearing event (task_claimed, run_started, run_usage, turn_usage,
+// silpi_done, viharapala_done, task_done) of run ae11a3cd, which spans a Silpi, a
+// Viharapala and a post-merge Parikshaka session. Long free-text fields (summary,
+// files, mustFix) are blanked; nothing else is altered.
+const GOLDEN_RUN = 'ae11a3cd-cf37-4944-99d6-e62d84e7600d';
+function goldenEvents(): LoggedEvent[] {
+  const path = join(__dirname, '__fixtures__', 'bantu-vvx-run.activity.jsonl');
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l) as LoggedEvent);
+}
+// The same run as it would have been logged before Shreni-beads-228: no sessionId.
+function legacyGoldenEvents(): LoggedEvent[] {
+  return goldenEvents().map(e => {
+    const { sessionId: _drop, ...rest } = e as LoggedEvent & { sessionId?: string };
+    return rest as LoggedEvent;
+  });
+}
+
+describe('computeMetrics — per-session context (Shreni-beads-6eg)', () => {
+  it('(a) splits one run into its silpi / viharapala / parikshaka sessions (golden Bantu run)', () => {
+    const m = computeMetrics({ events: goldenEvents() });
+    expect(m.perSessionContext).toEqual([
+      {
+        sessionId: '60f66c61-967a-41a4-9655-27f2b3dea895', runId: GOLDEN_RUN, beadId: 'Bantu-beads-vvx', agent: 'silpi',
+        peakContext: 175899, contextWindow: 200000, contextPressure: 0.8795, compactions: 0, turns: 94,
+      },
+      {
+        sessionId: 'f8abbc5a-6692-4282-8e50-a36812988553', runId: GOLDEN_RUN, beadId: 'Bantu-beads-vvx', agent: 'viharapala',
+        peakContext: 122069, contextWindow: 200000, contextPressure: 0.6103, compactions: 0, turns: 43,
+      },
+      {
+        sessionId: 'cc343d48-e2c3-42c3-9bf9-bc593bc3cf39', runId: GOLDEN_RUN, beadId: 'Bantu-beads-vvx', agent: 'parikshaka',
+        peakContext: 99944, contextWindow: 200000, contextPressure: 0.4997, compactions: 0, turns: 20,
+      },
+    ]);
+  });
+
+  it('(b) labels the run that spans several agents as mixed, keeping the merged per-run figures', () => {
+    const m = computeMetrics({ events: goldenEvents() });
+    expect(m.perRunContext).toEqual([
+      {
+        runId: GOLDEN_RUN, beadId: 'Bantu-beads-vvx', agent: MIXED_AGENT,
+        peakContext: 175899, turns: 157, compactions: 0, contextWindow: 200000,
+      },
+    ]);
+    expect(MIXED_AGENT).toBe('mixed');
+  });
+
+  it('(c) legacy data without sessionId falls back to one per-run row', () => {
+    const m = computeMetrics({ events: legacyGoldenEvents() });
+    expect(m.perRunContext).toEqual([
+      {
+        runId: GOLDEN_RUN, beadId: 'Bantu-beads-vvx', agent: MIXED_AGENT,
+        peakContext: 175899, turns: 157, compactions: 0, contextWindow: 200000,
+      },
+    ]);
+    expect(m.perSessionContext).toEqual([
+      {
+        sessionId: null, runId: GOLDEN_RUN, beadId: 'Bantu-beads-vvx', agent: MIXED_AGENT,
+        peakContext: 175899, contextWindow: 200000, contextPressure: 0.8795, compactions: 0, turns: 157,
+      },
+    ]);
+  });
+
+  it('a single-agent run keeps its agent label on both the run and the session', () => {
+    const m = computeMetrics({ events: [turn('b1', 'run-1', 0, 1000), runUsage('b1', 'run-1', { contextWindow: 200000 })] });
+    expect(m.perRunContext[0].agent).toBe('silpi');
+    expect(m.perSessionContext).toEqual([
+      { sessionId: null, runId: 'run-1', beadId: 'b1', agent: 'silpi', peakContext: 1000, contextWindow: 200000, contextPressure: 0.005, compactions: 0, turns: 1 },
+    ]);
+  });
+
+  it('attributes compactions to their own session and excludes sidechain turns per session', () => {
+    const s = (e: LoggedEvent, sessionId: string): LoggedEvent => ({ ...e, sessionId } as LoggedEvent);
+    const m = computeMetrics({
+      events: [
+        s(turn('b1', 'run-1', 0, 5000), 'sa'),
+        s(turn('b1', 'run-1', 0, 999999, { sidechain: true }), 'sa'),
+        s(compacted('b1', 'run-1', 0, 150000), 'sa'),
+        s(turn('b1', 'run-1', 0, 7000, { agent: 'viharapala' }), 'sb'),
+      ],
+    });
+    expect(m.perSessionContext.map(r => [r.sessionId, r.agent, r.peakContext, r.turns, r.compactions, r.contextPressure])).toEqual([
+      ['sa', 'silpi', 150000, 1, 1, null],
+      ['sb', 'viharapala', 7000, 1, 0, null],
+    ]);
+    expect(m.perRunContext[0]).toMatchObject({ agent: MIXED_AGENT, peakContext: 150000, turns: 2, compactions: 1 });
+  });
+});
+
+describe('computeMetrics — overlapping post-merge Parikshaka (Shreni-beads-6eg)', () => {
+  it('rolls a Parikshaka session stamped with the NEXT bead\'s runId up under its own bead', () => {
+    const s = (e: LoggedEvent, sessionId: string): LoggedEvent => ({ ...e, sessionId } as LoggedEvent);
+    const m = computeMetrics({
+      events: [
+        s(turn('b1', 'run-1', 0, 1000), 's1'),
+        // b1's async Parikshaka is still running after b2 was claimed (run-2).
+        s(turn('b2', 'run-2', 0, 2000), 's2'),
+        s(turn('b1', 'run-2', 0, 9000, { agent: 'parikshaka' }), 's3'),
+      ],
+    });
+    expect(m.perSessionContext.map(r => [r.beadId, r.runId, r.sessionId, r.agent])).toEqual([
+      ['b1', 'run-1', 's1', 'silpi'],
+      ['b1', 'run-2', 's3', 'parikshaka'],
+      ['b2', 'run-2', 's2', 'silpi'],
+    ]);
+    expect(m.perBeadContext).toEqual([
+      { beadId: 'b1', peakContext: 9000, turns: 2, compactions: 0, contextWindow: null },
+      { beadId: 'b2', peakContext: 2000, turns: 1, compactions: 0, contextWindow: null },
+    ]);
+    // The per-run view still merges by runId (kept for compatibility).
+    expect(m.perRunContext.find(r => r.runId === 'run-2')).toMatchObject({ beadId: 'b2', agent: MIXED_AGENT, turns: 2 });
+  });
+});
+
+describe('computeTurnSeries — sessionId (Shreni-beads-6eg)', () => {
+  it('(d) carries each turn\'s sessionId, in stream order (golden Bantu run)', () => {
+    const rows = computeTurnSeries(goldenEvents());
+    expect(rows).toHaveLength(157);
+    const counts = new Map<string | null, number>();
+    for (const r of rows) counts.set(r.sessionId, (counts.get(r.sessionId) ?? 0) + 1);
+    expect([...counts]).toEqual([
+      ['60f66c61-967a-41a4-9655-27f2b3dea895', 94],
+      ['f8abbc5a-6692-4282-8e50-a36812988553', 43],
+      ['cc343d48-e2c3-42c3-9bf9-bc593bc3cf39', 20],
+    ]);
+    expect(rows.every(r => r.runId === GOLDEN_RUN)).toBe(true);
+  });
+
+  it('sessionId is null on legacy turns', () => {
+    expect(computeTurnSeries(legacyGoldenEvents()).every(r => r.sessionId === null)).toBe(true);
+  });
+
+  it('marks compactedAfter only in the compacting session, not the same turnIndex in a sibling session', () => {
+    const s = (e: LoggedEvent, sessionId: string): LoggedEvent => ({ ...e, sessionId } as LoggedEvent);
+    const rows = computeTurnSeries([
+      s(turn('b1', 'run-1', 0, 1000), 'sa'),
+      s(compacted('b1', 'run-1', 0, 150000), 'sa'),
+      s(turn('b1', 'run-1', 0, 2000, { agent: 'viharapala' }), 'sb'),
+    ]);
+    expect(rows.map(r => [r.sessionId, r.compactedAfter])).toEqual([['sa', true], ['sb', false]]);
+  });
+});
+
 describe('computeMetrics — empty log', () => {
   it('yields a zeroed snapshot, no NaN, for no input at all', () => {
     const m = computeMetrics();
@@ -140,7 +287,7 @@ describe('computeMetrics — empty log', () => {
       avgRoundsToApprove: 0, roundsToApproveDistribution: {},
       escalations: 0, escalationRate: 0, stuckEvents: 0, stuckRate: 0,
       perBead: [], totalTokens: 0, totalCostUsd: 0, unpricedRuns: 0,
-      perRunContext: [], perBeadContext: [],
+      perRunContext: [], perSessionContext: [], perBeadContext: [],
       lots: [],
       drains: [],
       ablated: { beads: [], byLabel: {} },

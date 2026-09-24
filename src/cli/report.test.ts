@@ -261,6 +261,34 @@ describe('runReport --json (epic hto)', () => {
     expect(parsed.lots[0].sessionsMs).toBe(120000);
     expect(typeof parsed.lots[0].unexplainedMs).toBe('number');
   });
+
+  it('exposes perSessionContext, one row per agent session of a run (Shreni-beads-6eg)', () => {
+    const turnLine = (sessionId: string, agent: string, effective: number): string => JSON.stringify({
+      type: 'turn_usage', kshetra: K, beadId: 'b1', agent, provider: 'anthropic', model: 'm', turnIndex: 0,
+      messageId: `${sessionId}-0`, inputTokens: effective, cacheReadTokens: 0, cacheCreationTokens: 0,
+      sidechain: false, sessionId, ts: '2026-09-15T00:00:00.000Z', schemaVersion: 1, runId: 'run-1',
+    });
+    mockLoadRegistry.mockReturnValue([KSHETRA]);
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path.endsWith('activity.jsonl')) return `${turnLine('s-silpi', 'silpi', 1000)}\n${turnLine('s-vp', 'viharapala', 2000)}\n`;
+      const e = new Error('ENOENT') as NodeJS.ErrnoException;
+      e.code = 'ENOENT';
+      throw e;
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
+    const printed = log.mock.calls.map(c => c[0]).join('\n');
+    log.mockRestore();
+    const parsed = JSON.parse(printed) as {
+      perSessionContext: Array<{ sessionId: string; agent: string; peakContext: number; turns: number }>;
+      perRunContext: Array<{ agent: string }>;
+    };
+    expect(parsed.perSessionContext.map(s => [s.sessionId, s.agent, s.peakContext, s.turns])).toEqual([
+      ['s-silpi', 'silpi', 1000, 1],
+      ['s-vp', 'viharapala', 2000, 1],
+    ]);
+    expect(parsed.perRunContext[0].agent).toBe('mixed');
+  });
 });
 
 describe('renderReport — ablated section (epic 8wi / Study B1)', () => {

@@ -57,6 +57,13 @@ export interface PerBeadUsage {
 //   • turns = count of MAIN-THREAD turn_usage. compactions = count of
 //     context_compacted. contextWindow = the run's model context window (the
 //     denominator peakContext is judged against), from run_usage.
+// A runId is minted per task_claimed and so spans EVERY session of that attempt
+// (Silpi, Viharapala, the post-merge Parikshaka), each its own context window:
+// the per-run figures merge them. (A fire-and-forget Parikshaka still running
+// when the next bead is claimed is even stamped with THAT bead's runId.) They are
+// kept for compatibility; use perSessionContext for per-context-window numbers
+// (Shreni-beads-6eg). `agent` is the single agent seen in the run, or MIXED_AGENT
+// when it spans more than one — i.e. for almost every real run.
 export interface PerRunContext {
   runId: string;
   beadId: string;
@@ -67,9 +74,41 @@ export interface PerRunContext {
   contextWindow: number | null;
 }
 
+// Per-run `agent` value when a run's context events come from more than one agent
+// (Shreni-beads-6eg) — a runId spans every session of the attempt, so labelling
+// it with the first agent seen (silpi) was wrong.
+export const MIXED_AGENT = 'mixed';
+
+// Per-SESSION context-usage metrics (Shreni-beads-6eg). One row per agent session
+// — one provider subprocess, one context window (activity-log.ts `sessionId`,
+// Shreni-beads-228) — so peakContext/turns/compactions are never merged across
+// the Silpi / Viharapala / Parikshaka sessions of a run. Same metric definitions
+// as PerRunContext (main-thread turns only, compaction preTokens folded into the
+// peak). `agent` comes from the session's own events.
+//   • contextPressure = peakContext / contextWindow (4 dp), null when either is
+//     unknown.
+//   • LEGACY FALLBACK: events written before 228 carry no sessionId; those are
+//     grouped per run instead, as one row with `sessionId: null` (its agent is
+//     MIXED_AGENT when the run spanned several agents, like PerRunContext). The
+//     fallback is per event: in a run mixing tagged and untagged events (only a
+//     log straddling the 228 upgrade) the untagged ones form that null row.
+//   • `beadId` is the session's own; the rows are sorted by beadId (numeric),
+//     then runId, then first-seen order.
+export interface PerSessionContext {
+  sessionId: string | null;
+  runId: string;
+  beadId: string;
+  agent: string | null;
+  peakContext: number | null;
+  contextWindow: number | null;
+  contextPressure: number | null;
+  compactions: number;
+  turns: number;
+}
+
 // Per-bead roll-up of the same context metrics. peakContext/contextWindow are the
-// max over the bead's runs (null when no run had a measurement); turns and
-// compactions are summed.
+// max over the bead's sessions (null when none had a measurement); turns and
+// compactions are summed. Folded from the sessions' own beadIds (Shreni-beads-6eg).
 export interface PerBeadContext {
   beadId: string;
   peakContext: number | null;
@@ -82,8 +121,11 @@ export interface PerBeadContext {
 // 408/A1). `effectiveContext` is DERIVED here, not stored on the event.
 // `compactedAfter` marks the main-thread turn immediately before a compaction
 // boundary (context_compacted.turnIndex is that last-before-boundary index).
+// `sessionId` names the agent session (context window) the turn belongs to — null
+// on legacy data written before Shreni-beads-228 (Shreni-beads-6eg).
 export interface TurnContextRow {
   runId: string;
+  sessionId: string | null;
   beadId: string;
   agent: string;
   turnIndex: number;
@@ -194,6 +236,9 @@ export interface Metrics {
   // Context-usage study metrics (epic 408/A1), from the turn_usage /
   // context_compacted / run_usage streams. Empty arrays when nothing recorded.
   perRunContext: PerRunContext[];   // sorted by beadId (numeric) then runId
+  // One row per agent session (Shreni-beads-6eg); sorted by beadId (numeric),
+  // runId, then first-seen order within the run (silpi → viharapala → parikshaka).
+  perSessionContext: PerSessionContext[];
   perBeadContext: PerBeadContext[]; // sorted by beadId (numeric)
 
   // Per-lot time breakdown (epic hto / Study A3), one entry per worker_started
@@ -234,6 +279,13 @@ function rate(numerator: number, denominator: number): number {
 // drift.
 function roundCost(n: number): number {
   return Math.round(n * 1_000_000) / 1_000_000;
+}
+
+// Grouping key for one agent session's context series (Shreni-beads-6eg). The run
+// is folded in so legacy events with no sessionId (pre-228) group per run, and a
+// (never-expected) reused sessionId can't merge rows across runs.
+function contextSessionKey(runId: string, sessionId: string | undefined): string {
+  return `${runId}\u0000${sessionId || ''}`;
 }
 
 export function computeMetrics(input: MetricsInput = {}): Metrics {
@@ -340,60 +392,114 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
   const unpricedRuns = perBead.reduce((s, b) => s + b.unpricedRuns, 0);
 
   // --- Context-usage study metrics (epic 408/A1) ---
-  // Group by runId. A run is seeded from ANY of run_usage / turn_usage /
-  // context_compacted, so a metered codex/gemini run (run_usage but no turn_usage)
-  // still appears — with peakContext null, not 0. peakContext stays null until a
-  // MAIN-THREAD turn or a compaction with known preTokens contributes a number.
-  const byRun = new Map<string, PerRunContext>();
-  const ensureRun = (runId: string, beadId: string, agent: string | null): PerRunContext => {
-    let r = byRun.get(runId);
-    if (!r) {
-      r = { runId, beadId, agent, peakContext: null, turns: 0, compactions: 0, contextWindow: null };
-      byRun.set(runId, r);
+  // Accumulated per SESSION (Shreni-beads-6eg); the per-run and per-bead figures
+  // are folded from the session rows below. A session is seeded from ANY of
+  // run_usage / turn_usage / context_compacted, so a metered codex/gemini run
+  // (run_usage but no turn_usage) still appears — with peakContext null, not 0.
+  // peakContext stays null until a MAIN-THREAD turn or a compaction with known
+  // preTokens contributes a number. An event with no sessionId (pre-228 data)
+  // falls into its run's `sessionId: null` bucket — the legacy per-run fallback.
+  interface SessionAcc {
+    sessionId: string | null;
+    runId: string;
+    beadId: string;
+    agents: Set<string>;
+    peakContext: number | null;
+    turns: number;
+    compactions: number;
+    contextWindow: number | null;
+  }
+  const bySession = new Map<string, SessionAcc>();
+  const sessionFor = (runId: string, beadId: string, agent: string, sessionId: string | undefined): SessionAcc => {
+    const key = contextSessionKey(runId, sessionId);
+    let s = bySession.get(key);
+    if (!s) {
+      s = { sessionId: sessionId || null, runId, beadId, agents: new Set(), peakContext: null, turns: 0, compactions: 0, contextWindow: null };
+      bySession.set(key, s);
     }
-    if (!r.beadId && beadId) r.beadId = beadId;
-    if (r.agent == null && agent != null) r.agent = agent;
-    return r;
+    if (!s.beadId && beadId) s.beadId = beadId;
+    if (agent) s.agents.add(agent);
+    return s;
   };
+  const maxOrNull = (a: number | null, b: number | null): number | null =>
+    b == null ? a : Math.max(a ?? 0, b);
   for (const ev of events) {
     if (!ev.runId) continue; // ungrouped events (pre-claim) carry no context series
     if (ev.type === 'run_usage') {
-      const r = ensureRun(ev.runId, ev.beadId, ev.agent);
-      if (ev.contextWindow != null) r.contextWindow = Math.max(r.contextWindow ?? 0, ev.contextWindow);
+      const s = sessionFor(ev.runId, ev.beadId, ev.agent, ev.sessionId);
+      s.contextWindow = maxOrNull(s.contextWindow, ev.contextWindow ?? null);
     } else if (ev.type === 'turn_usage') {
-      const r = ensureRun(ev.runId, ev.beadId, ev.agent);
+      const s = sessionFor(ev.runId, ev.beadId, ev.agent, ev.sessionId);
       if (!ev.sidechain) {
         // Main thread only: sidechain calls live in a different context window.
-        r.turns++;
-        const eff = ev.inputTokens + ev.cacheReadTokens + ev.cacheCreationTokens;
-        r.peakContext = Math.max(r.peakContext ?? 0, eff);
+        s.turns++;
+        s.peakContext = maxOrNull(s.peakContext, ev.inputTokens + ev.cacheReadTokens + ev.cacheCreationTokens);
       }
     } else if (ev.type === 'context_compacted') {
-      const r = ensureRun(ev.runId, ev.beadId, ev.agent);
-      r.compactions++;
+      const s = sessionFor(ev.runId, ev.beadId, ev.agent, ev.sessionId);
+      s.compactions++;
       // The true peak sits just before the boundary; fold preTokens in so a
       // compaction that exceeds every captured turn is reported as the peak. A 0
       // preTokens (missing compact_metadata) is NOT a measurement — skip it so it
       // never fabricates a peak of 0 on an otherwise-unmeasured run.
-      if (ev.preTokens > 0) r.peakContext = Math.max(r.peakContext ?? 0, ev.preTokens);
+      if (ev.preTokens > 0) s.peakContext = maxOrNull(s.peakContext, ev.preTokens);
     }
   }
+  // One agent → that agent; several → MIXED_AGENT; none → null.
+  const agentOf = (agents: Set<string>): string | null =>
+    agents.size === 0 ? null : agents.size === 1 ? [...agents][0] : MIXED_AGENT;
   const byBeadNumeric = (a: { beadId: string }, b: { beadId: string }): number =>
     a.beadId.localeCompare(b.beadId, 'en', { numeric: true });
-  const perRunContext = [...byRun.values()].sort(
-    (a, b) => byBeadNumeric(a, b) || a.runId.localeCompare(b.runId),
-  );
-  const beadCtx = new Map<string, PerBeadContext>();
-  for (const r of perRunContext) {
-    let b = beadCtx.get(r.beadId);
-    if (!b) {
-      b = { beadId: r.beadId, peakContext: null, turns: 0, compactions: 0, contextWindow: null };
-      beadCtx.set(r.beadId, b);
+  const byBeadThenRun = (a: { beadId: string; runId: string }, b: { beadId: string; runId: string }): number =>
+    byBeadNumeric(a, b) || a.runId.localeCompare(b.runId);
+  const sessions = [...bySession.values()]; // first-seen order
+  // Array.prototype.sort is stable, so a run's sessions keep first-seen order.
+  const perSessionContext: PerSessionContext[] = sessions
+    .map(s => ({
+      sessionId: s.sessionId, runId: s.runId, beadId: s.beadId, agent: agentOf(s.agents),
+      peakContext: s.peakContext,
+      contextWindow: s.contextWindow,
+      contextPressure:
+        s.peakContext != null && s.contextWindow != null && s.contextWindow > 0
+          ? Math.round((s.peakContext / s.contextWindow) * 10_000) / 10_000
+          : null,
+      compactions: s.compactions,
+      turns: s.turns,
+    }))
+    .sort(byBeadThenRun);
+  // Per run: fold the run's sessions (peak/window max, turns/compactions summed,
+  // agents unioned). beadId is the run's first-seen one, as before.
+  const byRun = new Map<string, PerRunContext & { agents: Set<string> }>();
+  for (const s of sessions) {
+    let r = byRun.get(s.runId);
+    if (!r) {
+      r = { runId: s.runId, beadId: s.beadId, agent: null, peakContext: null, turns: 0, compactions: 0, contextWindow: null, agents: new Set() };
+      byRun.set(s.runId, r);
     }
-    b.turns += r.turns;
-    b.compactions += r.compactions;
-    if (r.peakContext != null) b.peakContext = Math.max(b.peakContext ?? 0, r.peakContext);
-    if (r.contextWindow != null) b.contextWindow = Math.max(b.contextWindow ?? 0, r.contextWindow);
+    if (!r.beadId && s.beadId) r.beadId = s.beadId;
+    for (const a of s.agents) r.agents.add(a);
+    r.peakContext = maxOrNull(r.peakContext, s.peakContext);
+    r.contextWindow = maxOrNull(r.contextWindow, s.contextWindow);
+    r.turns += s.turns;
+    r.compactions += s.compactions;
+  }
+  const perRunContext: PerRunContext[] = [...byRun.values()]
+    .map(({ agents, ...r }) => ({ ...r, agent: agentOf(agents) }))
+    .sort(byBeadThenRun);
+  // Per bead: folded from the SESSIONS (each carries its own beadId), so a session
+  // stamped with another bead's runId — a post-merge Parikshaka still running when
+  // the next bead is claimed — still rolls up under its own bead.
+  const beadCtx = new Map<string, PerBeadContext>();
+  for (const s of sessions) {
+    let b = beadCtx.get(s.beadId);
+    if (!b) {
+      b = { beadId: s.beadId, peakContext: null, turns: 0, compactions: 0, contextWindow: null };
+      beadCtx.set(s.beadId, b);
+    }
+    b.turns += s.turns;
+    b.compactions += s.compactions;
+    b.peakContext = maxOrNull(b.peakContext, s.peakContext);
+    b.contextWindow = maxOrNull(b.contextWindow, s.contextWindow);
   }
   const perBeadContext = [...beadCtx.values()].sort(byBeadNumeric);
 
@@ -414,6 +520,7 @@ export function computeMetrics(input: MetricsInput = {}): Metrics {
     totalCostUsd,
     unpricedRuns,
     perRunContext,
+    perSessionContext,
     perBeadContext,
     lots: computeLotBreakdowns(events, notifications, input.interactions ?? []),
     drains: events
@@ -611,15 +718,19 @@ export function computeLotBreakdowns(
 // context curve plots directly. `effectiveContext` is derived here at read time.
 export function computeTurnSeries(events: LoggedEvent[]): TurnContextRow[] {
   // Which main-thread turnIndexes were immediately followed by a compaction, per
-  // run: context_compacted.turnIndex is the last main-thread turn before the
-  // boundary, so that turn is the one "compacted after".
+  // SESSION: context_compacted.turnIndex is the last main-thread turn before the
+  // boundary, so that turn is the one "compacted after". turnIndex restarts at 0
+  // in every session, so keying by run alone would also mark the same index in
+  // the run's OTHER sessions (Shreni-beads-6eg). Legacy data with no sessionId
+  // keys by run, as before.
   const compactedTurns = new Map<string, Set<number>>();
   for (const ev of events) {
     if (ev.type !== 'context_compacted' || !ev.runId) continue;
-    let s = compactedTurns.get(ev.runId);
+    const key = contextSessionKey(ev.runId, ev.sessionId);
+    let s = compactedTurns.get(key);
     if (!s) {
       s = new Set<number>();
-      compactedTurns.set(ev.runId, s);
+      compactedTurns.set(key, s);
     }
     s.add(ev.turnIndex);
   }
@@ -628,6 +739,7 @@ export function computeTurnSeries(events: LoggedEvent[]): TurnContextRow[] {
     if (ev.type !== 'turn_usage' || !ev.runId) continue;
     rows.push({
       runId: ev.runId,
+      sessionId: ev.sessionId || null,
       beadId: ev.beadId,
       agent: ev.agent,
       turnIndex: ev.turnIndex,
@@ -635,7 +747,8 @@ export function computeTurnSeries(events: LoggedEvent[]): TurnContextRow[] {
       sidechain: ev.sidechain,
       // Only a main-thread turn can be the last-before-boundary (compaction
       // turnIndex is a main-thread index); a sidechain turn is never compactedAfter.
-      compactedAfter: !ev.sidechain && (compactedTurns.get(ev.runId)?.has(ev.turnIndex) ?? false),
+      compactedAfter:
+        !ev.sidechain && (compactedTurns.get(contextSessionKey(ev.runId, ev.sessionId))?.has(ev.turnIndex) ?? false),
     });
   }
   return rows;
