@@ -112,7 +112,7 @@ describe('beadsRead().list', () => {
     mockSuccess(LIST_JSON);
     const tasks = await beadsRead(KSHETRA).list();
     expect(lastCall().cmd).toBe('bd');
-    expect(lastCall().args).toEqual(['list', '--json']);
+    expect(lastCall().args).toEqual(['list', '--json', '--limit', '0']);
     expect(lastCall().env['BEADS_DIR']).toBe('/projects/myapp-beads');
     expect(tasks).toEqual([
       {
@@ -130,14 +130,25 @@ describe('beadsRead().list', () => {
   it('passes a status filter through to bd', async () => {
     mockSuccess('[]');
     await beadsRead(KSHETRA).list({ status: 'closed' });
-    expect(lastCall().args).toEqual(['list', '--json', '--status', 'closed']);
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'closed', '--limit', '0']);
   });
 
   it('passes a label filter through to bd', async () => {
     mockSuccess('[]');
     await beadsRead(KSHETRA).list({ label: 'pr-needs-followup' });
-    expect(lastCall().args).toEqual(['list', '--json', '--label', 'pr-needs-followup']);
+    expect(lastCall().args).toEqual(['list', '--json', '--label', 'pr-needs-followup', '--limit', '0']);
   });
+
+  // bd list returns at most 50 rows without `--limit 0`; the board and the
+  // per-kshetra counts (closed: N) must see every bead (8ym).
+  it.each([{}, { status: 'closed' }, { label: 'pr-needs-followup' }, { status: 'open', label: 'x' }])(
+    'lifts bd\'s 50-row cap on every list (%o)',
+    async filters => {
+      mockSuccess('[]');
+      await beadsRead(KSHETRA).list(filters);
+      expect(lastCall().args.slice(-2)).toEqual(['--limit', '0']);
+    },
+  );
 
   it('exposes no mutation methods on the surface', () => {
     mockSuccess('[]');

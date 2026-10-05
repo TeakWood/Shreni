@@ -44,6 +44,9 @@ const BeadsItemSchema = z.object({
   notes: z.string().optional(),
 });
 
+// Closed rows also carry closed_at (bd omits it on live beads).
+const ClosedItemSchema = BeadsItemSchema.extend({ closed_at: z.string().nullish() });
+
 function parseJsonArray(raw: string): unknown[] {
   try {
     const parsed = JSON.parse(raw);
@@ -113,11 +116,19 @@ export async function assembleKshetraStatus(kshetra: KshetraConfig): Promise<Ksh
 
   const queueDepth = parseJsonArray(readyRaw).length;
 
+  // The most recently CLOSED bead. bd orders rows by priority, not close time, so
+  // the last row was an arbitrary low-priority bead (Shreni-beads-8ym) — take the
+  // max closed_at instead. A row without a parseable closed_at never beats one
+  // with it; ties keep the later row.
   let lastCompleted: { id: string; title: string } | undefined;
-  const closed = parseJsonArray(closedRaw);
-  if (closed.length > 0) {
-    const parsed = BeadsItemSchema.safeParse(closed[closed.length - 1]);
-    if (parsed.success) {
+  let latestCloseMs = -Infinity;
+  for (const item of parseJsonArray(closedRaw)) {
+    const parsed = ClosedItemSchema.safeParse(item);
+    if (!parsed.success) continue;
+    const closedMs = Date.parse(parsed.data.closed_at ?? '');
+    const rank = Number.isNaN(closedMs) ? -Infinity : closedMs;
+    if (rank >= latestCloseMs) {
+      latestCloseMs = rank;
       lastCompleted = { id: parsed.data.id, title: parsed.data.title };
     }
   }

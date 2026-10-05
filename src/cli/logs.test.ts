@@ -8,9 +8,8 @@ vi.mock('../kshetra/registry', () => ({ loadRegistry: mockLoadRegistry }));
 
 const mockBdList = vi.fn<(f: { status?: string }) => Promise<string>>();
 const mockBdShow = vi.fn<(id: string) => Promise<string>>();
-vi.mock('../sthapathi/beads', () => ({
-  bd: vi.fn(() => ({ list: mockBdList, show: mockBdShow })),
-}));
+const mockBd = vi.fn((_k: KshetraConfig) => ({ list: mockBdList, show: mockBdShow }));
+vi.mock('../sthapathi/beads', () => ({ bd: mockBd }));
 
 // ── imports after mocks ───────────────────────────────────────────────────────
 
@@ -168,18 +167,95 @@ describe('runLogs', () => {
     logSpy.mockRestore();
   });
 
-  it('finds a bead by id across kshetras when --bead is set', async () => {
+  // Real `bd show <id> --json` returns an ARRAY — the requested bead, then any
+  // dependencies. The old mock returned a bare object, which hid that findBeadLog
+  // could never parse a real payload (8ym).
+  const BEAD = {
+    id: 'bd-99', title: 'Special task', status: 'closed',
+    notes: 'Round 1: dispatching Silpi\nRound 1: APPROVE',
+  };
+  const DEP = { id: 'bd-7', title: 'Blocking dependency', status: 'closed', notes: 'Round 1: REJECT' };
+
+  it.each([
+    ['the real array shape', [BEAD]],
+    ['an array with a dependency after the bead', [BEAD, DEP]],
+    ['an array listing the bead after another row', [DEP, BEAD]],
+  ])('finds a bead by id across kshetras when --bead is set — %s', async (_shape, payload) => {
     mockLoadRegistry.mockReturnValue([KSHETRA]);
-    mockBdShow.mockResolvedValue(JSON.stringify({
-      id: 'bd-99', title: 'Special task', status: 'closed',
-      notes: 'Round 1: dispatching Silpi\nRound 1: APPROVE',
-    }));
+    mockBdShow.mockResolvedValue(JSON.stringify(payload));
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await runLogs({ beadId: 'bd-99', all: false });
     const output = logSpy.mock.calls.map(c => c[0]).join('\n');
-    expect(output).toContain('bd-99');
+    expect(output).toContain('Kshetra: Myapp (myapp)');
+    expect(output).toContain('[closed] bd-99 · Special task');
     expect(output).toContain('APPROVE');
+    expect(output).not.toContain('Blocking dependency');
     logSpy.mockRestore();
+  });
+
+  it('resolves a short id to the canonical bead bd echoes back', async () => {
+    mockLoadRegistry.mockReturnValue([KSHETRA]);
+    mockBdShow.mockResolvedValue(JSON.stringify([{ ...BEAD, id: 'myapp-beads-99' }, DEP]));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runLogs({ beadId: '99', all: false });
+    expect(mockBdShow).toHaveBeenCalledWith('99');
+    const output = logSpy.mock.calls.map(c => c[0]).join('\n');
+    expect(output).toContain('[closed] myapp-beads-99 · Special task');
+    expect(output).not.toContain('Blocking dependency');
+    logSpy.mockRestore();
+  });
+
+  it('keeps searching later kshetras when bd show misses in the first', async () => {
+    const K2 = { ...KSHETRA, id: 'beta', name: 'Beta' };
+    mockLoadRegistry.mockReturnValue([KSHETRA, K2]);
+    mockBdShow
+      .mockRejectedValueOnce(new Error('no issue found matching "bd-99"'))
+      .mockResolvedValueOnce(JSON.stringify([BEAD]));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runLogs({ beadId: 'bd-99', all: false });
+    expect(mockBdShow).toHaveBeenCalledTimes(2);
+    const output = logSpy.mock.calls.map(c => c[0]).join('\n');
+    expect(output).toContain('Kshetra: Beta (beta)');
+    expect(output).toContain('[closed] bd-99 · Special task');
+    logSpy.mockRestore();
+  });
+
+  it('--kshetra scopes the --bead lookup to that kshetra', async () => {
+    const K2 = { ...KSHETRA, id: 'beta', name: 'Beta' };
+    mockLoadRegistry.mockReturnValue([KSHETRA, K2]);
+    // Both kshetras would resolve the id (a short id can exist in more than one).
+    mockBdShow.mockResolvedValue(JSON.stringify([BEAD]));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runLogs({ kshetraId: 'beta', beadId: 'bd-99', all: false });
+    expect(mockBd).toHaveBeenCalledTimes(1);
+    expect(mockBd).toHaveBeenCalledWith(K2);
+    expect(logSpy.mock.calls.map(c => c[0]).join('\n')).toContain('Kshetra: Beta (beta)');
+    logSpy.mockRestore();
+  });
+
+  it('exits with error when --bead is scoped to an unregistered --kshetra', async () => {
+    mockLoadRegistry.mockReturnValue([KSHETRA]);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit'); });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(runLogs({ kshetraId: 'ghost', beadId: 'bd-99', all: false })).rejects.toThrow('exit');
+    expect(errSpy).toHaveBeenCalledWith('Kshetra not found: ghost');
+    expect(mockBdShow).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it.each([
+    ['an empty array', '[]'],
+    ['a bare object (never bd show\'s shape)', JSON.stringify(BEAD)],
+  ])('exits with error when bd show returns %s', async (_shape, payload) => {
+    mockLoadRegistry.mockReturnValue([KSHETRA]);
+    mockBdShow.mockResolvedValue(payload);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit'); });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(runLogs({ beadId: 'bd-99', all: false })).rejects.toThrow('exit');
+    expect(errSpy).toHaveBeenCalledWith('Bead not found: bd-99');
+    exitSpy.mockRestore();
+    errSpy.mockRestore();
   });
 
   it('exits with error when --bead id not found in any kshetra', async () => {

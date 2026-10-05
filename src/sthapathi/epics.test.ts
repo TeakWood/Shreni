@@ -27,7 +27,7 @@ const mockClose = vi.fn(async (id: string, _reason: string) => {
   b.status = 'closed';
   return '';
 });
-const mockList = vi.fn(async (f: { status?: string; type?: string; all?: boolean }) => {
+const mockList = vi.fn(async (f: { status?: string; type?: string; limit?: number }) => {
   calls.push('list');
   const statuses = (f.status ?? '').split(',');
   return JSON.stringify(
@@ -177,9 +177,9 @@ describe('sweepCompleteEpics', () => {
     expect(mockClose).not.toHaveBeenCalled();
   });
 
-  it('lists live epics with the row cap lifted', async () => {
+  it('lists live epics without opting into a row cap', async () => {
     await sweepCompleteEpics(KSHETRA);
-    expect(mockList).toHaveBeenCalledWith({ status: 'open,in_progress,blocked', type: 'epic', all: true });
+    expect(mockList).toHaveBeenCalledWith({ status: 'open,in_progress,blocked', type: 'epic' });
   });
 
   it('a scoped sweep closes only epics inside the scope (drain --epic trial isolation)', async () => {
@@ -226,6 +226,6 @@ describe('parentsWithOpenChildren', () => {
     add({ id: 'q.1', status: 'closed', issue_type: 'task', parent: 'q' });
     expect([...(await parentsWithOpenChildren(KSHETRA))]).toEqual(['p']);
     expect(mockList).toHaveBeenCalledTimes(1);
-    expect(mockList).toHaveBeenCalledWith({ status: 'open,in_progress,blocked,deferred', all: true });
+    expect(mockList).toHaveBeenCalledWith({ status: 'open,in_progress,blocked,deferred' });
   });
 });

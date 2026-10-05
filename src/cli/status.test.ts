@@ -168,18 +168,43 @@ describe('assembleKshetraStatus', () => {
     expect(info.queueDepth).toBe(3);
   });
 
-  it('reports last completed from closed list', async () => {
+  it('reports last completed as the bead with the latest closed_at, not the last row (8ym)', async () => {
+    // bd's real order: priority first, so the newest close sits mid-list and the
+    // last row is an old low-priority bead.
     mockBdList.mockImplementation(({ status } = {}) => {
       if (status === 'closed') {
         return Promise.resolve(JSON.stringify([
-          { id: 'old', title: 'Old task', status: 'closed' },
-          { id: 'recent', title: 'Recent task', status: 'closed' },
+          { id: 'p0-older', title: 'P0 older', status: 'closed', priority: 0, closed_at: '2026-09-23T19:08:27Z' },
+          { id: 'p1-newest', title: 'P1 newest', status: 'closed', priority: 1, closed_at: '2026-09-24T05:43:35Z' },
+          { id: 'p4-oldest', title: 'P4 oldest', status: 'closed', priority: 4, closed_at: '2026-07-05T06:29:28Z' },
         ]));
       }
       return Promise.resolve('[]');
     });
     const info = await assembleKshetraStatus(KSHETRA);
-    expect(info.lastCompleted).toEqual({ id: 'recent', title: 'Recent task' });
+    expect(info.lastCompleted).toEqual({ id: 'p1-newest', title: 'P1 newest' });
+  });
+
+  it('compares closed_at as instants and never prefers a row without one', async () => {
+    mockBdList.mockImplementation(({ status } = {}) => {
+      if (status === 'closed') {
+        return Promise.resolve(JSON.stringify([
+          // 05:00Z — later than the +02:00 row below, though it sorts lower as a string.
+          { id: 'utc', title: 'UTC', status: 'closed', closed_at: '2026-09-24T05:00:00Z' },
+          { id: 'offset', title: 'Offset', status: 'closed', closed_at: '2026-09-24T06:00:00+02:00' },
+          { id: 'no-stamp', title: 'No stamp', status: 'closed' },
+          { id: 'garbage', title: 'Garbage', status: 'closed', closed_at: 'not-a-date' },
+        ]));
+      }
+      return Promise.resolve('[]');
+    });
+    const info = await assembleKshetraStatus(KSHETRA);
+    expect(info.lastCompleted).toEqual({ id: 'utc', title: 'UTC' });
+  });
+
+  it('leaves last completed unset when nothing is closed', async () => {
+    const info = await assembleKshetraStatus(KSHETRA);
+    expect(info.lastCompleted).toBeUndefined();
   });
 
   it('handles bd errors gracefully (returns zeros/undefined)', async () => {

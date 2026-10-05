@@ -95,16 +95,31 @@ async function getBeadLogsForKshetra(kshetra: KshetraConfig): Promise<BeadLog[]>
   );
 }
 
+// `bd show <id> --json` returns an ARRAY: the requested bead first, then any
+// dependencies. bd also resolves a short id (`8ym` → `Shreni-beads-8ym`) and
+// echoes the canonical one, so match the exact id, else take the head row.
+// Parsing the payload as a single object never matched (Shreni-beads-8ym).
+function parseShowItem(raw: string, beadId: string): z.infer<typeof BeadsItemSchema> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const row = parsed.find(r => (r as { id?: unknown } | null)?.id === beadId) ?? parsed[0];
+  const item = BeadsItemSchema.safeParse(row);
+  return item.success ? item.data : null;
+}
+
 async function findBeadLog(beadId: string, kshetras: KshetraConfig[]): Promise<{ log: BeadLog; kshetra: KshetraConfig } | null> {
   for (const k of kshetras) {
     const bdClient = bd(k);
     try {
-      const raw = await bdClient.show(beadId);
-      const parsed = JSON.parse(raw);
-      const item = BeadsItemSchema.safeParse(parsed);
-      if (item.success) {
+      const item = parseShowItem(await bdClient.show(beadId), beadId);
+      if (item) {
         return {
-          log: parseNotesToBeadLog(item.data.id, item.data.title, item.data.status ?? 'unknown', item.data.notes),
+          log: parseNotesToBeadLog(item.id, item.title, item.status ?? 'unknown', item.notes),
           kshetra: k,
         };
       }
@@ -132,12 +147,22 @@ export async function runLogs(opts: LogsOpts): Promise<void> {
   }
 
   if (opts.beadId) {
-    const found = await findBeadLog(opts.beadId, kshetras);
+    // `--kshetra` scopes the lookup. Without it every kshetra is tried in registry
+    // order and the first that resolves the id wins — a short id can exist in
+    // more than one, so the header names where the bead was found.
+    const scope = opts.kshetraId ? kshetras.filter(k => k.id === opts.kshetraId) : kshetras;
+    if (scope.length === 0) {
+      console.error(`Kshetra not found: ${opts.kshetraId}`);
+      process.exit(1);
+      return;
+    }
+    const found = await findBeadLog(opts.beadId, scope);
     if (!found) {
       console.error(`Bead not found: ${opts.beadId}`);
       process.exit(1);
       return;
     }
+    console.log(`Kshetra: ${found.kshetra.name} (${found.kshetra.id})`);
     console.log(formatBeadLog(found.log));
     return;
   }

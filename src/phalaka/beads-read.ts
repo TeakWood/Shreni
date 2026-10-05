@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { z } from 'zod';
 import type { KshetraConfig } from '../kshetra/config.js';
+import { BD_MAX_BUFFER } from '../sthapathi/beads.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -178,7 +179,7 @@ async function cached<T>(key: string, ttl: number, produce: () => Promise<T>): P
 
 async function exec(args: string[], env: NodeJS.ProcessEnv): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('bd', args, { env, maxBuffer: 8 * 1024 * 1024 });
+    const { stdout } = await execFileAsync('bd', args, { env, maxBuffer: BD_MAX_BUFFER });
     return stdout.trim();
   } catch (err: unknown) {
     const e = err as { stderr?: string; message?: string };
@@ -202,6 +203,9 @@ export function beadsRead(kshetra: KshetraConfig) {
       const args = ['list', '--json'];
       if (filters.status) args.push('--status', filters.status);
       if (filters.label) args.push('--label', filters.label);
+      // bd list caps at 50 rows by default; the board and the per-kshetra counts
+      // need every bead, or a busy kshetra reads as "closed: 50" (Shreni-beads-8ym).
+      args.push('--limit', '0');
       // The cache key MUST carry every filter — a label-filtered list must not
       // collide with (and return) the unfiltered 'default' slice.
       const key = `${beadsPath}::list::${filters.status ?? 'default'}::${filters.label ?? ''}`;

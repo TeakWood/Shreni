@@ -175,22 +175,48 @@ describe('bd() wrapper', () => {
   it('list() calls bd list --json with status filter', async () => {
     mockSuccess('[]');
     await bd(KSHETRA).list({ status: 'in_progress' });
-    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress']);
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--limit', '0']);
   });
 
   it('list() passes label and excludeLabel filters (awaiting-merge)', async () => {
     mockSuccess('[]');
     await bd(KSHETRA).list({ status: 'in_progress', label: 'awaiting-merge' });
-    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--label', 'awaiting-merge']);
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--label', 'awaiting-merge', '--limit', '0']);
     mockSuccess('[]');
     await bd(KSHETRA).list({ status: 'in_progress', excludeLabel: 'awaiting-merge' });
-    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--exclude-label', 'awaiting-merge']);
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'in_progress', '--exclude-label', 'awaiting-merge', '--limit', '0']);
   });
 
-  it('list() passes the type filter and lifts the row cap when asked (q08 epic sweep)', async () => {
+  it('list() passes the type filter (q08 epic sweep)', async () => {
     mockSuccess('[]');
-    await bd(KSHETRA).list({ status: 'open,in_progress', type: 'epic', all: true });
+    await bd(KSHETRA).list({ status: 'open,in_progress', type: 'epic' });
     expect(lastCall().args).toEqual(['list', '--json', '--status', 'open,in_progress', '--type', 'epic', '--limit', '0']);
+  });
+
+  // bd list returns at most 50 rows unless given `--limit 0`. Every caller needs
+  // the whole slice, so a filter shape without `--limit 0` is a silent truncation
+  // (export dropped 359 of 409 beads; status read "last completed" off a capped,
+  // priority-ordered list).
+  it.each([
+    ['export (all statuses)', { status: 'open,in_progress,blocked,deferred,closed' }],
+    ['status / logs (closed)', { status: 'closed' }],
+    ['health dedup (open)', { status: 'open' }],
+    ['recover (in_progress, not awaiting-merge)', { status: 'in_progress', excludeLabel: 'awaiting-merge' }],
+    ['merge reconcile (awaiting-merge)', { status: 'in_progress', label: 'awaiting-merge' }],
+    ['pr follow-up (pr-needs-followup)', { status: 'in_progress', label: 'pr-needs-followup' }],
+    ['epic sweep (type)', { status: 'open,in_progress,blocked', type: 'epic' }],
+    ['no filters', {}],
+  ])('list() lifts the 50-row cap by default — %s (8ym)', async (_caller, filters) => {
+    mockSuccess('[]');
+    await bd(KSHETRA).list(filters);
+    expect(lastCall().args.slice(-2)).toEqual(['--limit', '0']);
+    expect(lastCall().args.filter(a => a === '--limit')).toHaveLength(1);
+  });
+
+  it('list() caps only when a limit is passed explicitly', async () => {
+    mockSuccess('[]');
+    await bd(KSHETRA).list({ status: 'closed', limit: 25 });
+    expect(lastCall().args).toEqual(['list', '--json', '--status', 'closed', '--limit', '25']);
   });
 
   it('children() lists direct children of every status with no row cap (q08)', async () => {

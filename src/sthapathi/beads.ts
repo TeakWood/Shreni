@@ -9,6 +9,11 @@ import { nowMs, elapsedMs } from './timing.js';
 
 const execFileAsync = promisify(execFile);
 
+// stdout ceiling for a bd call, shared with Phalaka's reader. Sized for uncapped
+// `bd list` output (~2.3 KB per bead on Shreni's own DB): 64 MB holds ~28k
+// beads, where the old 4 MB would fail outright past ~1.8k.
+export const BD_MAX_BUFFER = 64 * 1024 * 1024;
+
 export class BeadsError extends Error {
   constructor(
     message: string,
@@ -26,7 +31,7 @@ async function exec(
   try {
     const { stdout } = await execFileAsync('bd', args, {
       env,
-      maxBuffer: 4 * 1024 * 1024,
+      maxBuffer: BD_MAX_BUFFER,
     });
     return stdout.trim();
   } catch (err: unknown) {
@@ -150,14 +155,18 @@ export function bd(kshetra: KshetraConfig) {
       return exec(['update', id, '--remove-label', label], env);
     },
 
-    // `all` lifts bd list's default 50-row cap (`--limit 0`).
-    list(filters: { status?: string; label?: string; excludeLabel?: string; type?: string; all?: boolean }): Promise<string> {
+    // bd list caps at 50 rows unless told otherwise, and every caller needs the
+    // whole slice (export, recover's reopen sweep, the awaiting-merge reconcile,
+    // status, the health-bead dedup...), so the wrapper lifts the cap by DEFAULT
+    // (`--limit 0`). An opt-in flag was forgotten at most call sites, silently
+    // truncating them (Shreni-beads-8ym). A cap must be asked for: `limit: n`.
+    list(filters: { status?: string; label?: string; excludeLabel?: string; type?: string; limit?: number }): Promise<string> {
       const args = ['list', '--json'];
       if (filters.status) args.push('--status', filters.status);
       if (filters.type) args.push('--type', filters.type);
       if (filters.label) args.push('--label', filters.label);
       if (filters.excludeLabel) args.push('--exclude-label', filters.excludeLabel);
-      if (filters.all) args.push('--limit', '0');
+      args.push('--limit', String(filters.limit ?? 0));
       return exec(args, env);
     },
   };

@@ -274,8 +274,7 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
       // (in_progress from a crash, blocked behind a needs-human bead, deferred)
       // are separate stored statuses, so they must be named explicitly or a
       // stalled drain would report complete. See `bd list --help` (--status).
-      // `all`: bd list caps at 50 rows by default — a large kshetra would under-count.
-      const raw = await client.list({ status: 'open,in_progress,blocked,deferred', all: true });
+      const raw = await client.list({ status: 'open,in_progress,blocked,deferred' });
       // Exclude epic containers: an epic is never itself worked (pickup excludes
       // it, q08) and may still be open here — the drain-exit sweep that closes it
       // runs after this — so counting it would report a fully-drained epic as
@@ -306,7 +305,7 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
       // strings: bd's created_at/closed_at are second-granular ('…:28Z') while a
       // drain starts at ms precision, so a lexical string compare would count a
       // bead created earlier in the same wall-clock second as "during the drain".
-      const raw = await client.list({ status: 'open,in_progress,blocked,deferred,closed', all: true });
+      const raw = await client.list({ status: 'open,in_progress,blocked,deferred,closed' });
       let arr: unknown;
       try { arr = JSON.parse(raw); } catch { arr = []; }
       const rows: Record<string, unknown>[] = Array.isArray(arr) ? (arr as Record<string, unknown>[]) : [];

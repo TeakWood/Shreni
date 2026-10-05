@@ -102,7 +102,7 @@ export const CLOSABLE_EPIC_STATUSES = ['open', 'in_progress', 'blocked'] as cons
 // exit classification) where a per-bead children lookup would be N subprocesses.
 // Throws on a bd failure.
 export async function parentsWithOpenChildren(kshetra: KshetraConfig): Promise<Set<string>> {
-  const rows = parseRows(await bd(kshetra).list({ status: 'open,in_progress,blocked,deferred', all: true }));
+  const rows = parseRows(await bd(kshetra).list({ status: 'open,in_progress,blocked,deferred' }));
   return new Set(rows.map(r => r.parent).filter((p): p is string => p !== undefined));
 }
 
@@ -192,7 +192,7 @@ export async function sweepCompleteEpics(
   for (let pass = 0; pass < MAX_PARENT_DEPTH; pass++) {
     let epics: BeadRow[];
     try {
-      epics = parseRows(await bd(kshetra).list({ status: CLOSABLE_EPIC_STATUSES.join(','), type: 'epic', all: true }));
+      epics = parseRows(await bd(kshetra).list({ status: CLOSABLE_EPIC_STATUSES.join(','), type: 'epic' }));
     } catch (err) {
       console.warn(`[shreni epics:${kshetra.id}] epic sweep skipped: ${(err as Error).message}`);
       break;
