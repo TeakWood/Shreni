@@ -589,7 +589,13 @@ async function reconcileOneOnEngine(
       return;
     }
     if (pr.state === 'MERGED') {
-      await store.finish(t.id, `Merged via PR: ${pr.url}`);
+      // As on the push path: the change is on main, so a refused finish (a manual
+      // check waits on the developer) flags the task rather than leave it waiting.
+      try {
+        await store.finish(t.id, `Merged via PR: ${pr.url}`);
+      } catch (err) {
+        await store.flag(t.id, `merged via PR ${pr.url} but finish failed: ${(err as Error).message}. Check it and finish by hand.`);
+      }
       emitTelemetry('task_merged', { policy: 'pr' });
       clearBeadAttempts(kshetra, t.id);
       try { await g.deleteBranch(branch, { force: true }); } catch { /* already gone */ }

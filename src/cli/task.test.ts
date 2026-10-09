@@ -9,6 +9,7 @@ import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import { makeContext } from './registry';
 import { findProjectConfig, parseCheck, runTask, type TaskDeps } from './task';
 import { takeWorkerLock } from '../policy/sthapathi/leases';
+import { VersionMismatch } from '../taskgraph';
 
 // shreni task: ready, show, list, create --check, note, remember (policy spec,
 // "Working by hand" and "Project config"): each run finds its project from the
@@ -454,6 +455,73 @@ describe('shreni task by hand: claim, finish, release, cancel, approve, upgrade'
   });
 });
 
+
+const e = async (shreni: ShreniClient, q: string) => (await sql.raw(q).execute(shreni.db)).rows as Record<string, unknown>[];
+
+describe('shreni task confirm', { timeout: PGLITE_TIMEOUT }, () => {
+  /** A task with a manual check that the worker landed: finish refused by checksPassed, so it was flagged. */
+  async function landedAndFlagged(shreni: ShreniClient, tg: Awaited<ReturnType<typeof setup>>['tg']) {
+    const t = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'needs a person' });
+    await shreni.transaction(db => db.insertInto('shreni.acceptance_checks').values({
+      project_id: tg.id, task_id: t.id, given: 'the dashboard', when: 'a person opens it', then: 'it reads well', mode: 'manual',
+    }).execute());
+    const worker = tg.as({ id: 'sthapathi', role: 'orchestrator' });
+    const claim = (await worker.claim({ worker: 'host/1', leaseMs: 3_600_000 }))!;
+    // Green gates and an approval pass the auto checks only.
+    await shreni.transaction(db => sql`insert into shreni.attempt_evidence (attempt_id, gates)
+      values (${claim.attemptId}, '{"acceptance":{"passed":false}}'::jsonb)`.execute(db));
+    // The work is on main: the store records that before it finishes, and the finish is refused.
+    await shreni.transaction(db => sql`update shreni.attempt_evidence set gates = gates || '{"landed":true}'::jsonb
+      where attempt_id = ${claim.attemptId}`.execute(db));
+    await expect(worker.moveClaimed(claim, 'finish', { reason: 'merged' })).rejects.toThrow(/acceptance checks haven't passed/);
+    await worker.moveClaimed(claim, 'flag', { reason: 'a manual check waits on the developer' });
+    return { t, claim };
+  }
+
+  it('given a task landed with a manual check and flagged, when the developer confirms its checks, then acceptance passes on its attempt and the task finishes', async () => {
+    const { shreni, tg, run, deps } = await setup('kshetra');
+    const { t, claim } = await landedAndFlagged(shreni, tg);
+    expect((await tg.tasks.get(t.id)).state).toBe('blocked');
+    deps.interactive = () => true;
+    const asked: string[] = [];
+    deps.ask = async q => { asked.push(q); return 'y'; };
+    const out = await run('confirm', t.id);
+    expect(out).toMatch(/\(manual\) Given the dashboard, when a person opens it, then it reads well[\s\S]*confirmed and finished/);
+    expect(asked).toEqual(['Do all of these hold? [y/N] ']);
+    expect((await tg.tasks.get(t.id)).state).toBe('done');
+    const ev = await shreni.db.selectFrom('shreni.attempt_evidence').select('gates').where('attempt_id', '=', claim.attemptId).executeTakeFirstOrThrow();
+    expect(ev.gates).toMatchObject({ acceptance: { passed: true, confirmedBy: ME, checks: 1 } });
+    const [move] = await e(shreni, `select kind, actor, actor_role, payload from taskgraph.events where task_id = '${t.id}' and kind = 'move:confirm'`);
+    expect(move).toMatchObject({ actor: ME, actor_role: 'developer', payload: { reason: `acceptance checks confirmed by ${ME}` } });
+  });
+
+  it('needs a terminal and a yes, and only finishes a task flagged for its checks', async () => {
+    const { shreni, tg, run, deps } = await setup('kshetra');
+    const { t } = await landedAndFlagged(shreni, tg);
+    await expect(run('confirm', t.id)).rejects.toThrow(/needs an interactive terminal/);
+    deps.interactive = () => true;
+    deps.ask = async () => 'n';
+    await expect(run('confirm', t.id)).rejects.toThrow(/not confirmed/);
+    expect((await tg.tasks.get(t.id)).state).toBe('blocked');
+
+    // Refused before the question when there is nothing to confirm.
+    deps.ask = async () => { throw new Error('not asked'); };
+    const open = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'open' });
+    await expect(run('confirm', open.id)).rejects.toThrow(/is open; confirm finishes a task flagged for its manual checks/);
+  });
+
+  it('on a project still on an older lifecycle, says to upgrade, and upgrade itself skips the sweep', async () => {
+    const { run, deps, shreni } = await setup();
+    const real = shreni.tg.project.bind(shreni.tg);
+    const behind = { ...shreni, tg: { ...shreni.tg, project: (id: string) => Object.assign(Object.create(real(id)), {
+      expireLeases: async () => { throw new VersionMismatch('the project is on shreni.task@1; this process runs shreni.task@2'); },
+    }) } } as unknown as ShreniClient;
+    deps.open = async () => ({ shreni: behind, close: async () => {} });
+    await expect(run('ready')).rejects.toThrow(/on shreni\.task@1; this process runs shreni\.task@2; run shreni task upgrade in a terminal/);
+    deps.interactive = () => true;
+    expect(await run('upgrade')).toMatch(/already on shreni\.task@\d+/);
+  });
+});
 
 describe('shreni task setup and prime', { timeout: PGLITE_TIMEOUT }, () => {
   it('setup writes the tracker block for each agent CLI and the prime hooks; prime prints it with the memories', async () => {

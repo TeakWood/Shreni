@@ -135,6 +135,39 @@ export async function finishByHand(
   await me.moveClaimed(claim, 'finish', { reason: opts.reason });
 }
 
+/**
+ * Finishes a landed task that was flagged because a manual acceptance check
+ * waits on the developer: records their confirmation on its newest attempt,
+ * which checksPassed reads, and fires confirm (blocked to done).
+ */
+export async function confirmable(shreni: ShreniClient, tg: ProjectHandle, id: string) {
+  const task = await tg.tasks.get(id);
+  if (task.state !== 'blocked') throw new InvalidRequest(`${id} is ${task.state}; confirm finishes a task flagged for its manual checks`);
+  const checks = await checksOf(shreni, tg.id, id);
+  if (!checks.some(c => c.mode === 'manual')) {
+    throw new InvalidRequest(`${id} has no manual check to confirm; it was flagged for something else (shreni task show ${id})`);
+  }
+  const attempt = await sql<{ id: string; landed: boolean }>`
+    select a.id, coalesce(e.gates -> 'landed' = 'true'::jsonb, false) as landed
+      from taskgraph.attempts a left join shreni.attempt_evidence e on e.attempt_id = a.id
+     where a.project_id = ${tg.id} and a.task_id = ${id}
+     order by a.started_at desc, a.id desc limit 1`.execute(shreni.db);
+  if (!attempt.rows[0]?.landed) throw new InvalidRequest(`${id}'s work never landed on main, so there is nothing to confirm (shreni task show ${id})`);
+  return { checks, attemptId: attempt.rows[0].id };
+}
+
+export async function confirmByHand(
+  shreni: ShreniClient, tg: ProjectHandle, me: ActorHandle, id: string, opts: { reason: string },
+): Promise<void> {
+  const { checks, attemptId } = await confirmable(shreni, tg, id);
+  const acceptance = { passed: true, confirmedBy: me.actor.id, checks: checks.length };
+  await shreni.transaction(db => sql`
+    insert into shreni.attempt_evidence (attempt_id, gates)
+    values (${attemptId}, cast(cast(${JSON.stringify({ acceptance })} as text) as jsonb))
+    on conflict (attempt_id) do update set gates = shreni.attempt_evidence.gates || excluded.gates`.execute(db));
+  await me.move(id, 'confirm', { reason: opts.reason });
+}
+
 /** Gives the task back: the developer's own claim, or with `force` anyone's, the event naming who took it. */
 export async function releaseByHand(me: ActorHandle, id: string, opts: { force?: boolean; reason?: string } = {}): Promise<void> {
   try {

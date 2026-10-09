@@ -13,9 +13,9 @@ import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/conne
 import type { ShreniClient } from '../policy/db/client';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import {
-  assertHandsOnKshetra, byHandWorker, cancelByHand, checksOf, claimByHand, finishByHand, noteByHand, releaseByHand,
+  assertHandsOnKshetra, byHandWorker, cancelByHand, checksOf, claimByHand, confirmable, confirmByHand, finishByHand, noteByHand, releaseByHand,
 } from '../policy/task/by-hand';
-import { NotFound } from '../taskgraph';
+import { NotFound, VersionMismatch } from '../taskgraph';
 import { loadState } from '../kshetra/state';
 import { blockBody, blockProblem, installPrimeHooks, writeBlock } from '../policy/init/instructions';
 import { PROVIDER_REGISTRY, providerFromCliName, providerInstructionFile } from '../agents/providers/registry';
@@ -35,11 +35,11 @@ import { hostname } from 'os';
 // a Claude Code shell isn't, so a session can't approve by accident.
 
 export const TASK_SUBCOMMANDS = [
-  'ready', 'show', 'list', 'create', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'upgrade',
+  'ready', 'show', 'list', 'create', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'confirm', 'upgrade',
   'setup', 'prime',
 ] as const;
 /** The developer's own calls, refused without an interactive terminal (an accident guard, not a security boundary). */
-const TERMINAL_ONLY = new Set(['approve', 'upgrade']);
+const TERMINAL_ONLY = new Set(['approve', 'confirm', 'upgrade']);
 /** Calls that work a Kshetra's tasks, which its worker owns: by hand only while it is paused (assertHandsOnKshetra). */
 const HANDS_ON = new Set(['claim', 'finish', 'release', 'cancel', 'upgrade']);
 export const TASK_USAGE = `<${TASK_SUBCOMMANDS.join('|')}> …`;
@@ -57,6 +57,7 @@ const HELP = [
   'shreni task release <id> [--force] [--reason "…"]  give a task back; --force takes back someone else\'s',
   'shreni task cancel <id> --reason "…" [--with-children] [--drop-deps]',
   'shreni task approve <id>                      approve a plan or a lone task (terminal only)',
+  'shreni task confirm <id> [--reason "…"]        confirm a flagged task\'s acceptance checks hold, and finish it (terminal only)',
   'shreni task upgrade [--force]                 move the project to this Shreni\'s lifecycle (terminal only)',
   'shreni task setup                             rewrite Shreni\'s block in the repo\'s instruction files, and the prime hooks',
   'shreni task prime                             the block\'s rules and the project\'s memories, for an agent session',
@@ -242,7 +243,15 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
   const conn = await deps.open(config);
   try {
     const tg = conn.shreni.tg.project(config.project);
-    await tg.expireLeases();
+    // The sweep writes, which a project on an older lifecycle refuses; upgrade is how it moves on.
+    if (sub !== 'upgrade') {
+      try {
+        await tg.expireLeases();
+      } catch (err) {
+        if (!(err instanceof VersionMismatch)) throw err;
+        throw new Error(`${err.message}; run shreni task upgrade in a terminal`);
+      }
+    }
     const me = tg.as({ id: user, role: 'developer' });
     if (found.kshetraId && HANDS_ON.has(sub)) {
       const k = deps.kshetra(found.kshetraId);
@@ -483,6 +492,17 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
     if (!reason) throw new Error('Usage: shreni task finish <id> --reason "…"');
     await finishByHand(shreni, tg, me, id, { reason, checksPassed: a.bools.has('--checks-passed') });
     deps.print(`finished ${id}`);
+  },
+
+  async confirm({ ctx, deps, tg, me, shreni, user }) {
+    const a = parseArgs(ctx.args, { valued: ['--reason'], positionals: 1 });
+    const id = oneId(a, 'confirm <id>');
+    // Refused before the question when there is nothing to confirm.
+    const { checks } = await confirmable(shreni, tg, id);
+    deps.print([`${id}'s acceptance checks:`, ...checks.map(c => `  - (${c.mode}) Given ${c.given}, when ${c.when}, then ${c.then}`)].join('\n'));
+    if (!/^y(es)?$/i.test((await deps.ask('Do all of these hold? [y/N] ')).trim())) throw new Error('not confirmed');
+    await confirmByHand(shreni, tg, me, id, { reason: a.values['--reason']?.trim() || `acceptance checks confirmed by ${user}` });
+    deps.print(`confirmed and finished ${id}`);
   },
 
   async release({ ctx, deps, me }) {

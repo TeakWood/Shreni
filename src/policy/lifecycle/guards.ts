@@ -37,6 +37,29 @@ const checksPassedFn: GuardFn = async ({ task, tx }) => {
   return evidence.rows[0]?.passed === true ? true : 'the task\'s acceptance checks haven\'t passed';
 };
 
+/**
+ * confirm: the developer's confirmation finishes only a task whose work
+ * landed on main and whose manual checks were what held it: the newest
+ * attempt records both that it landed and that its acceptance passed, and
+ * the task has a manual check.
+ */
+const checksConfirmedFn: GuardFn = async ({ task, tx }) => {
+  const manual = await sql<{ n: number }>`
+    select count(*)::int as n from shreni.acceptance_checks
+     where project_id = ${task.projectId} and task_id = ${task.id} and mode = 'manual'`.execute(tx);
+  if (manual.rows[0].n === 0) return 'the task has no manual check to confirm';
+  const evidence = await sql<{ landed: boolean; passed: boolean }>`
+    select coalesce(e.gates -> 'landed' = 'true'::jsonb, false) as landed,
+           coalesce(e.gates -> 'acceptance' -> 'passed' = 'true'::jsonb, false) as passed
+      from taskgraph.attempts a left join shreni.attempt_evidence e on e.attempt_id = a.id
+     where a.project_id = ${task.projectId} and a.task_id = ${task.id}
+     order by (a.id = ${task.leaseAttemptId}::uuid) desc nulls last, a.started_at desc, a.id desc
+     limit 1`.execute(tx);
+  const row = evidence.rows[0];
+  if (!row?.landed) return 'the task\'s work never landed on main';
+  return row.passed ? true : 'the task\'s acceptance checks haven\'t passed';
+};
+
 /** completeContainer: a container whose children are all terminal, with at least one done. */
 const childrenSettledFn: GuardFn = async ({ task, tx }) => {
   if (task.kind !== 'container') return 'only a container is completed; finish a work task';
@@ -62,9 +85,11 @@ const childrenSettledFn: GuardFn = async ({ task, tx }) => {
 export const GUARD_SOURCES = {
   hasOpenPr: hasOpenPrFn,
   checksPassed: checksPassedFn,
+  checksConfirmed: checksConfirmedFn,
   childrenSettled: childrenSettledFn,
 } as const satisfies Record<string, GuardFn>;
 
 export const hasOpenPr = defineGuard('hasOpenPr', GUARD_SOURCES.hasOpenPr);
 export const checksPassed = defineGuard('checksPassed', GUARD_SOURCES.checksPassed);
 export const childrenSettled = defineGuard('childrenSettled', GUARD_SOURCES.childrenSettled);
+export const checksConfirmed = defineGuard('checksConfirmed', GUARD_SOURCES.checksConfirmed);

@@ -91,7 +91,13 @@ export function engineTaskStore(opts: {
       if (claim) await r(() => as.heartbeat(claim, { leaseMs: LEASE_MS }));
     },
 
-    finish: (taskId, reason) => moveTask(taskId, 'finish', reason),
+    async finish(taskId, reason) {
+      // Only work on main is finished: recorded first, so a task whose finish is
+      // refused for a manual check can be confirmed by the developer, and nothing else.
+      const attempt = await currentAttempt(taskId);
+      if (attempt) await r(() => putEvidence(attempt, { gates: { landed: true } }));
+      await moveTask(taskId, 'finish', reason);
+    },
 
     async deferForPr(taskId, prUrl) {
       const attempt = await currentAttempt(taskId);

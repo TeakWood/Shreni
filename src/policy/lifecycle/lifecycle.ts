@@ -1,15 +1,15 @@
 import { defineLifecycle } from '../../taskgraph';
-import { checksPassed, childrenSettled, hasOpenPr } from './guards';
+import { checksConfirmed, checksPassed, childrenSettled, hasOpenPr } from './guards';
 
 // Shreni's task lifecycle (policy spec, "The lifecycle"): eight states and
-// thirteen moves. Bump the version on every change; a guard whose source
+// fourteen moves. Bump the version on every change; a guard whose source
 // changes needs a bump too (guard-snapshot.test.ts).
 
 const nonTerminal = ['proposed', 'open', 'claimed', 'waiting', 'blocked', 'parked'];
 
 export const taskLifecycle = defineLifecycle({
   name: 'shreni.task',
-  version: 1,
+  version: 2,
   states: {
     proposed: {},
     open: { claimable: true },
@@ -31,6 +31,8 @@ export const taskLifecycle = defineLifecycle({
     { name: 'followUp', from: ['waiting'], to: 'open', by: ['orchestrator'], boost: true },
     { name: 'flag', from: ['open', 'claimed', 'waiting'], to: 'blocked', by: ['orchestrator', 'system'] },
     { name: 'unblock', from: ['blocked'], to: 'open', by: ['developer'] },
+    // a landed task flagged for its manual checks, finished on the developer's confirmation
+    { name: 'confirm', from: ['blocked'], to: 'done', by: ['developer'], guard: checksConfirmed, clearsBoost: true },
     { name: 'park', from: ['proposed', 'open', 'blocked'], to: 'parked', by: ['developer'] },
     { name: 'unpark', from: ['parked'], to: 'open', by: ['developer'] },
     { name: 'cancel', from: nonTerminal, to: 'cancelled', by: ['developer'], clearsBoost: true },

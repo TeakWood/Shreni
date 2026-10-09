@@ -1,6 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "guards": {
+    "checksConfirmed": "1729f5d0e9eeacf5",
     "checksPassed": "5cb7922e05022043",
     "childrenSettled": "0c3bc5b3b1dcb529",
     "hasOpenPr": "08527c0abfa94845"

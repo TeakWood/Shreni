@@ -2,6 +2,7 @@ import { describe, it, expect, vi, onTestFinished, beforeEach } from 'vitest';
 import { createTestDb, PGLITE_TIMEOUT } from '../../taskgraph/test/pglite';
 import { openShreni } from '../db/client';
 import { taskLifecycle } from '../lifecycle/lifecycle';
+import { confirmByHand } from '../task/by-hand';
 import { engineTaskStore } from './task-store';
 import { EngineQueue } from './leases';
 import { engineHooks } from './hooks';
@@ -189,6 +190,37 @@ describe('review follow-ups (T4.5)', { timeout: PGLITE_TIMEOUT }, () => {
     pr.state = 'MERGED';
     const { reconcilePullRequests } = await import('../../sthapathi/merge.js');
     await reconcilePullRequests(kshetra);
-    expect(await rows(`select id, state from taskgraph.tasks order by created_at`)).toEqual([{ id: a.id, state: 'waiting' }, { id: b.id, state: 'done' }]);
+    // a's work is on main: a refused finish flags it for the developer, as on the push path
+    expect(await rows(`select id, state from taskgraph.tasks order by created_at`)).toEqual([{ id: a.id, state: 'blocked' }, { id: b.id, state: 'done' }]);
+  });
+
+  it('a merged PR whose manual check waits is flagged, and the developer\'s confirmation finishes it; a declined PR can\'t be confirmed', async () => {
+    const { as, claims, store, sys, rows, shreni, tg } = await setup();
+    const manual = { given: 'the page', when: 'a person reads it', then: 'it reads well', mode: 'manual' as const };
+    const { reconcilePullRequests } = await import('../../sthapathi/merge.js');
+    /** A task with a manual check, reviewed and gated green, its PR open, then settled as `state`. */
+    const throughPr = async (title: string, state: 'MERGED' | 'CLOSED') => {
+      const t = await sys.tasks.create({ title });
+      await shreni.transaction(db => db.insertInto('shreni.acceptance_checks').values({ project_id: tg.id, task_id: t.id, ...manual }).execute());
+      claims.set(t.id, (await as.claim({ worker: 'w', leaseMs: 60_000, filter: { ids: [t.id] } }))!);
+      // green gates and an approval: the auto checks only
+      await store.recordAcceptance(t.id, true);
+      await store.deferForPr(t.id, pr.url);
+      claims.delete(t.id);
+      pr.state = state;
+      await reconcilePullRequests(kshetra);
+      return t;
+    };
+    const declined = await throughPr('declined', 'CLOSED');
+    const landed = await throughPr('landed', 'MERGED');
+    expect(await rows(`select id, state from taskgraph.tasks order by created_at`))
+      .toEqual([{ id: declined.id, state: 'blocked' }, { id: landed.id, state: 'blocked' }]);
+
+    const dev = tg.as({ id: 'ann', role: 'developer' });
+    await expect(confirmByHand(shreni, tg, dev, declined.id, { reason: 'looks fine' })).rejects.toThrow(/never landed on main/);
+    // nor can the move be made around the command
+    await expect(dev.move(declined.id, 'confirm', { reason: 'looks fine' })).rejects.toThrow(/never landed on main/);
+    await confirmByHand(shreni, tg, dev, landed.id, { reason: 'read it' });
+    expect(await rows(`select state from taskgraph.tasks where id = $1`, [landed.id])).toEqual([{ state: 'done' }]);
   });
 });

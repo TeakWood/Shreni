@@ -2,7 +2,7 @@ import { describe, it, expect, onTestFinished } from 'vitest';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { taskLifecycle } from './lifecycle';
-import { GUARD_SOURCES, checksPassed, childrenSettled, hasOpenPr } from './guards';
+import { GUARD_SOURCES, checksConfirmed, checksPassed, childrenSettled, hasOpenPr } from './guards';
 import { guardSnapshotProblems, hashGuardSources, normalizeSource, type GuardSnapshot } from './guard-snapshot';
 import { createTestDb, PGLITE_TIMEOUT } from '../../taskgraph/test/pglite';
 import { openShreni } from '../db/client';
@@ -28,9 +28,9 @@ describe('the guard source snapshot', () => {
   });
 
   it('covers exactly the guards the lifecycle uses, as the lifecycle uses them', () => {
-    const used = taskLifecycle.moves.filter(m => m.guard).map(m => m.guard!.guardName).sort();
+    const used = [...new Set(taskLifecycle.moves.filter(m => m.guard).map(m => m.guard!.guardName))].sort();
     expect(used).toEqual(Object.keys(GUARD_SOURCES).sort());
-    const exported = { hasOpenPr, checksPassed, childrenSettled };
+    const exported = { hasOpenPr, checksPassed, checksConfirmed, childrenSettled };
     for (const m of taskLifecycle.moves) if (m.guard) expect(m.guard).toBe(exported[m.guard.guardName as keyof typeof exported]);
   });
 
@@ -49,9 +49,9 @@ describe('the guard source snapshot', () => {
 });
 
 describe('taskLifecycle', () => {
-  it('has the spec\'s eight states and thirteen moves, and registers', () => {
+  it('has the spec\'s eight states and fourteen moves, and registers', () => {
     expect(Object.keys(taskLifecycle.states)).toHaveLength(8);
-    expect(taskLifecycle.moves).toHaveLength(13);
+    expect(taskLifecycle.moves).toHaveLength(14);
     expect(taskLifecycle.name).toBe('shreni.task');
   });
 });

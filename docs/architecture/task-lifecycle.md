@@ -6,14 +6,14 @@ This spec is Shreni's side of the task graph: the lifecycle it declares, who may
 
 ## The lifecycle
 
-Shreni's lifecycle has eight states and thirteen moves, says where new tasks land, and says who may make the calls that aren't moves. The engine stores it as data and refuses anything it doesn't declare; the format, and what every lifecycle must meet, are in the engine spec's [Task lifecycle](task-graph-engine.md#task-lifecycle) section.
+Shreni's lifecycle has eight states and fourteen moves, says where new tasks land, and says who may make the calls that aren't moves. The engine stores it as data and refuses anything it doesn't declare; the format, and what every lifecycle must meet, are in the engine spec's [Task lifecycle](task-graph-engine.md#task-lifecycle) section.
 
 ```ts
 const nonTerminal = ['proposed', 'open', 'claimed', 'waiting', 'blocked', 'parked'];
 
 const taskLifecycle = defineLifecycle({
   name: 'shreni.task',
-  version: 1,                            // bump on every change
+  version: 2,                            // bump on every change
   states: {
     proposed:  {},
     open:      { claimable: true },
@@ -35,6 +35,7 @@ const taskLifecycle = defineLifecycle({
     { name: 'followUp', from: ['waiting'],                     to: 'open',      by: ['orchestrator'],              boost: true },
     { name: 'flag',     from: ['open', 'claimed', 'waiting'],  to: 'blocked',   by: ['orchestrator', 'system'] },
     { name: 'unblock',  from: ['blocked'],                     to: 'open',      by: ['developer'] },
+    { name: 'confirm',  from: ['blocked'],                     to: 'done',      by: ['developer'],                 guard: checksConfirmed, clearsBoost: true },   // manual checks confirmed
     { name: 'park',     from: ['proposed', 'open', 'blocked'], to: 'parked',    by: ['developer'] },
     { name: 'unpark',   from: ['parked'],                      to: 'open',      by: ['developer'] },
     { name: 'cancel',   from: nonTerminal,                     to: 'cancelled', by: ['developer'],                 clearsBoost: true },
@@ -282,7 +283,8 @@ A project can be tracked without ever being worked: Shreni keeps its task graph,
 - **Later calls find the claim by its holder.** `note`, `finish` and `release` run in new processes, so they get the task's live attempt back with the engine's `claims.resume`, which returns it only to the developer who holds it; every write is then fenced as a worker's is. Each of those calls renews the lease. Anyone else gets `LeaseHeld`, naming the holder. `shreni task release <id> --force` takes it back, and the event records who did.
 - **Every run sweeps first.** Each `shreni task` call runs `expireLeases` for its project before anything else, so a claim that lapsed overnight is back in `ready` by morning and counts toward the three-expiry limit.
 - `shreni task finish <id> --reason "…"` fires `finish`, and `checksPassed` applies as for any task. No test gate runs by hand, so a task with acceptance checks finishes only with `--checks-passed`, the developer's confirmation that each check holds; finish records it on the attempt's evidence and otherwise refuses, listing the checks. On an epic it fires `completeContainer` ([Containers](#containers)). `shreni task release <id>` gives the task back.
-- `approve` and `upgrade` need an interactive terminal, which a Claude Code shell isn't, so a session can't approve by accident. That is an accident guard, not a security boundary.
+- **Manual checks are the developer's.** On a Kshetra, green gates and an approval pass a task's auto checks only. A task with a manual check lands, by push or by a merged PR, its finish is refused, and it is flagged for the developer; finish records on the attempt that the work landed before it moves. `shreni task confirm <id>` lists its checks and, once the developer answers yes, records `acceptance.passed` on its attempt and fires `confirm`, which takes it from `blocked` to `done`. Its guard, `checksConfirmed`, passes only for a task with a manual check whose newest attempt landed and passed, so a task flagged for anything else, such as a declined PR, is never confirmed. In a tracker project, `finish --checks-passed` does the same for a claimed task.
+- `approve`, `confirm` and `upgrade` need an interactive terminal, which a Claude Code shell isn't, so a session can't approve by accident. That is an accident guard, not a security boundary.
 
 ## Init
 
