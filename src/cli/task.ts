@@ -10,15 +10,30 @@ import { loadUserConfig } from '../kshetra/user-config';
 import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/connect';
 import type { ShreniClient } from '../policy/db/client';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
+import {
+  assertHandsOnKshetra, byHandWorker, cancelByHand, checksOf, claimByHand, finishByHand, noteByHand, releaseByHand,
+} from '../policy/task/by-hand';
+import { NotFound } from '../taskgraph';
+import { loadState } from '../kshetra/state';
+import { readPid, isAlive } from './pid';
+import { createInterface } from 'readline/promises';
+import { hostname } from 'os';
 
 // shreni task (policy spec, "Working by hand" and "Project config"): a person,
 // or a Claude Code session acting for them, reads and files work with the
 // developer role. Each run finds its project from the repo's tracker.yaml or
 // kshetra.yaml, and sweeps expired leases before anything else, so a claim that
-// lapsed overnight is back in ready by morning. Claiming and finishing by hand
-// come with claim, finish and release.
+// lapsed overnight is back in ready by morning. The claim rules are in
+// policy/task/by-hand; approve and upgrade need an interactive terminal, which
+// a Claude Code shell isn't, so a session can't approve by accident.
 
-export const TASK_SUBCOMMANDS = ['ready', 'show', 'list', 'create', 'note', 'remember'] as const;
+export const TASK_SUBCOMMANDS = [
+  'ready', 'show', 'list', 'create', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'upgrade',
+] as const;
+/** The developer's own calls, refused without an interactive terminal (an accident guard, not a security boundary). */
+const TERMINAL_ONLY = new Set(['approve', 'upgrade']);
+/** Calls that work a Kshetra's tasks, which its worker owns: by hand only while it is paused (assertHandsOnKshetra). */
+const HANDS_ON = new Set(['claim', 'finish', 'release', 'cancel', 'upgrade']);
 export const TASK_USAGE = `<${TASK_SUBCOMMANDS.join('|')}> …`;
 
 const HELP = [
@@ -27,8 +42,14 @@ const HELP = [
   'shreni task list [--state <s,…>|--all] [--json]  tasks; every live one by default',
   'shreni task create --title "…" [--description "…"] [--parent <id>] [--priority 0-4] [--epic]',
   '                   [--check "given … when … then …"]…  lands as proposed, for the developer to approve',
-  'shreni task note <id> "…"                     a note on a task',
+  'shreni task note <id> "…"                     a note on a task; renews your claim on it',
   'shreni task remember "…" [--key <key>]        an insight for later sessions',
+  'shreni task claim <id>                        take one ready task, yours for 8 hours',
+  'shreni task finish <id> --reason "…" [--checks-passed]  finish your task, or complete an epic',
+  'shreni task release <id> [--force] [--reason "…"]  give a task back; --force takes back someone else\'s',
+  'shreni task cancel <id> --reason "…" [--with-children] [--drop-deps]',
+  'shreni task approve <id>                      approve a plan or a lone task (terminal only)',
+  'shreni task upgrade [--force]                 move the project to this Shreni\'s lifecycle (terminal only)',
 ].join('\n');
 
 /** The states a list shows by default: every one not yet terminal. */
@@ -41,6 +62,12 @@ export interface TaskDeps {
   /** The developer the calls act as: `user` in ~/.shreni/config.yaml, else git's user.email. */
   user(): string | undefined;
   print(line: string): void;
+  /** Whether a person is at a terminal: stdin and stdout both a TTY. */
+  interactive(): boolean;
+  /** Asks a question at the terminal and returns the answer. */
+  ask(question: string): Promise<string>;
+  /** Whether the Kshetra is paused, and its worker on this machine as host/pid (its lock's name), or null. */
+  kshetra(id: string): { paused: boolean; localWorker: string | null };
 }
 
 const defaultDeps = (): TaskDeps => ({
@@ -48,10 +75,25 @@ const defaultDeps = (): TaskDeps => ({
   open: config => openKshetraEngine(config, { name: 'shreni-task' }),
   user: () => loadUserConfig().user,
   print: line => console.log(line),
+  interactive: () => !!process.stdin.isTTY && !!process.stdout.isTTY,
+  async ask(question) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return await rl.question(question);
+    } finally {
+      rl.close();
+    }
+  },
+  kshetra(id) {
+    const pid = readPid(id);
+    return { paused: !!loadState().kshetras[id]?.paused, localWorker: pid !== null && isAlive(pid) ? `${hostname()}/${pid}` : null };
+  },
 });
 
 /** The repo's project config, from the nearest .shreni/tracker.yaml or .shreni/kshetra.yaml above `cwd`. */
-export function findProjectConfig(cwd: string): { kind: 'tracker' | 'kshetra'; path: string; config: ProjectConfig & { project: string } } {
+export function findProjectConfig(cwd: string): {
+  kind: 'tracker' | 'kshetra'; path: string; config: ProjectConfig & { project: string }; kshetraId?: string;
+} {
   for (let dir = resolve(cwd); ; dir = dirname(dir)) {
     const tracker = join(dir, '.shreni', 'tracker.yaml');
     const kshetra = join(dir, '.shreni', 'kshetra.yaml');
@@ -59,9 +101,10 @@ export function findProjectConfig(cwd: string): { kind: 'tracker' | 'kshetra'; p
     if (found.length > 1) throw new Error(`${dir} has both .shreni/tracker.yaml and .shreni/kshetra.yaml; a repo is one or the other`);
     if (found.length === 1) {
       const kind = found[0] === tracker ? 'tracker' : 'kshetra';
-      const config: ProjectConfig = kind === 'tracker' ? loadTrackerConfig(found[0]) : loadKshetraConfig(found[0]);
+      const kshetraConfig = kind === 'kshetra' ? loadKshetraConfig(found[0]) : undefined;
+      const config: ProjectConfig = kshetraConfig ?? loadTrackerConfig(found[0]);
       if (!config.project) throw new Error(`${found[0]} names no project yet; run shreni init`);
-      return { kind, path: found[0], config: config as ProjectConfig & { project: string } };
+      return { kind, path: found[0], config: config as ProjectConfig & { project: string }, ...(kshetraConfig ? { kshetraId: kshetraConfig.id } : {}) };
     }
     // A repo's own root ends the walk, so a clone nested in a tracked repo never acts on the outer project.
     if (existsSync(join(dir, '.git')) || dirname(dir) === dir) {
@@ -132,7 +175,11 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
   if (!(TASK_SUBCOMMANDS as readonly string[]).includes(sub)) {
     throw new Error(`unknown shreni task command ${JSON.stringify(sub)}; it takes ${TASK_SUBCOMMANDS.join(', ')}`);
   }
-  const { config } = findProjectConfig(deps.cwd);
+  if (TERMINAL_ONLY.has(sub) && !deps.interactive()) {
+    throw new Error(`shreni task ${sub} is the developer's, and needs an interactive terminal`);
+  }
+  const found = findProjectConfig(deps.cwd);
+  const { config } = found;
   const user = deps.user();
   if (!user) throw new Error('no developer to act as: set user in ~/.shreni/config.yaml, or git config user.email');
 
@@ -141,7 +188,14 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
     const tg = conn.shreni.tg.project(config.project);
     await tg.expireLeases();
     const me = tg.as({ id: user, role: 'developer' });
-    await SUBCOMMANDS[sub as (typeof TASK_SUBCOMMANDS)[number]]({ ctx, deps, tg, me, shreni: conn.shreni });
+    if (found.kshetraId && HANDS_ON.has(sub)) {
+      const k = deps.kshetra(found.kshetraId);
+      assertHandsOnKshetra({
+        call: sub, kshetraId: found.kshetraId, interactive: deps.interactive(), paused: k.paused,
+        lockHolder: await tg.locks.holder('worker'), localWorker: k.localWorker,
+      });
+    }
+    await SUBCOMMANDS[sub as (typeof TASK_SUBCOMMANDS)[number]]({ ctx, deps, tg, me, shreni: conn.shreni, found, user });
   } finally {
     await conn.close().catch(() => {});
   }
@@ -149,7 +203,15 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
 
 type Run = (s: {
   ctx: CommandContext; deps: TaskDeps; tg: ProjectHandle; me: ActorHandle; shreni: ShreniClient;
+  found: ReturnType<typeof findProjectConfig>; user: string;
 }) => Promise<void>;
+
+/** The one task id a subcommand takes. */
+function oneId(a: { positionals: string[] }, usage: string): string {
+  const [id] = a.positionals;
+  if (!id) throw new Error(`Usage: shreni task ${usage}`);
+  return id;
+}
 
 const SUBCOMMANDS: Record<(typeof TASK_SUBCOMMANDS)[number], Run> = {
   async ready({ ctx, deps, tg }) {
@@ -255,7 +317,7 @@ const SUBCOMMANDS: Record<(typeof TASK_SUBCOMMANDS)[number], Run> = {
     const [id, ...words] = parseArgs(ctx.args, { positionals: 'rest' }).positionals;
     const text = words.join(' ').trim();
     if (!id || !text) throw new Error('Usage: shreni task note <id> "…"');
-    await me.notes.add(id, text);
+    await noteByHand(me, id, text);
     deps.print(`noted on ${id}`);
   },
 
@@ -272,5 +334,111 @@ const SUBCOMMANDS: Record<(typeof TASK_SUBCOMMANDS)[number], Run> = {
       on conflict (project_id, key) do update set content = excluded.content, updated_at = now()
       returning (xmax <> 0) as replaced`.execute(db));
     deps.print(`${r.rows[0]?.replaced ? 'replaced' : 'remembered'} ${key}`);
+  },
+
+  async claim({ ctx, deps, tg, me, user }) {
+    const id = oneId(parseArgs(ctx.args, { positionals: 1 }), 'claim <id>');
+    const claim = await claimByHand(tg, me, id, { worker: byHandWorker(user) });
+    deps.print(`claimed ${id} until ${new Date(claim.expiresAt).toISOString()}: ${claim.task.title}`);
+  },
+
+  async finish({ ctx, deps, tg, me, shreni }) {
+    const a = parseArgs(ctx.args, { valued: ['--reason'], bool: ['--checks-passed'], positionals: 1 });
+    const id = oneId(a, 'finish <id> --reason "…"');
+    const reason = a.values['--reason']?.trim();
+    if (!reason) throw new Error('Usage: shreni task finish <id> --reason "…"');
+    await finishByHand(shreni, tg, me, id, { reason, checksPassed: a.bools.has('--checks-passed') });
+    deps.print(`finished ${id}`);
+  },
+
+  async release({ ctx, deps, me }) {
+    const a = parseArgs(ctx.args, { valued: ['--reason'], bool: ['--force'], positionals: 1 });
+    const id = oneId(a, 'release <id> [--force]');
+    await releaseByHand(me, id, { force: a.bools.has('--force'), ...(a.values['--reason'] ? { reason: a.values['--reason'] } : {}) });
+    deps.print(`released ${id}`);
+  },
+
+  async cancel({ ctx, deps, tg, me, shreni }) {
+    const a = parseArgs(ctx.args, { valued: ['--reason'], bool: ['--with-children', '--drop-deps'], positionals: 1 });
+    const id = oneId(a, 'cancel <id> --reason "…"');
+    const reason = a.values['--reason']?.trim();
+    if (!reason) throw new Error('Usage: shreni task cancel <id> --reason "…" [--with-children] [--drop-deps]');
+    const done = await cancelByHand(shreni, tg, me, id, {
+      reason, withChildren: a.bools.has('--with-children'), dropDeps: a.bools.has('--drop-deps'),
+    });
+    deps.print(`cancelled ${done.join(', ')}`);
+  },
+
+  async approve({ ctx, deps, tg, me, shreni }) {
+    const id = oneId(parseArgs(ctx.args, { positionals: 1 }), 'approve <id>');
+    const plan = await tg.plans.get(id).catch(err => {
+      if (err instanceof NotFound) return null;
+      throw err;
+    });
+    // What is approved is shown first, checks included: the tasks, and the validators' findings.
+    const shown = async (t: Task) => [
+      `  ${line(t)}`,
+      ...(await checksOf(shreni, tg.id, t.id)).map(c => `      Given ${c.given}, when ${c.when}, then ${c.then}${c.mode === 'manual' ? ' (manual)' : ''}`),
+    ];
+    const planTasks = () => tg.tasks.list({ plan: id, orderBy: 'created' });
+    const before = plan ? await planTasks() : [await tg.tasks.get(id)];
+    const out = [plan ? `plan ${id}: ${plan.title}` : 'task'];
+    for (const t of before) out.push(...await shown(t));
+    if (plan) {
+      const report = await me.plans.validate(id);
+      for (const f of report.findings) out.push(`  ${f.severity}: ${f.message}`);
+      deps.print(out.join('\n'));
+      if (!report.ok) throw new Error(`plan ${id} doesn't pass validation; fix the errors above first`);
+    } else {
+      deps.print(out.join('\n'));
+    }
+    // The id typed back: approving is the step that makes work runnable.
+    if ((await deps.ask(`Type ${id} to approve it: `)).trim() !== id) throw new Error('not approved');
+    if (plan) {
+      // Approve only what was shown: a plan still being filed may have grown meanwhile.
+      const now = (await planTasks()).map(t => t.id).sort().join(',');
+      if (now !== before.map(t => t.id).sort().join(',')) throw new Error(`plan ${id} changed while you looked; run approve again`);
+      for (const f of (await me.plans.approve(id, { via: 'cli' })).findings) deps.print(`  ${f.severity}: ${f.message}`);
+    } else {
+      await me.tasks.approve(id, { via: 'cli' });
+    }
+    deps.print(`approved ${id}`);
+  },
+
+  async upgrade({ ctx, deps, tg, me, shreni }) {
+    const a = parseArgs(ctx.args, { bool: ['--force'] });
+    const force = a.bools.has('--force');
+    const { version, name } = shreni.tg.lifecycle;
+    const diff = await tg.lifecycles.diff(version);
+    if (diff.from.version === version) return deps.print(`already on ${name}@${version}`);
+    if (diff.from.version > version) {
+      throw new Error(`the project is on ${diff.from.name}@${diff.from.version}, newer than this Shreni's ${name}@${version}; upgrade Shreni instead`);
+    }
+    const list = (label: string, xs: string[]) => (xs.length ? [`  ${label}: ${xs.join(', ')}`] : []);
+    const flags = (f: Record<string, true>) => Object.keys(f).join(',') || 'none';
+    deps.print([
+      `${diff.from.name}@${diff.from.version} → ${name}@${version}`,
+      ...list('states added', diff.states.added), ...list('states removed', diff.states.removed),
+      ...diff.flags.map(f => `  state ${f.state}: ${flags(f.from)} → ${flags(f.to)}`),
+      ...list('moves added', diff.moves.added), ...list('moves removed', diff.moves.removed),
+      ...list('moves changed', diff.changedMoves),
+      ...diff.roles.map(r => `  ${r.move} roles: +${r.added.join(',') || '-'} -${r.removed.join(',') || '-'}`),
+      ...diff.guards.map(g => `  ${g.move} guard: ${g.from ?? 'none'} → ${g.to ?? 'none'}`),
+      ...list('hooks changed', diff.hooks), ...list('permissions changed', diff.permissions),
+      ...(diff.create ? ['  the create rules change'] : []),
+      ...diff.tasks.map(t => `  ${t.id}: ${t.from} → ${t.to}`),
+      ...diff.leases.map(l => `  lease on ${l.taskId} (worker ${l.worker})${l.live ? ', live' : ''}`),
+    ].join('\n'));
+    // What activation would refuse is refused before asking.
+    const blockers = [
+      ...diff.unmapped.map(u => `no state ${u.state} for ${u.tasks.join(', ')}`),
+      ...diff.broken,
+      ...(force ? [] : diff.leases.filter(l => l.live).map(l => `a live lease on ${l.taskId} (worker ${l.worker}); wait for it, or pass --force to end it`)),
+    ];
+    if (blockers.length) throw new Error(`can't upgrade:\n${blockers.map(b => `  - ${b}`).join('\n')}`);
+    const target = `${name}@${version}`;
+    if ((await deps.ask(`Type ${target} to upgrade: `)).trim() !== target) throw new Error('not upgraded');
+    await me.lifecycles.activate(version, { force });
+    deps.print(`upgraded to ${target}`);
   },
 };

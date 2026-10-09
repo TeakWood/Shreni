@@ -8,6 +8,7 @@ import { openShreni, type ShreniClient } from '../policy/db/client';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import { makeContext } from './registry';
 import { findProjectConfig, parseCheck, runTask, type TaskDeps } from './task';
+import { takeWorkerLock } from '../policy/sthapathi/leases';
 
 // shreni task: ready, show, list, create --check, note, remember (policy spec,
 // "Working by hand" and "Project config"): each run finds its project from the
@@ -34,6 +35,9 @@ async function setup(kind: 'tracker' | 'kshetra' = 'tracker') {
     open: async () => ({ shreni, close: async () => {} }),
     user: () => ME,
     print: line => out.push(line),
+    interactive: () => false,
+    ask: async () => '',
+    kshetra: () => ({ paused: false, localWorker: null }),
   };
   const run = async (...args: string[]) => {
     out.length = 0;
@@ -231,3 +235,212 @@ describe('parseCheck', () => {
     expect(() => parseCheck('given a when b then .')).toThrow(/each part/);
   });
 });
+
+describe('shreni task by hand: claim, finish, release, cancel, approve, upgrade', { timeout: PGLITE_TIMEOUT }, () => {
+  /** An approved, ready task. */
+  async function ready(tg: Awaited<ReturnType<typeof setup>>['tg'], title = 'a') {
+    return tg.as({ id: 's', role: 'system' }).tasks.create({ title });
+  }
+
+  it('given developer A\'s claim, when developer B finishes it, then LeaseHeld names A', async () => {
+    const { tg, run, deps } = await setup();
+    const a = await ready(tg);
+    expect(await run('claim', a.id)).toMatch(new RegExp(`claimed ${a.id}`));
+    deps.user = () => 'bea@example.com';
+    await expect(run('finish', a.id, '--reason', 'done')).rejects.toThrow(new RegExp(`${a.id} is held by ${ME}`));
+    await expect(run('note', a.id, 'mine now')).rejects.toThrow(new RegExp(`held by ${ME}`));
+    await expect(run('release', a.id)).rejects.toThrow(new RegExp(`held by ${ME}`));
+    expect((await tg.tasks.get(a.id)).state).toBe('claimed');
+  });
+
+  it('given a shell that isn\'t interactive, when approve runs, then it refuses', async () => {
+    const { tg, run } = await setup();
+    const t = await tg.as({ id: ME, role: 'developer' }).tasks.create({ title: 'lone' });
+    await expect(run('approve', t.id)).rejects.toThrow(/interactive terminal/);
+    await expect(run('upgrade')).rejects.toThrow(/interactive terminal/);
+    expect((await tg.tasks.get(t.id)).state).toBe('proposed');
+  });
+
+  it('given a running worker, when someone claims a Kshetra task by hand, then it refuses', async () => {
+    const { tg, run, deps } = await setup('kshetra');
+    const a = await ready(tg);
+    deps.interactive = () => true;
+    // The worker on this machine, holding the Kshetra's lock under its host/pid.
+    const release = await takeWorkerLock(tg);
+    onTestFinished(() => release());
+    const local = await tg.locks.holder('worker');
+    deps.kshetra = () => ({ paused: false, localWorker: local });
+    await expect(run('claim', a.id)).rejects.toThrow(/isn't paused; pause it first/);
+    // A worker elsewhere: this machine's paused flag says nothing about it.
+    deps.kshetra = () => ({ paused: true, localWorker: null });
+    await expect(run('claim', a.id)).rejects.toThrow(/a worker on .* runs web/);
+    // This machine's worker, paused: a person may.
+    deps.kshetra = () => ({ paused: true, localWorker: local });
+    expect(await run('claim', a.id)).toMatch(/claimed/);
+  });
+
+  it('works a Kshetra by hand only while it is paused, even with no worker running', async () => {
+    const { tg, run, deps } = await setup('kshetra');
+    const a = await ready(tg);
+    deps.interactive = () => true;
+    await expect(run('claim', a.id)).rejects.toThrow(/isn't paused/);
+    expect((await tg.tasks.get(a.id)).state).toBe('open');
+  });
+
+  it('never works a Kshetra\'s tasks from a session that isn\'t interactive', async () => {
+    const { tg, run, deps } = await setup('kshetra');
+    const a = await ready(tg);
+    deps.kshetra = () => ({ paused: true, localWorker: null });
+    for (const args of [['claim', a.id], ['cancel', a.id, '--reason', 'r'], ['release', a.id, '--force'], ['finish', a.id, '--reason', 'r']]) {
+      await expect(run(...args)).rejects.toThrow(/needs an interactive terminal/);
+    }
+    expect((await tg.tasks.get(a.id)).state).toBe('open');
+    // Reading and filing stay open to sessions.
+    expect(await run('list')).toContain(a.id);
+  });
+
+  it('claim takes that one task for 8 hours, recording the developer and cli worker', async () => {
+    const { tg, run } = await setup();
+    await ready(tg, 'first');
+    const b = await ready(tg, 'second');
+    await run('claim', b.id);
+    const t = await tg.tasks.get(b.id);
+    expect(t.claim).toMatchObject({ actor: ME, worker: expect.stringMatching(new RegExp(`^cli:${ME}@`)) });
+    const hours = (new Date(t.claim!.expiresAt).getTime() - Date.now()) / 3_600_000;
+    expect(hours).toBeGreaterThan(7.9);
+    await expect(run('claim', b.id)).rejects.toThrow(/you already hold/);
+  });
+
+  it('says why a task can\'t be claimed', async () => {
+    const { tg, run } = await setup();
+    const dev = tg.as({ id: ME, role: 'developer' });
+    const proposed = await dev.tasks.create({ title: 'p' });
+    await expect(run('claim', proposed.id)).rejects.toThrow(/is proposed, not open/);
+    const a = await ready(tg, 'a');
+    const b = await ready(tg, 'b');
+    await dev.deps.add(b.id, a.id);
+    await expect(run('claim', b.id)).rejects.toThrow(new RegExp(`waits on ${a.id} \\(open\\)`));
+    const epic = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'e', kind: 'container' });
+    await expect(run('claim', epic.id)).rejects.toThrow(/is an epic/);
+  });
+
+  it('note renews the developer\'s own claim', async () => {
+    const { t, tg, run } = await setup();
+    const a = await ready(tg);
+    await run('claim', a.id);
+    await t.pglite.query(`update taskgraph.tasks set lease_expires_at = now() + interval '1 minute' where id = $1`, [a.id]);
+    await run('note', a.id, 'progress');
+    const hours = (new Date((await tg.tasks.get(a.id)).claim!.expiresAt).getTime() - Date.now()) / 3_600_000;
+    expect(hours).toBeGreaterThan(7.9);
+  });
+
+  it('finish needs the claim and, for a task with checks, the developer\'s confirmation', async () => {
+    const { shreni, tg, run } = await setup();
+    const id = JSON.parse(await run('create', '--title', 'x', '--check', 'given a when b then c', '--json')).id;
+    await tg.as({ id: ME, role: 'developer' }).tasks.approve(id, { via: 'test' });
+    await expect(run('finish', id, '--reason', 'done')).rejects.toThrow(/isn't claimed; claim it first/);
+    await run('claim', id);
+    await expect(run('finish', id, '--reason', 'done')).rejects.toThrow(/confirm that each holds with --checks-passed[\s\S]*Given a, when b, then c/);
+    expect(await run('finish', id, '--reason', 'done', '--checks-passed')).toMatch(/finished/);
+    const t = await tg.tasks.get(id);
+    expect(t.state).toBe('done');
+    const ev = await shreni.db.selectFrom('shreni.attempt_evidence').select('gates').executeTakeFirstOrThrow();
+    expect(ev.gates).toMatchObject({ acceptance: { passed: true, confirmedBy: ME } });
+  });
+
+  it('finish on an epic completes it once its tasks have settled', async () => {
+    const { tg, run } = await setup();
+    const sys = tg.as({ id: 's', role: 'system' });
+    const epic = await sys.tasks.create({ title: 'e', kind: 'container' });
+    const a = await sys.tasks.create({ title: 'a', parent: epic.id });
+    await expect(run('finish', epic.id, '--reason', 'all done')).rejects.toThrow(/ChildrenLive/);
+    await run('claim', a.id);
+    await run('finish', a.id, '--reason', 'did it');
+    await run('finish', epic.id, '--reason', 'all done');
+    expect((await tg.tasks.get(epic.id)).state).toBe('done');
+  });
+
+  it('release gives back the developer\'s claim; --force takes back anyone\'s, the event naming who', async () => {
+    const { tg, run, deps } = await setup();
+    const a = await ready(tg);
+    await run('claim', a.id);
+    await run('release', a.id);
+    expect((await tg.tasks.get(a.id)).state).toBe('open');
+    await run('claim', a.id);
+    deps.user = () => 'bea@example.com';
+    await run('release', a.id, '--force');
+    expect((await tg.tasks.get(a.id)).state).toBe('open');
+    const ev = (await tg.tasks.history(a.id)).filter(e => e.kind === 'move:release').at(-1)!;
+    expect(ev).toMatchObject({ actor: 'bea@example.com', payload: { forcedFrom: ME } });
+    await expect(run('release', a.id)).rejects.toThrow(/isn't claimed/);
+  });
+
+  it('cancel refuses live children and live dependents unless asked, and then cancels them', async () => {
+    const { tg, run } = await setup();
+    const sys = tg.as({ id: 's', role: 'system' });
+    const epic = await sys.tasks.create({ title: 'e', kind: 'container' });
+    const a = await sys.tasks.create({ title: 'a', parent: epic.id });
+    const b = await sys.tasks.create({ title: 'b', parent: epic.id });
+    const outside = await sys.tasks.create({ title: 'outside' });
+    const dev = tg.as({ id: ME, role: 'developer' });
+    await dev.deps.add(b.id, a.id);          // inside the set: fine
+    await dev.deps.add(outside.id, a.id);    // outside: needs --drop-deps
+    await expect(run('cancel', epic.id, '--reason', 'r')).rejects.toThrow(/--with-children/);
+    await expect(run('cancel', epic.id, '--reason', 'r', '--with-children')).rejects.toThrow(/--drop-deps/);
+    // Refused before anything was cancelled.
+    expect((await tg.tasks.list({ states: ['cancelled'] }))).toEqual([]);
+    const out = await run('cancel', epic.id, '--reason', 'r', '--with-children', '--drop-deps');
+    expect(out).toMatch(new RegExp(`cancelled .*${epic.id}$`));
+    expect((await tg.tasks.list({ states: ['cancelled'] })).map(t => t.id).sort()).toEqual([epic.id, a.id, b.id].sort());
+    expect((await tg.tasks.get(outside.id)).deps).toEqual([]);
+  });
+
+  it('approve, at a terminal, approves a lone task or a plan once its id is typed back', async () => {
+    const { t, tg, run, deps } = await setup();
+    deps.interactive = () => true;
+    const dev = tg.as({ id: ME, role: 'developer' });
+    const lone = await dev.tasks.create({ title: 'lone' });
+    deps.ask = async () => 'nope';
+    await expect(run('approve', lone.id)).rejects.toThrow(/not approved/);
+    expect((await tg.tasks.get(lone.id)).state).toBe('proposed');
+    deps.ask = async () => lone.id;
+    expect(await run('approve', lone.id)).toMatch(/approved/);
+    expect((await tg.tasks.get(lone.id)).state).toBe('open');
+
+    await t.pglite.query(`insert into taskgraph.plans (project_id, id, title, meta) values ($1, 'web-plan-1', 'Accounts', '{}')`, [tg.id]);
+    const planned = await tg.as({ id: 'p', role: 'planner' }).tasks.create({ title: 'in the plan', plan: 'web-plan-1' });
+    deps.ask = async () => 'web-plan-1';
+    const shown = await run('approve', 'web-plan-1');
+    expect(shown).toMatch(/plan web-plan-1: Accounts/);
+    expect(shown).toContain(planned.id);
+    expect((await tg.tasks.get(planned.id)).state).toBe('open');
+  });
+
+  it('approve shows a task\'s checks, and refuses a plan that grew while the developer looked', async () => {
+    const { t, tg, run, deps } = await setup();
+    deps.interactive = () => true;
+    await t.pglite.query(`insert into taskgraph.plans (project_id, id, title, meta) values ($1, 'web-plan-2', 'P', '{}')`, [tg.id]);
+    const planner = tg.as({ id: 'p', role: 'planner' });
+    await planner.tasks.create({ title: 'first', plan: 'web-plan-2' });
+    deps.ask = async () => {
+      await planner.tasks.create({ title: 'slipped in', plan: 'web-plan-2' });
+      return 'web-plan-2';
+    };
+    await expect(run('approve', 'web-plan-2')).rejects.toThrow(/changed while you looked/);
+    expect(await tg.tasks.list({ plan: 'web-plan-2', states: ['open'] })).toEqual([]);
+
+    const id = JSON.parse(await run('create', '--title', 'x', '--check', 'given a when b then c', '--json')).id;
+    const printed: string[] = [];
+    deps.print = l => printed.push(l);
+    deps.ask = async () => 'no';
+    await expect(run('approve', id)).rejects.toThrow(/not approved/);
+    expect(printed.join('\n')).toMatch(/Given a, when b, then c/);
+  });
+
+  it('upgrade, at a terminal, says when the project is already on this lifecycle', async () => {
+    const { run, deps } = await setup();
+    deps.interactive = () => true;
+    expect(await run('upgrade')).toMatch(/already on shreni\.task@\d+/);
+  });
+});
+
