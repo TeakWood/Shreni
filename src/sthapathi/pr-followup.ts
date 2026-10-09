@@ -2,6 +2,7 @@ import type { KshetraConfig } from '../kshetra/config.js';
 import type { PrStatus, PrReview, PrCheck, PrCommit } from './gh.js';
 import type { Task } from './types.js';
 import { bd } from './beads.js';
+import { engineStore, type EngineTaskStore } from './task-store.js';
 import { toSlug } from './pickup.js';
 
 // NOTE: this module is deliberately a LEAF — it imports only bd + pure helpers,
@@ -83,7 +84,10 @@ export function formatWatermark(w: PrWatermark): string {
 // Read the watermark off a bead's notes via `bd show --json`. Best-effort: any
 // failure or absent notes yields a zeroed watermark (head/at null, round 0), so
 // a bead that has never been followed up is treated as "everything is new".
-export async function readWatermark(kshetra: KshetraConfig, beadId: string): Promise<PrWatermark> {
+export async function readWatermark(
+  kshetra: KshetraConfig, beadId: string, store: EngineTaskStore | undefined = engineStore(kshetra),
+): Promise<PrWatermark> {
+  if (store) return store.readWatermark(beadId);
   try {
     const raw = await bd(kshetra).show(beadId);
     const parsed = JSON.parse(raw) as unknown;
@@ -97,7 +101,14 @@ export async function readWatermark(kshetra: KshetraConfig, beadId: string): Pro
 
 // Persist the watermark as a bead note. Append-only (bd notes accumulate); the
 // parse side always reads the latest, so re-writing is safe.
-export function writeWatermark(kshetra: KshetraConfig, beadId: string, w: PrWatermark): Promise<string> {
+export async function writeWatermark(
+  kshetra: KshetraConfig, beadId: string, w: PrWatermark, store: EngineTaskStore | undefined = engineStore(kshetra),
+): Promise<string> {
+  if (store) {
+    // On the engine the watermark lives on the attempt's evidence, not in notes.
+    await store.writeWatermark(beadId, w);
+    return '';
+  }
   return bd(kshetra).addNote(beadId, formatWatermark(w));
 }
 

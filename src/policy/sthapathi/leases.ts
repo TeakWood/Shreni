@@ -112,7 +112,11 @@ export class EngineQueue {
    * Runs `work` while heartbeating the claim. If the lease is lost, the signal
    * aborts the work, and LeaseLost is thrown once it has stopped.
    */
-  async whileHeld<T>(claim: Claim, work: (signal: AbortSignal) => Promise<T>, outer?: AbortSignal): Promise<T> {
+  async whileHeld<T>(
+    claim: Claim, work: (signal: AbortSignal) => Promise<T>, outer?: AbortSignal,
+    /** True once the work itself has ended the claim (submit, finish): stop heartbeating it. */
+    isEnded: () => boolean = () => false,
+  ): Promise<T> {
     const controller = new AbortController();
     const onOuter = () => controller.abort(outer?.reason);
     outer?.addEventListener('abort', onOuter);
@@ -121,6 +125,7 @@ export class EngineQueue {
     let beating = Promise.resolve();
     const timer = setInterval(() => {
       beating = beating.then(async () => {
+        if (isEnded()) return;
         try {
           current = await this.as.heartbeat(current, { leaseMs: this.opts.leaseMs ?? LEASE_MS });
         } catch (err) {

@@ -40,6 +40,10 @@ import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/conne
 import { EngineQueue, takeWorkerLock, UNAVAILABLE_RETRY_MS, WorkerLockHeld, workerName } from '../policy/sthapathi/leases';
 import type { Release } from '../taskgraph';
 import { engineHooks } from '../policy/sthapathi/hooks';
+import { engineTaskStore } from '../policy/sthapathi/task-store';
+import { registerEngineStore, unregisterEngineStore, type EngineTaskStore } from '../sthapathi/task-store';
+import { git } from '../sthapathi/git';
+import { sql } from 'kysely';
 
 // The worker runtime, factored out of src/cli/worker.ts (epic 7h3 / Study B3) so
 // the daemon (`shreni start` → `__worker`) and `shreni drain` share ONE copy of
@@ -269,6 +273,7 @@ export function createWorkerRuntime(
   // branch deletes never race an in-flight agent's work tree.
   async function reconcile(): Promise<void> {
     if (scheduler.getPhase(kshetra.id) !== 'IDLE' || healing) return;
+    if (onEngine && !engine) return;
     try {
       await reconcilePullRequests(kshetra);
     } catch (err) {
@@ -303,9 +308,32 @@ export function createWorkerRuntime(
       const lock = await takeWorkerLock(tg);
       const queue = new EngineQueue(tg, tg.as({ id: `sthapathi:${kshetra.id}`, role: 'orchestrator' }), workerName(),
         options.scopeEpic ? { within: options.scopeEpic } : {});
+      const as = tg.as({ id: `sthapathi:${kshetra.id}`, role: 'orchestrator' });
+      // Declared before the hooks, which it reads claims from (and tells when a claim ends).
+      const store: EngineTaskStore = engineTaskStore({
+        shreni: conn.shreni, tg, as,
+        claimFor: taskId => hooks.claims.get(taskId),
+        onClaimEnded: taskId => hooks.endClaim(taskId),
+      });
       const hooks = engineHooks({
         queue,
-        preflight: (task, k) => preFlightCheck(task, k),
+        // A follow-up works its open PR's branch; anything else starts from main.
+        preflight: (task, k) => (task.followup ? prepareFollowupBranch(task, k) : preFlightCheck(task, k)),
+        // A follow-up is a task followUp reopened: boosted (only followUp sets
+        // it; submit and finish clear it) and with a PR on an earlier attempt.
+        // A task whose PR was closed and later unblocked isn't boosted, so it is
+        // worked afresh.
+        isFollowup: async task => {
+          if (!task.boosted) return false;
+          const r = await sql<{ n: number }>`
+            select count(*)::int as n from taskgraph.attempts a join shreni.attempt_evidence e on e.attempt_id = a.id
+             where a.project_id = ${tg.id} and a.task_id = ${task.id} and e.pr_url is not null`.execute(conn.shreni.db);
+          return r.rows[0].n > 0;
+        },
+        // A follow-up whose branch can't be prepared goes back to waiting on its
+        // PR, for reconcile to settle; released, it would stay boosted at the
+        // head of the queue.
+        onFollowupRefused: taskId => store.resubmit(taskId, 'the follow-up branch could not be prepared; back to waiting on the PR'),
         // The run's own abort (self-heal) and the lease's both stop the agents.
         run: (task, k, signal) => {
           const signals = [signal, activeRun?.controller.signal].filter((x): x is AbortSignal => !!x);
@@ -323,6 +351,7 @@ export function createWorkerRuntime(
         },
       });
       engine = { conn, hooks, queue, lock };
+      registerEngineStore(kshetra.id, store);
       log(`on the task graph engine as ${workerName()} (worker lock held)`);
     } catch (err) {
       await conn.close().catch(() => {});
@@ -370,6 +399,8 @@ export function createWorkerRuntime(
       // Leases return interrupted work by themselves; only the work tree needs resetting.
       await resetWorkTree(kshetra);
       if (clearStuckPauseOnRecover(kshetra)) log('cleared stale stuck pause after recovery');
+      // PRs that merged or closed while the worker was down.
+      await reconcile();
       return 0;
     }
     await sync();
@@ -469,6 +500,11 @@ export function createWorkerRuntime(
     const heartbeatTimer = setInterval(() => {
       if (scheduler.getPhase(kshetra.id) !== 'IDLE') touchHeartbeat(kshetra.id);
     }, HEARTBEAT_INTERVAL_MS);
+    // Tasks waiting on their PRs: finish on merge, flag on close, reopen boosted on feedback.
+    const reconcileTimer = setInterval(
+      () => reconcile().catch(err => logErr('PR reconcile failed:', err)),
+      BEADS_SYNC_INTERVAL_MS,
+    );
     // Self-heal on the engine: on a stuck resume, abort the hung run; the run's
     // end gives its claim back (hooks.runTask), so only the work tree needs resetting.
     let prevPause: PauseSnapshot | undefined;
@@ -490,6 +526,7 @@ export function createWorkerRuntime(
     return () => {
       clearInterval(watchdogTimer);
       clearInterval(heartbeatTimer);
+      clearInterval(reconcileTimer);
       clearInterval(resumeWatchTimer);
       scheduler.flushPhase(kshetra.id);
     };
@@ -499,6 +536,7 @@ export function createWorkerRuntime(
   async function close(): Promise<void> {
     const e = engine;
     engine = undefined;
+    unregisterEngineStore(kshetra.id);
     await e?.conn.close();
   }
 
@@ -514,4 +552,20 @@ export function createWorkerRuntime(
     isInFlight: () => scheduler.isInFlight(kshetra.id),
     isHealing: () => healing,
   };
+}
+
+/**
+ * A follow-up's work tree on the engine: its PR branch, reset to origin. Throws
+ * PreFlightError to refuse, so the claim is given back.
+ */
+async function prepareFollowupBranch(task: Task, kshetra: KshetraConfig): Promise<void> {
+  const g = git(kshetra);
+  const branch = branchName(task);
+  try {
+    await g.fetch('origin', branch);
+    await g.checkout(branch);
+    await g.resetHard(`origin/${branch}`);
+  } catch (err) {
+    throw new PreFlightError(task, `pr-followup prepare: ${(err as Error).message}`);
+  }
 }

@@ -12,6 +12,7 @@ import { regenerateRepoMapAsync } from '../kshetra/repo-map.js';
 import { getEntitlements } from '../ext/index.js';
 import { emit } from './activity-log.js';
 import { closeParentEpicIfComplete, AWAITING_MERGE_LABEL } from './epics.js';
+import { engineStore, type EngineTaskStore } from './task-store.js';
 import { nowMs, elapsedMs } from './timing.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
 import {
@@ -216,6 +217,10 @@ export async function squashMergeAndClose(
   const g = git(kshetra);
   const main = kshetra.repo.mainBranch;
   const branch = branchName(task);
+  // On the engine: verify and extend the lease right before the merge, which is
+  // outside the database (policy spec, "Running work").
+  const store = engineStore(kshetra);
+  if (store) await store.beforeMerge(task.id);
 
   // Time the merge + push at the site (epic hto / Study A3).
   const mergeStart = nowMs();
@@ -264,7 +269,18 @@ export async function squashMergeAndClose(
   const note =
     `Merged: confidence=${output.confidenceScore} ` +
     `files=${output.filesChanged.length} — ${output.summary.slice(0, 120)}`;
-  await bd(kshetra).close(task.id, note);
+  if (store) {
+    // finish; the engine settles the parent container (children.settled). The
+    // change is already on main: if finish is refused, flag the task for a
+    // human rather than let it be released and worked again.
+    try {
+      await store.finish(task.id, note);
+    } catch (err) {
+      await store.flag(task.id, `merged to ${main} but finish failed: ${(err as Error).message}. Check it and finish by hand.`);
+    }
+  } else {
+    await bd(kshetra).close(task.id, note);
+  }
 
   // Activation signal (yds.5) — opt-in + anonymous, a no-op unless enabled.
   emitTelemetry('task_merged', { policy: 'push' });
@@ -272,13 +288,14 @@ export async function squashMergeAndClose(
   // The bead succeeded — clear any recovery attempt count it accumulated.
   clearBeadAttempts(kshetra, task.id);
 
-  // Shreni-beads-q08: if this was the last open child of an epic, close the epic
-  // (epics are never worked, so nothing else would). Best-effort — never throws;
-  // a miss self-heals at the next startup/drain-exit sweep. Before syncBeads so
-  // the epic close rides the same sync.
-  await closeParentEpicIfComplete(kshetra, task.id);
-
-  await syncBeads(kshetra);
+  if (!store) {
+    // Shreni-beads-q08: if this was the last open child of an epic, close the epic
+    // (epics are never worked, so nothing else would). Best-effort — never throws;
+    // a miss self-heals at the next startup/drain-exit sweep. Before syncBeads so
+    // the epic close rides the same sync.
+    await closeParentEpicIfComplete(kshetra, task.id);
+    await syncBeads(kshetra);
+  }
 
   // Force-delete: after `git merge --squash` the bead branch's commits are not
   // reachable as merge parents on main, so git treats it as "not fully merged"
@@ -303,7 +320,7 @@ export async function openPrAndDefer(
   const g = git(kshetra);
   const main = kshetra.repo.mainBranch;
   const branch = branchName(task);
-  const bdClient = bd(kshetra);
+  const store = engineStore(kshetra);
 
   // Time the branch push + PR open at the site (epic hto / Study A3).
   const openStart = nowMs();
@@ -318,8 +335,20 @@ export async function openPrAndDefer(
   });
   const openDurationMs = elapsedMs(openStart);
 
-  await bdClient.addNote(task.id, `PR opened (awaiting merge): ${url}`);
-  await bdClient.addLabel(task.id, AWAITING_MERGE_LABEL);
+  if (store) {
+    // The PR goes on the attempt's evidence first: submit's hasOpenPr guard reads it.
+    // The PR exists now: if recording it fails, flag the task with the PR rather
+    // than let it be released and worked again (a second PR).
+    try {
+      await store.deferForPr(task.id, url);
+    } catch (err) {
+      await store.flag(task.id, `opened ${url} but could not record it: ${(err as Error).message}. Submit it by hand.`);
+    }
+  } else {
+    const bdClient = bd(kshetra);
+    await bdClient.addNote(task.id, `PR opened (awaiting merge): ${url}`);
+    await bdClient.addLabel(task.id, AWAITING_MERGE_LABEL);
+  }
 
   // Decision-grade (4a2.2): under mergePolicy 'pr' the landing decision is "open
   // PR #N and defer". Record it here — while the run's runId is still current —
@@ -335,7 +364,7 @@ export async function openPrAndDefer(
     durationMs: openDurationMs,
   });
 
-  await syncBeads(kshetra);
+  if (!store) await syncBeads(kshetra);
   // The bead branch is deliberately NOT deleted — the open PR needs it. It is
   // dropped when the PR merges (reconcilePullRequests). Parikshaka is likewise
   // deferred: it runs post-merge, so it fires from the reconcile path, not here.
@@ -394,6 +423,8 @@ export function resetDeferredEpicLog(): void {
 // run only when the worker is IDLE, so its branch deletes never race an
 // in-flight agent's work tree.
 export async function reconcilePullRequests(kshetra: KshetraConfig): Promise<void> {
+  const store = engineStore(kshetra);
+  if (store) return reconcileOnEngine(kshetra, store);
   const bdClient = bd(kshetra);
 
   let raw: string;
@@ -495,12 +526,14 @@ async function detectAndStampFollowup(
   bead: AwaitingMergeBead,
   branch: string,
   client: ReturnType<typeof gh>,
+  /** The engine store reconcile started with; absent on bd. */
+  store?: EngineTaskStore,
 ): Promise<void> {
   const status = await client.prStatus(branch);
   if (!status || status.state !== 'OPEN') return;
 
   const selfLogins = kshetra.repo.prFollowupSelfLogins;
-  const watermark = await readWatermark(kshetra, bead.id);
+  const watermark = store ? await store.readWatermark(bead.id) : await readWatermark(kshetra, bead.id);
   const feedback = detectPrFeedback({
     // Suppress foreign-commit detection when we can't identify ourselves.
     status: selfLogins.length ? status : { ...status, commits: [] },
@@ -510,10 +543,62 @@ async function detectAndStampFollowup(
   });
   if (!feedback) return;
 
-  await bd(kshetra).addLabel(bead.id, PR_NEEDS_FOLLOWUP_LABEL);
-  await syncBeads(kshetra);
+  if (store) {
+    // followUp reopens it boosted, so it is claimed ahead of other ready work.
+    await store.needsFollowup(bead.id);
+  } else {
+    await bd(kshetra).addLabel(bead.id, PR_NEEDS_FOLLOWUP_LABEL);
+    await syncBeads(kshetra);
+  }
   console.log(
     `[shreni reconcile:${kshetra.id}] ${bead.id} PR has unaddressed feedback ` +
       `(${feedback.triggers.join(', ')}) — stamped ${PR_NEEDS_FOLLOWUP_LABEL}`,
   );
+}
+/**
+ * reconcilePullRequests on the task graph engine: the tasks waiting on their
+ * PR. A merged PR finishes the task (the engine settles its container); a PR
+ * closed unmerged flags it; an open PR with unaddressed feedback reopens it
+ * for a follow-up round, boosted.
+ */
+async function reconcileOnEngine(kshetra: KshetraConfig, store: EngineTaskStore): Promise<void> {
+  const waiting = await store.listAwaitingMerge();
+  if (waiting.length === 0) return;
+  const client = gh(kshetra.repo.path);
+  const g = git(kshetra);
+  for (const t of waiting) {
+    // One task's failure (a refused finish, a lost connection) mustn't hold up the rest.
+    try {
+      await reconcileOneOnEngine(kshetra, store, t, client, g);
+    } catch (err) {
+      console.warn(`[shreni reconcile:${kshetra.id}] ${t.id}: ${(err as Error).message}`);
+    }
+  }
+}
+
+async function reconcileOneOnEngine(
+  kshetra: KshetraConfig, store: EngineTaskStore, t: { id: string; title: string; slug: string },
+  client: ReturnType<typeof gh>, g: ReturnType<typeof git>,
+): Promise<void> {
+  {
+    const branch = branchName(t);
+    const pr = await client.prView(branch);
+    if (!pr) return;
+    if (pr.state === 'OPEN') {
+      if (resolvePrFollowup(kshetra)) await detectAndStampFollowup(kshetra, t, branch, client, store);
+      return;
+    }
+    if (pr.state === 'MERGED') {
+      await store.finish(t.id, `Merged via PR: ${pr.url}`);
+      emitTelemetry('task_merged', { policy: 'pr' });
+      clearBeadAttempts(kshetra, t.id);
+      try { await g.deleteBranch(branch, { force: true }); } catch { /* already gone */ }
+      try { await g.push('origin', '--delete', branch); } catch { /* auto-deleted */ }
+      console.log(`[shreni reconcile:${kshetra.id}] ${t.id} merged via PR — done`);
+    } else {
+      await store.prDeclined(t.id,
+        `PR closed without merging: ${pr.url}. The change did not land on ${kshetra.repo.mainBranch} — investigate manually.`);
+      console.log(`[shreni reconcile:${kshetra.id}] ${t.id} PR closed unmerged — blocked`);
+    }
+  }
 }
