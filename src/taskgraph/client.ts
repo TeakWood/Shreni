@@ -7,9 +7,11 @@ import { checkPermission } from './permissions';
 import { tasksApi } from './tasks';
 import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi } from './moves';
+import { readyTasks } from './ready';
+import { settledContainers } from './containers';
 import { runTransaction, type EngineTx } from './tx';
-import { NotFound, SchemaBehind, VersionMismatch } from './errors';
-import type { Actor } from './types';
+import { InvalidRequest, NotFound, SchemaBehind, VersionMismatch } from './errors';
+import type { Actor, Task } from './types';
 
 // The engine's entry point (engine spec, "API"): one client per process, one
 // handle per project, and every write through an actor. Client calls
@@ -156,8 +158,30 @@ export class TaskGraphClient {
 }
 
 export class ProjectHandle {
+  readonly tasks: {
+    /** Containers in the claimable state whose children have all settled, oldest first. */
+    settled(): Promise<Task[]>;
+  };
+
   /** @internal Use client.project(id). */
-  constructor(/** @internal */ readonly client: TaskGraphClient, readonly id: string) {}
+  constructor(/** @internal */ readonly client: TaskGraphClient, readonly id: string) {
+    // In the constructor body, as in ActorHandle.
+    this.tasks = {
+      settled: async () => {
+        await client.need(CORE);
+        return settledContainers(client.db, id, client.lifecycle);
+      },
+    };
+  }
+
+  /** Ready work, in claim order: what a claim would pick next. */
+  async ready(opts: { limit?: number } = {}): Promise<Task[]> {
+    if (opts.limit !== undefined && !(Number.isInteger(opts.limit) && opts.limit >= 0)) {
+      throw new InvalidRequest(`limit must be a whole number, not ${opts.limit}`);
+    }
+    await this.client.need(CORE);
+    return readyTasks(this.client.db, this.id, this.client.lifecycle, opts);
+  }
 
   /** The same project, acting as `actor`: every write goes through one. */
   as(actor: Actor): ActorHandle {

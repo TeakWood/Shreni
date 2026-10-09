@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { ActorHandle } from './client';
 import { newTaskId, nextChildId } from './ids';
 import { InvalidRequest, NotFound } from './errors';
+import { assertParentOpen, containerSettled, isTerminal, lockWithParent } from './containers';
 import { LOCK_NAMESPACE } from './locks';
 import { jsonb, textArray, timestamp } from './sql-values';
 import type { Task } from './types';
@@ -143,7 +144,8 @@ export function tasksApi(as: ActorHandle) {
               throw new InvalidRequest(`plan ${t.plan} is ${plan.rows[0].approved_at ? 'approved' : 'discarded'}; later work is a new plan`);
             }
           }
-          if (t.parent) await loadTask(db, projectId, t.parent, true);
+          // Locked: siblings are created one at a time, and the parent can't close meanwhile.
+          if (t.parent) assertParentOpen(lifecycle, await loadTask(db, projectId, t.parent, true), 'a new task');
           if (t.key) {
             const existing = await taskByKey(db, projectId, t.key);
             if (existing) return existing;
@@ -246,7 +248,8 @@ export function tasksApi(as: ActorHandle) {
         if (patch.parent !== undefined && patch.parent !== task.parentId) {
           if (patch.parent !== null) {
             if (patch.parent === id) throw new InvalidRequest(`task ${id} can't be its own parent`);
-            await loadTask(db, projectId, patch.parent);
+            const parent = await loadTask(db, projectId, patch.parent);
+            if (!isTerminal(lifecycle, task.state)) assertParentOpen(lifecycle, parent, `task ${id}`);
             // The new parent must not sit inside this task's subtree.
             const loop = await sql<{ hit: boolean }>`
               with recursive up(id, parent_id) as (
@@ -262,6 +265,11 @@ export function tasksApi(as: ActorHandle) {
         }
         if (sets.length === 0) return task;
 
+        // A reparent can settle either parent, both locked above: the old one
+        // when its last live child leaves, the new one when a terminal task
+        // joins it.
+        const parents = changes.parent ? [task.parentId, patch.parent].filter((p): p is string => !!p) : [];
+        const wasSettled = await Promise.all(parents.map(p => containerSettled(db, projectId, p, lifecycle)));
         const r = await sql<TaskRow>`
           update taskgraph.tasks set ${sql.join(sets)}, updated_at = taskgraph.now()
            where project_id = ${projectId} and id = ${id}
@@ -270,6 +278,11 @@ export function tasksApi(as: ActorHandle) {
           projectId, taskId: id, kind: 'task.updated', actor: as.actor.id, actorRole: as.actor.role,
           requestId: opts.requestId, payload: { changes },
         });
+        for (const [i, p] of parents.entries()) {
+          if (!wasSettled[i] && await containerSettled(db, projectId, p, lifecycle)) {
+            emit({ projectId, taskId: p, kind: 'children.settled', actor: as.actor.id, actorRole: as.actor.role });
+          }
+        }
         return toTask(r.rows[0]);
       });
     },
@@ -278,7 +291,8 @@ export function tasksApi(as: ActorHandle) {
     async delete(id: string, opts: WriteOptions = {}): Promise<void> {
       await client.transaction(async ({ db, emit }) => {
         await lockGraph(db, projectId);
-        const task = await loadTask(db, projectId, id, true);
+        // The parent first: removing a live child can settle it.
+        const task = await lockWithParent(db, projectId, id);
         await as.check('tasks.delete', task.state, db);
         if (task.state !== lifecycle.create.state) {
           throw new InvalidRequest(`task ${id} has left ${lifecycle.create.state}; cancel it instead`);
@@ -293,6 +307,9 @@ export function tasksApi(as: ActorHandle) {
           select task_id from taskgraph.task_deps
            where project_id = ${projectId} and depends_on_id = ${id} order by task_id`.execute(db);
         await sql`delete from taskgraph.tasks where project_id = ${projectId} and id = ${id}`.execute(db);
+        if (task.parentId && await containerSettled(db, projectId, task.parentId, lifecycle)) {
+          emit({ projectId, taskId: task.parentId, kind: 'children.settled', actor: as.actor.id, actorRole: as.actor.role });
+        }
         for (const { task_id } of dependents.rows) {
           emit({
             projectId, taskId: task_id, kind: 'dep.removed', actor: as.actor.id, actorRole: as.actor.role,

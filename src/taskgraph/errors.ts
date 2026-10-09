@@ -61,9 +61,13 @@ export class MoveRefused extends TaskGraphError {
     readonly taskId: string,
     readonly state: string,
     readonly reason: string,
+    /** DependentsLive: the live tasks that depend on this one. */
     readonly waiting: readonly string[] = [],
+    /** ChildrenLive: the children that aren't terminal. */
+    readonly children: readonly string[] = [],
   ) {
-    const who = waiting.length ? ` (waiting: ${waiting.join(', ')})` : '';
+    const who = (waiting.length ? ` (waiting: ${waiting.join(', ')})` : '')
+      + (children.length ? ` (live children: ${children.join(', ')})` : '');
     super('MoveRefused', `move refused on ${taskId} in ${state}: ${reason}${who}`);
   }
 }

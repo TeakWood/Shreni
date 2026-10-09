@@ -345,12 +345,12 @@ declare function defineLifecycle(def: Lifecycle): Lifecycle;   // checked with z
 **Containers.** A task of kind `container` (an epic, for Shreni) groups work. It is never claimed; its state changes only through moves the caller fires. Three rules keep a container and its children consistent:
 
 - **A container holds its subtree.** A work task is claimable only while every container above it is in the claimable state, so parking or blocking a container takes its whole subtree out of the queue.
-- **A container can't close over live children.** A move into a terminal state is refused while any child is non-terminal, and a task can't be created under a container that is already terminal.
-- **Settling is checked under the parent's lock.** Creating a child, or moving one into or out of a terminal state, first locks the parent row. Siblings therefore change one at a time, and the transaction that settles the last child sees all the others and emits `children.settled`. `tasks.settled()` lists containers in the claimable state whose children have all settled, for a caller that was down when the event fired.
+- **A container can't close over live children.** A move into a terminal state is refused while any child is non-terminal. A task can't be created or reparented under a container that is already terminal.
+- **Settling is checked under the parent's lock.** Creating, deleting or reparenting a child, or moving one into a terminal state, first locks the parent row. Siblings therefore change one at a time, and the transaction that settles the last child sees all the others and emits `children.settled`. `tasks.settled()` lists containers in the claimable state whose children have all settled, for a caller that was down when the event fired.
 
 The caller's policy decides whether to complete a settled container. Shreni's `completeContainer` move and its intent check are in the policy spec's [Containers](task-lifecycle.md#containers).
 
-**Cancelled work doesn't strand its dependents.** A move into a terminal state that doesn't satisfy dependencies is refused while non-terminal tasks depend on the task, with `MoveRefused` naming them, unless the call passes `dropDeps`, which removes those edges in the same transaction and writes `dep.removed` for each.
+**Cancelled work doesn't strand its dependents.** A move into a terminal state that doesn't satisfy dependencies is refused while non-terminal tasks depend on the task, with `MoveRefused` naming them, unless the call passes `dropDeps`, which removes those edges in the same transaction and writes `dep.removed`, with reason `dropped`, for each.
 
 ### Creating and editing tasks
 
@@ -443,9 +443,9 @@ These hold no matter how many workers run or what order their calls arrive in. E
 | A lease exists only in the leased state | Transaction, then a trigger | Any move out of the leased state, fenced or not, ends the attempt with that move as its outcome and clears the lease; the trigger refuses a lease on a task in any other state |
 | A worker whose lease lapsed can't write | Transaction | Every leased call carries its attempt id, which is the fencing token: `WHERE lease_attempt_id = $attemptId` |
 | A plan is approved whole or not at all | Transaction | Lock the plan row, run every validator, then fire the approve move on all its proposed tasks in one transaction |
-| A container's settled check sees every child | Transaction | Creating a child, or moving one into or out of a terminal state, locks the parent row first |
+| A container's settled check sees every child | Transaction | Creating, deleting or reparenting a child, or moving one into a terminal state, locks the parent row first |
 | A container never closes over live children | Transaction | A move into a terminal state is refused while any child is non-terminal |
-| Nothing waits forever on cancelled work | Transaction | A move into a terminal state that doesn't satisfy dependencies is refused while live tasks depend on it, unless the call drops those edges |
+| Nothing waits forever on cancelled work | Transaction | A move into a terminal state that doesn't satisfy dependencies is refused while live tasks depend on it, unless the call drops those edges; `deps.add` refuses a dependency on such a task |
 | Every change has an event | Transaction | The engine writes the event in the same transaction as the change; a trigger rejects `UPDATE` and `DELETE` on `events`, except inside `projects.purge` |
 | Events reach readers in commit order | Transaction | A transaction writes its events last, under a per-project advisory lock held until commit |
 | Terminal states are final | Lifecycle registration | A lifecycle with a move out of a terminal state is refused |
@@ -550,7 +550,7 @@ Errors are typed and carry stable codes:
 - `CycleError`; `NotFound`; `ValidationError`, with every finding.
 - `InvalidRequest`: a call's input is malformed, or an edit the rules forbid: a kind change on a task with children or attempts, a delete past `create.state`, with attempts or with children, a reparent into the task's own subtree, or a task joining a plan that is approved or discarded.
 - `NotPermitted`: the actor's role may not make a call that isn't a move, or not with the task in its current state. A refused move is `MoveRefused` with reason `NotPermitted`.
-- `MoveRefused`, with the task's current state and a reason: the guard's, `NotPermitted`, `WrongState` (the move can't start from the task's state), `ChildrenLive`, or `DependentsLive` with the waiting tasks. The `onClaim` move is made only by `claim`; passing it to `move` is an `InvalidRequest`, as is a move the lifecycle doesn't declare.
+- `MoveRefused`, with the task's current state and a reason: the guard's, `NotPermitted`, `WrongState` (the move can't start from the task's state), `ChildrenLive` with the live children, or `DependentsLive` with the waiting tasks. The `onClaim` move is made only by `claim`; passing it to `move` is an `InvalidRequest`, as is a move the lifecycle doesn't declare.
 - `LeaseLost`, and `LeaseHeld`, which names the holder.
 - `VersionMismatch`: this process is older than the schema's `min_writer`, or isn't on the project's lifecycle version. `SchemaBehind`: a migration this call needs hasn't run.
 - `Unavailable`: the database can't be reached, or a transaction gave up after its retries. It is safe to retry with the same request id.

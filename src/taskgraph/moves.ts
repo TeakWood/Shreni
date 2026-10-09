@@ -1,7 +1,9 @@
 import { sql } from 'kysely';
 import type { ActorHandle } from './client';
-import { loadTask, toTask, TASK_COLUMNS, type TaskRow } from './tasks';
+import { loadTask, lockGraph, toTask, TASK_COLUMNS, type TaskRow } from './tasks';
+import { containerSettled, isTerminal, liveChildren, liveDependents, lockWithParent } from './containers';
 import { InvalidRequest, MoveRefused } from './errors';
+import { textArray } from './sql-values';
 import type { Task } from './types';
 
 // Lifecycle moves (engine spec, "Task lifecycle" and "Invariants"). A move
@@ -15,6 +17,8 @@ export type MoveOptions = {
   /** More details for the event. */
   payload?: Record<string, unknown>;
   requestId?: string;
+  /** Remove the edges of live tasks waiting on this one, instead of refusing with DependentsLive. */
+  dropDeps?: boolean;
 };
 
 export function movesApi(as: ActorHandle) {
@@ -30,14 +34,37 @@ export function movesApi(as: ActorHandle) {
     if (moveName === lifecycle.hooks.onClaim) {
       throw new InvalidRequest(`${moveName} is the claim move; take work with claim()`);
     }
+    const toTerminal = isTerminal(lifecycle, def.to);
+    // A move into a terminal state can settle the parent, so it locks the
+    // parent first. Terminal states are final (registration rule
+    // terminal-final), so no move leaves one.
+    // A terminal state that doesn't satisfy dependencies strands the tasks
+    // waiting on it; the graph lock keeps new edges out while they're checked.
+    const strands = toTerminal && !lifecycle.states[def.to].satisfiesDeps;
     return client.transaction(async ({ db, emit }) => {
       await as.assertVersion(db);
-      const task = await loadTask(db, projectId, taskId, true);
+      if (strands) await lockGraph(db, projectId);
+      const task = toTerminal ? await lockWithParent(db, projectId, taskId) : await loadTask(db, projectId, taskId, true);
       if (!def.by.includes(as.actor.role)) throw new MoveRefused(taskId, task.state, 'NotPermitted');
       if (!def.from.includes(task.state)) throw new MoveRefused(taskId, task.state, 'WrongState');
+      if (toTerminal) {
+        const live = await liveChildren(db, projectId, taskId, lifecycle);
+        if (live.length) throw new MoveRefused(taskId, task.state, 'ChildrenLive', [], live);
+      }
+      let dropped: string[] = [];
+      if (strands) {
+        const waiting = await liveDependents(db, projectId, taskId, lifecycle);
+        if (waiting.length && !opts.dropDeps) throw new MoveRefused(taskId, task.state, 'DependentsLive', waiting);
+        dropped = waiting;
+      }
       if (def.guard) {
         const verdict = await def.guard({ task, actor: as.actor, tx: db });
         if (verdict !== true) throw new MoveRefused(taskId, task.state, verdict);
+      }
+
+      if (dropped.length) {
+        await sql`delete from taskgraph.task_deps
+                   where project_id = ${projectId} and depends_on_id = ${taskId} and task_id = any(${textArray(dropped)})`.execute(db);
       }
 
       // Any move out of the leased state ends the attempt holding it.
@@ -64,6 +91,16 @@ export function movesApi(as: ActorHandle) {
         requestId: opts.requestId,
         payload: { ...(opts.payload ?? {}), ...(opts.reason ? { reason: opts.reason } : {}) },
       });
+      for (const waiting of dropped) {
+        emit({
+          projectId, taskId: waiting, kind: 'dep.removed', actor: as.actor.id, actorRole: as.actor.role,
+          payload: { dependsOnId: taskId, reason: 'dropped' },
+        });
+      }
+      // The parent's row is locked, so the transaction settling its last child sees every sibling.
+      if (toTerminal && task.parentId && await containerSettled(db, projectId, task.parentId, lifecycle)) {
+        emit({ projectId, taskId: task.parentId, kind: 'children.settled', actor: as.actor.id, actorRole: as.actor.role });
+      }
       return toTask(r.rows[0]);
     });
   };

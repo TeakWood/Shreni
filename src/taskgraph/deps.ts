@@ -19,8 +19,13 @@ export function depsApi(as: ActorHandle) {
         await lockGraph(db, projectId);
         // Lock the waiting task, so its state can't change between the check and the write.
         const task = await loadTask(db, projectId, taskId, true);
-        await loadTask(db, projectId, dependsOnId);
+        const target = await loadTask(db, projectId, dependsOnId);
         await as.check('deps.add', task.state, db);
+        // Under the graph lock, which a cancel also takes: nothing waits on cancelled work.
+        const { states } = client.lifecycle;
+        if (states[target.state]?.terminal && !states[target.state].satisfiesDeps) {
+          throw new InvalidRequest(`task ${dependsOnId} is ${target.state} and will never satisfy a dependency`);
+        }
         if (taskId === dependsOnId) throw new CycleError(taskId, dependsOnId);
         const reach = await sql<{ creates_cycle: boolean }>`
           with recursive reach(id) as (
