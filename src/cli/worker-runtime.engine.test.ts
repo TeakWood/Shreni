@@ -79,6 +79,29 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     await runtime.close();
   });
 
+  it('on start, completes an epic whose last child finished while the worker was stopped', async () => {
+    const { tg, kshetra } = await setup();
+    const sys = tg.as({ id: 's', role: 'system' });
+    const epic = await sys.tasks.create({ title: 'epic', kind: 'container' });
+    await sys.tasks.create({ title: 'child', parent: epic.id });
+    const orc = tg.as({ id: 'o', role: 'orchestrator' });
+    await orc.moveClaimed((await orc.claim({ worker: 'w', leaseMs: 60_000 }))!, 'finish');
+    expect((await tg.tasks.get(epic.id)).state).toBe('open');
+
+    const { createWorkerRuntime } = await import('./worker-runtime');
+    const runtime = createWorkerRuntime(kshetra, { entrypoint: 'drain' });
+    await runtime.startup();
+    expect((await tg.tasks.get(epic.id)).state).toBe('done');
+
+    // And on each poll: an epic whose last child finishes while it runs.
+    const later = await sys.tasks.create({ title: 'later', kind: 'container' });
+    await sys.tasks.create({ title: 'child 2', parent: later.id });
+    await orc.moveClaimed((await orc.claim({ worker: 'w', leaseMs: 60_000 }))!, 'finish');
+    await runtime.hooks.selectNext(kshetra);
+    expect((await tg.tasks.get(later.id)).state).toBe('done');
+    await runtime.close();
+  });
+
   it('claims and runs through the engine, takes the worker lock, and never touches bd', async () => {
     run.mockClear();
     const t = await createTestDb();

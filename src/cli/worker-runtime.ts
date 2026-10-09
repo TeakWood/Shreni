@@ -38,9 +38,10 @@ import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/connect';
 import { EngineQueue, takeWorkerLock, UNAVAILABLE_RETRY_MS, WorkerLockHeld, workerName } from '../policy/sthapathi/leases';
-import type { Release } from '../taskgraph';
+import { Unavailable, type ActorHandle, type ProjectHandle, type Release } from '../taskgraph';
 import { engineHooks } from '../policy/sthapathi/hooks';
 import { engineTaskStore } from '../policy/sthapathi/task-store';
+import { reconcileContainers } from '../policy/sthapathi/epics';
 import { registerEngineStore, unregisterEngineStore, type EngineTaskStore } from '../sthapathi/task-store';
 import { git } from '../sthapathi/git';
 import { sql } from 'kysely';
@@ -159,7 +160,10 @@ export function createWorkerRuntime(
   // migration release removes it. Opened in startup; until then, and if
   // opening failed, an engine Kshetra picks up nothing rather than fall back to bd.
   const onEngine = !!kshetra.project;
-  let engine: { conn: KshetraEngine; hooks: ReturnType<typeof engineHooks>; queue: EngineQueue; lock: Release } | undefined;
+  let engine: {
+    conn: KshetraEngine; hooks: ReturnType<typeof engineHooks>; queue: EngineQueue; lock: Release;
+    tg: ProjectHandle; as: ActorHandle;
+  } | undefined;
   // When opening the engine first failed, for the retry window (policy spec, "The database").
   let engineDownSince: number | undefined;
 
@@ -227,7 +231,12 @@ export function createWorkerRuntime(
       if (isKshetraManuallyPaused(k)) return null;
       if (onEngine) {
         const e = await ensureEngine(k);
-        return e ? e.hooks.selectNext(k) : null;
+        if (!e) return null;
+        // Epics are reconciled on each poll, not only on the settled event; a
+        // database lost meanwhile has paused the Kshetra.
+        await sweepEpics();
+        if (isKshetraManuallyPaused(k)) return null;
+        return e.hooks.selectNext(k);
       }
       // Follow-up beads are prioritised over fresh work (ARD §4.1): finish
       // in-flight PRs before opening new WIP. Cheap — a bd label query. A
@@ -286,7 +295,28 @@ export function createWorkerRuntime(
   // paths covers the live case; this sweep self-heals a crash between a child's
   // close and its epic's, and closes epics completed before q08. Logged per epic
   // (inside sweepCompleteEpics). Never throws.
+  /** The database stayed away past the retry window: pause the Kshetra for a manual resume. */
+  function pauseUnavailable(k: KshetraConfig, err: Unavailable): void {
+    logErr('database unavailable for a minute; pausing', err);
+    pauseKshetra(k, { manual: true, reason: 'database_unavailable', message: `the database stayed unreachable: ${err.message}` });
+  }
+
   async function sweepEpics(): Promise<string[]> {
+    if (onEngine) {
+      // On the engine: complete the settled containers, flag any whose children were all cancelled.
+      if (!engine) return [];
+      try {
+        const { tg, as } = engine;
+        const { completed } = await reconcileContainers({
+          tg, as, ...(options.scopeEpic ? { within: options.scopeEpic } : {}), log: m => log(`epics: ${m}`),
+        });
+        return completed;
+      } catch (err) {
+        if (err instanceof Unavailable) pauseUnavailable(kshetra, err);
+        else logErr('epic reconcile failed:', err);
+        return [];
+      }
+    }
     // A scoped drain (--epic) sweeps only its own subtree (trial isolation).
     const scope = options.inScope;
     const closed = await sweepCompleteEpics(kshetra, scope ? id => scope({ id } as Task) : undefined);
@@ -342,10 +372,7 @@ export function createWorkerRuntime(
           const signals = [signal, activeRun?.controller.signal].filter((x): x is AbortSignal => !!x);
           return runTaskSafely(k, task, branchName(task), AbortSignal.any(signals)).then(() => {});
         },
-        onUnavailable: (k, err) => {
-          logErr('database unavailable for a minute; pausing', err);
-          pauseKshetra(k, { manual: true, reason: 'database_unavailable', message: `the database stayed unreachable: ${err.message}` });
-        },
+        onUnavailable: pauseUnavailable,
         onLeaseLost: task => log(`lease on ${task.id} lost; another worker has it now`),
         onPreflightRefused: (task, k, err) => {
           if (!(err instanceof PreFlightError)) throw err;
@@ -354,7 +381,7 @@ export function createWorkerRuntime(
           if (!(err instanceof BaseRedError)) recordStall(k, 'preflight');
         },
       });
-      engine = { conn, hooks, queue, lock };
+      engine = { conn, hooks, queue, lock, tg, as };
       registerEngineStore(kshetra.id, store);
       log(`on the task graph engine as ${workerName()} (worker lock held)`);
     } catch (err) {
@@ -403,8 +430,10 @@ export function createWorkerRuntime(
       // Leases return interrupted work by themselves; only the work tree needs resetting.
       await resetWorkTree(kshetra);
       if (clearStuckPauseOnRecover(kshetra)) log('cleared stale stuck pause after recovery');
-      // PRs that merged or closed while the worker was down.
+      // PRs that merged or closed while the worker was down, then the epics
+      // they (or tasks finished meanwhile) settled.
       await reconcile();
+      await sweepEpics();
       return 0;
     }
     await sync();
