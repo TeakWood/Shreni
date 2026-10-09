@@ -2,6 +2,7 @@
 import { COMMANDS } from './commands';
 import { dispatch } from './registry';
 import { cliArgs } from './self-exec';
+import { dailyDumpHook } from './db';
 
 const args = cliArgs();
 const [sub, ...subArgs] = args;
@@ -19,6 +20,15 @@ if (sub === '__worker') {
 } else if (sub === '__phalaka-server') {
   require('./phalaka-server'); // reads PHALAKA_PORT from the environment
 } else {
+  // The first command after the newest dump turns a day old starts a daily one
+  // in the background (policy spec, "Backups"); never in the way of the command.
+  if (sub && !['db', 'help', '--help', '-h'].includes(sub)) {
+    try {
+      dailyDumpHook({ cwd: process.cwd(), env: process.env, warn: l => { if (process.stderr.isTTY) console.error(l); } });
+    } catch {
+      // A backup that can't start is no reason to fail the command.
+    }
+  }
   dispatch(args, COMMANDS).then((code) => {
     // Only exit explicitly on failure; success paths return 0 and let the
     // process end naturally (so detached workers spawned by `start` aren't

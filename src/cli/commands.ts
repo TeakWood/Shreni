@@ -37,7 +37,7 @@ import { runInit } from './init';
 import { runTelemetry } from './telemetry';
 import { runTask, TASK_USAGE } from './task';
 import { runPlan, PLAN_USAGE } from './plan';
-import { runDb, DB_USAGE } from './db';
+import { runDb, DB_USAGE, ensureMigrated, migrateDeps } from './db';
 import { parseLabels } from './labels';
 import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -91,7 +91,7 @@ export const COMMANDS: Command[] = [
     name: 'start',
     summary: 'Start worker daemons (and the phalaka dashboard) for registered kshetras',
     usage: '[--kshetra <id>] [--label key=value ...] [--allow-ablation]',
-    run(ctx) {
+    async run(ctx) {
       const id = ctx.flag('--kshetra');
       // Parse opaque run labels (epic yrk / Study B2) up front so a malformed or
       // duplicate --label fails fast, before any worker is spawned.
@@ -110,6 +110,11 @@ export const COMMANDS: Command[] = [
       for (const k of targets) {
         const ablationErr = ablationGuardError(k, allowAblation);
         if (ablationErr) throw new Error(`${k.id}: ${ablationErr}`);
+      }
+      // On the task graph engine: no worker starts on a database with pending
+      // migrations; a terminal is offered them, a detached start refuses.
+      for (const k of targets) {
+        if (k.project) await ensureMigrated(k, migrateDeps());
       }
       for (const k of targets) {
         const result = startWorker(k.id, labels, allowAblation);

@@ -137,6 +137,11 @@ export class TaskGraphClient {
     return runTransaction(this.db, fn, { lifecycle: { name: this.lifecycle.name, version: this.lifecycle.version } });
   }
 
+  /** The schema migrations the database lacks, oldest first: what migrate would apply. */
+  pendingMigrations(): Promise<string[]> {
+    return pendingMigrations(this.db);
+  }
+
   /** Applies pending schema migrations; run only when asked. */
   async migrate(): Promise<MigrationReport> {
     const report = await migrate(this.db);

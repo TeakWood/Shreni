@@ -240,7 +240,8 @@ The database starts as self-run Postgres (engine spec, [Data model](task-graph-e
 - **Whose.** Only a database on this machine. A shared company database is backed up by whoever runs it; `shreni db dump` against one says so and stops, unless given `--remote`.
 - **When.** At most once a day, started in the background by the first `shreni` command after the newest dump turns 24 hours old; and always before an import, by `shreni init` or `shreni migrate`, and before `shreni task upgrade` and `shreni db migrate`, which wait for it. Every change goes through a `shreni` command, so a day with no commands needs no dump.
 - **Kept.** The last 14 daily dumps, and every dump taken before an import, an upgrade or a migration.
-- **Recovery.** `shreni db restore <file>`, with every worker stopped, replaces the database with the dump. Work done since that dump is lost; the restored events show where it ends.
+- **Recovery.** `shreni db restore <file>`, with every worker stopped, replaces the database with the dump: the dump's schemas are dropped and loaded again in one transaction, so a migration's additions go too, and a restore that fails changes nothing. Work done since that dump is lost; the restored events show where it ends. Like a dump, it refuses a database on another machine without `--remote`, and a dump named for another database without `--other-database`.
+- **A daily dump that fails** is said by the next commands run in a terminal, and is tried again six hours later, until one succeeds.
 - **Limit.** Dumps on the same disk recover from a bad migration, a bad upgrade or a broken database, not from losing the machine. Copying `~/.shreni/backups/` elsewhere covers that, and a hosted database later makes it the host's job.
 
 ## Running work

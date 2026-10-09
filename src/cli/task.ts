@@ -7,7 +7,8 @@ import type { ActorHandle, ProjectHandle, Task } from '../taskgraph';
 import { loadKshetraConfig } from '../kshetra/config';
 import { loadRegistry } from '../kshetra/registry';
 import { loadTrackerConfig, type ProjectConfig } from '../kshetra/project-config';
-import { loadUserConfig } from '../kshetra/user-config';
+import { loadUserConfig, resolveDatabase } from '../kshetra/user-config';
+import { isLocal, pgTools, takeDump, WAIT_MS, type DumpKind } from '../policy/db/backups';
 import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/connect';
 import type { ShreniClient } from '../policy/db/client';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
@@ -69,6 +70,11 @@ export interface TaskDeps {
   interactive(): boolean;
   /** Asks a question at the terminal and returns the answer. */
   ask(question: string): Promise<string>;
+  /**
+   * Dumps the project's database before a change, and waits for it (policy
+   * spec, "Backups"); says where, or why none was taken.
+   */
+  backup(config: ProjectConfig, kind: DumpKind): Promise<string>;
   /** Whether the Kshetra is paused, and its worker on this machine as host/pid (its lock's name), or null. */
   kshetra(id: string): { paused: boolean; localWorker: string | null };
 }
@@ -87,6 +93,12 @@ const defaultDeps = (): TaskDeps => ({
     } finally {
       rl.close();
     }
+  },
+  async backup(config, kind) {
+    const target = resolveDatabase(config, loadUserConfig());
+    // A database on another machine is backed up by whoever runs it.
+    if (!isLocal(target)) return `database "${target.name}" isn't on this machine: no dump taken; its owner backs it up`;
+    return `dumped first: ${await takeDump(target, kind, pgTools, { wait: WAIT_MS })}`;
   },
   kshetra(id) {
     const pid = readPid(id);
@@ -438,7 +450,7 @@ const SUBCOMMANDS: Record<(typeof TASK_SUBCOMMANDS)[number], Run> = {
     deps.print(`approved ${id}`);
   },
 
-  async upgrade({ ctx, deps, tg, me, shreni }) {
+  async upgrade({ ctx, deps, tg, me, shreni, found }) {
     const a = parseArgs(ctx.args, { bool: ['--force'] });
     const force = a.bools.has('--force');
     const { version, name } = shreni.tg.lifecycle;
@@ -471,6 +483,8 @@ const SUBCOMMANDS: Record<(typeof TASK_SUBCOMMANDS)[number], Run> = {
     if (blockers.length) throw new Error(`can't upgrade:\n${blockers.map(b => `  - ${b}`).join('\n')}`);
     const target = `${name}@${version}`;
     if ((await deps.ask(`Type ${target} to upgrade: `)).trim() !== target) throw new Error('not upgraded');
+    // An upgrade can move real tasks, so a dump comes first, and the upgrade waits for it.
+    deps.print(await deps.backup(found.config, 'pre-upgrade'));
     await me.lifecycles.activate(version, { force });
     deps.print(`upgraded to ${target}`);
   },

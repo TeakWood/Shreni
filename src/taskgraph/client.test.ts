@@ -27,6 +27,13 @@ describe('openTaskGraph', { timeout: PGLITE_TIMEOUT }, () => {
     expect(await client.projects.list()).toEqual([]);
   });
 
+  it('lists the migrations the database lacks, and none once migrated', async () => {
+    const { client } = await openClient();
+    expect(await client.pendingMigrations()).toEqual(MIGRATIONS.map(m => m.name));
+    await client.migrate();
+    expect(await client.pendingMigrations()).toEqual([]);
+  });
+
   it('sees a migration another process ran', async () => {
     const { t, client } = await openClient();
     const other = await openTaskGraph({ db: t.db, lifecycle: testLifecycle() });
