@@ -681,6 +681,8 @@ type Finding = {
 
 **Built into the engine, always on:** no cycles, no references to missing tasks, every container has at least one child, every task in the plan is in a pre-approval state. These can't be turned off.
 
+Each validator runs in a savepoint of the transaction, so one that fails in SQL leaves it sound for the next; a validator that throws is an error finding, so it can't let a plan through, while deadlocks, serialization failures and a lost connection propagate to be retried or reported. `config` comes from `openTaskGraph`'s `validatorConfig`, by validator name or as a function of the project and the name.
+
 Shreni registers four more, configured per project in either kind of project's config file; they are in the policy spec's [Validators](task-lifecycle.md#validators).
 
 ### Approval

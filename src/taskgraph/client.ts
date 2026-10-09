@@ -9,6 +9,8 @@ import { once as onceFor, type PriorWrite } from './requests';
 import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi, type MoveOptions } from './moves';
 import { readsApi } from './reads';
+import { plansApi } from './plans';
+import type { Validator } from './validators';
 import { Session, type Release } from './session';
 import { activateApi, diffApi } from './upgrade';
 import { claimApi, expireLeasesApi, leasedApi } from './claims';
@@ -38,6 +40,13 @@ export interface OpenTaskGraphOptions {
    * for tg.locks with `sql`. The caller owns it and ends it.
    */
   session?: postgres.Sql;
+  /** The caller's validators, run after the engine's own in plans.validate and approval. */
+  validators?: Validator[];
+  /**
+   * Each validator's config, passed to it as ctx.config: by validator name,
+   * or a function of the project and the name, for configs that differ by project.
+   */
+  validatorConfig?: ValidatorConfig;
   lifecycle: Lifecycle;
 }
 
@@ -66,6 +75,8 @@ function checkActor(actor: Actor): Actor {
   return actor;
 }
 
+export type ValidatorConfig = Record<string, unknown> | ((projectId: string, validator: string) => unknown);
+
 type ProjectRow = {
   id: string; name: string; id_prefix: string; lifecycle_name: string; lifecycle_version: number; created_at: Date;
 };
@@ -92,7 +103,15 @@ export class TaskGraphClient {
     private readonly ownsDb: boolean,
     /** @internal The session connection, for session locks (and LISTEN). */
     readonly session: Session = new Session(db),
+    /** @internal */ readonly validators: readonly Validator[] = [],
+    /** @internal */ readonly validatorConfig: ValidatorConfig = {},
   ) {}
+
+  /** @internal Each validator's config for one project. */
+  configFor(projectId: string): (name: string) => unknown {
+    const c = this.validatorConfig;
+    return name => (typeof c === 'function' ? c(projectId, name) : c[name]);
+  }
 
   /** @internal Reads which migrations have run, and registers the lifecycle once the schema has it. */
   async refresh(): Promise<void> {
@@ -245,6 +264,7 @@ export class ActorHandle {
   /** Makes a declared move; throws MoveRefused. */
   readonly move: (taskId: string, moveName: string, opts?: MoveOptions) => Promise<Task>;
   readonly lifecycles: ReturnType<typeof activateApi>;
+  readonly plans: ReturnType<typeof plansApi>;
   /** Sweeps, then leases the next ready task to a worker; null when nothing is ready. */
   readonly claim: ReturnType<typeof claimApi>;
   /** Renews a claim's lease; throws LeaseLost once it no longer holds the task. */
@@ -288,6 +308,7 @@ export class ActorHandle {
       once(opts.requestId, `move:${moveName}`, taskId, () => moves(taskId, moveName, opts, fence), task);
     this.move = (taskId, moveName, opts) => fenced(taskId, moveName, opts);
     this.moveFenced = fenced;
+    this.plans = plansApi(this);
     const lifecycles = activateApi(this);
     this.lifecycles = {
       activate: (version, opts = {}) => once(opts.requestId, 'lifecycle.upgraded', undefined, () => lifecycles.activate(version, opts), nothing),
@@ -351,7 +372,8 @@ export async function openTaskGraph(options: OpenTaskGraphOptions): Promise<Task
   const lifecycle = defineLifecycle(options.lifecycle);
   const owns = !options.db;
   const db = options.db ?? new Kysely<any>({ dialect: new PostgresJsDialect({ sql: options.sql! }) });
-  const client = new TaskGraphClient(db, lifecycle, owns, new Session(db, options.session, !!options.sql));
+  const client = new TaskGraphClient(db, lifecycle, owns, new Session(db, options.session, !!options.sql),
+    options.validators ?? [], options.validatorConfig ?? {});
   try {
     await client.refresh();
   } catch (err) {

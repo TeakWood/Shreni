@@ -61,11 +61,11 @@ export function filterWhere(projectId: string, f: TaskFilter): RawBuilder<boolea
 
 const limitClause = (limit?: number) => (limit !== undefined ? sql`limit ${limit}` : sql``);
 
-type PlanRow = {
+export type PlanRow = {
   project_id: string; id: string; title: string; meta: Record<string, unknown>;
   approved_at: Date | null; approved_by: string | null; discarded_at: Date | null; discarded_by: string | null; created_at: Date;
 };
-const toPlan = (r: PlanRow): Plan => ({
+export const toPlan = (r: PlanRow): Plan => ({
   projectId: r.project_id, id: r.id, title: r.title, meta: r.meta, approvedAt: r.approved_at, approvedBy: r.approved_by,
   discardedAt: r.discarded_at, discardedBy: r.discarded_by, createdAt: r.created_at,
 });
