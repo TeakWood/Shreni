@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { sql } from 'kysely';
 import type { CommandContext } from './registry';
@@ -17,6 +17,11 @@ import {
 } from '../policy/task/by-hand';
 import { NotFound } from '../taskgraph';
 import { loadState } from '../kshetra/state';
+import { blockBody, blockProblem, installPrimeHooks, writeBlock } from '../policy/init/instructions';
+import { PROVIDER_REGISTRY, providerFromCliName, providerInstructionFile } from '../agents/providers/registry';
+import type { Provider } from '../agents/providers/types';
+import type { KshetraConfig } from '../kshetra/config';
+import type { TrackerConfig } from '../kshetra/project-config';
 import { readPid, isAlive } from './pid';
 import { createInterface } from 'readline/promises';
 import { hostname } from 'os';
@@ -31,6 +36,7 @@ import { hostname } from 'os';
 
 export const TASK_SUBCOMMANDS = [
   'ready', 'show', 'list', 'create', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'upgrade',
+  'setup', 'prime',
 ] as const;
 /** The developer's own calls, refused without an interactive terminal (an accident guard, not a security boundary). */
 const TERMINAL_ONLY = new Set(['approve', 'upgrade']);
@@ -52,6 +58,8 @@ const HELP = [
   'shreni task cancel <id> --reason "…" [--with-children] [--drop-deps]',
   'shreni task approve <id>                      approve a plan or a lone task (terminal only)',
   'shreni task upgrade [--force]                 move the project to this Shreni\'s lifecycle (terminal only)',
+  'shreni task setup                             rewrite Shreni\'s block in the repo\'s instruction files, and the prime hooks',
+  'shreni task prime                             the block\'s rules and the project\'s memories, for an agent session',
 ].join('\n');
 
 /** The states a list shows by default: every one not yet terminal. */
@@ -62,7 +70,7 @@ export interface TaskDeps {
   cwd: string;
   /** SHRENI_KSHETRA, set in a planning session, names the project instead. */
   env: NodeJS.ProcessEnv;
-  open(config: ProjectConfig): Promise<KshetraEngine>;
+  open(config: ProjectConfig, opts?: { connectTimeout?: number }): Promise<KshetraEngine>;
   /** The developer the calls act as: `user` in ~/.shreni/config.yaml, else git's user.email. */
   user(): string | undefined;
   print(line: string): void;
@@ -82,7 +90,7 @@ export interface TaskDeps {
 const defaultDeps = (): TaskDeps => ({
   cwd: process.cwd(),
   env: process.env,
-  open: config => openKshetraEngine(config, { name: 'shreni-task' }),
+  open: (config, opts) => openKshetraEngine(config, { name: 'shreni-task', ...opts }),
   user: () => loadUserConfig().user,
   print: line => console.log(line),
   interactive: () => !!process.stdin.isTTY && !!process.stdout.isTTY,
@@ -223,6 +231,9 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
   if (TERMINAL_ONLY.has(sub) && !deps.interactive()) {
     throw new Error(`shreni task ${sub} is the developer's, and needs an interactive terminal`);
   }
+  // The instruction files are the repo's, not the database's.
+  if (sub === 'setup') return setup(ctx, deps);
+  if (sub === 'prime') return prime(ctx, deps);
   const found = resolveProject(deps.cwd, deps.env);
   const { config } = found;
   const user = deps.user();
@@ -240,10 +251,88 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
         lockHolder: await tg.locks.holder('worker'), localWorker: k.localWorker,
       });
     }
-    await SUBCOMMANDS[sub as (typeof TASK_SUBCOMMANDS)[number]]({ ctx, deps, tg, me, shreni: conn.shreni, found, user });
+    await SUBCOMMANDS[sub as keyof typeof SUBCOMMANDS]({ ctx, deps, tg, me, shreni: conn.shreni, found, user });
   } finally {
     await conn.close().catch(() => {});
   }
+}
+
+/** How long prime waits for the database before printing without the memories. */
+const PRIME_CONNECT_S = 3;
+
+/** Where a project's block goes (policy spec, "Instructions for agent sessions"). */
+export function instructionTargets(found: FoundConfig<ProjectConfig>): {
+  repo: string; mode: 'kshetra' | 'tracker'; files: string[]; claude: boolean;
+} {
+  if (found.kind === 'kshetra') {
+    // A Kshetra's file is its configured provider's, and any other agent CLI's
+    // file that holds a Shreni block, so a tracker block left from before never survives.
+    const k = found.config as KshetraConfig;
+    const repo = k.repo?.path ?? dirname(dirname(found.path));
+    const own = join(repo, providerInstructionFile(k.agents.provider));
+    const others = Object.keys(PROVIDER_REGISTRY).map(p => join(repo, providerInstructionFile(p as Provider)))
+      .filter(f => f !== own && existsSync(f) && readFileSync(f, 'utf8').includes('<!-- shreni:begin '));
+    return { repo, mode: 'kshetra', files: [own, ...new Set(others)], claude: k.agents.provider === 'anthropic' };
+  }
+  // A tracker's are one per agent CLI people use in the repo.
+  const repo = dirname(dirname(found.path));
+  const providers = (found.config as TrackerConfig).providers.map(providerFromCliName);
+  return {
+    repo, mode: 'tracker',
+    files: [...new Set(providers.map(p => join(repo, providerInstructionFile(p))))],
+    claude: providers.includes('anthropic'),
+  };
+}
+
+/** Writes the block into each file and, for Claude Code, the prime hooks; returns what it did, a line each. */
+export function setupInstructions(found: FoundConfig<ProjectConfig>): string[] {
+  const t = instructionTargets(found);
+  const out = t.files.map(f => `${f}: ${writeBlock(f, t.mode)}`);
+  if (t.claude) out.push(`${join(t.repo, '.claude', 'settings.json')}: ${installPrimeHooks(t.repo) ? 'prime hooks installed' : 'prime hooks unchanged'}`);
+  return out;
+}
+
+async function setup(ctx: CommandContext, deps: TaskDeps): Promise<void> {
+  parseArgs(ctx.args, { command: 'shreni task setup' });
+  const found = resolveProject(deps.cwd, deps.env, { requireProject: false });
+  // A Kshetra still on beads keeps its bd rules and hooks until it moves to the engine.
+  if (found.kind === 'kshetra' && !found.config.project) {
+    throw new Error(`Kshetra ${found.kshetraId} is still on beads; its block and hooks come with the move to the engine (shreni init --mode kshetra)`);
+  }
+  for (const l of setupInstructions(found)) deps.print(l);
+}
+
+/**
+ * The block's rules and the project's memories, as the session-start and
+ * pre-compaction hooks print them; a file whose block is missing, of the
+ * other kind or behind is warned about, never edited.
+ */
+async function prime(ctx: CommandContext, deps: TaskDeps): Promise<void> {
+  parseArgs(ctx.args, { command: 'shreni task prime' });
+  const found = resolveProject(deps.cwd, deps.env, { requireProject: false });
+  const t = instructionTargets(found);
+  const out = [blockBody(t.mode)];
+  if (found.config.project) {
+    try {
+      // A hook at every session start: an unreachable server costs seconds, not half a minute.
+      const conn = await deps.open(found.config, { connectTimeout: PRIME_CONNECT_S });
+      try {
+        const rows = await conn.shreni.db.selectFrom('shreni.memories').select(['key', 'content'])
+          .where('project_id', '=', found.config.project).orderBy('key').execute();
+        if (rows.length) out.push('', '## Memories', '', ...rows.map(r => `- **${r.key}**: ${r.content}`));
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    } catch (err) {
+      // A session still gets the rules when the database is down.
+      out.push('', `(memories unavailable: ${(err as Error).message})`);
+    }
+  } else {
+    out.push('', '(this repo names no project yet; run shreni init)');
+  }
+  const problems = t.files.map(f => blockProblem(f, t.mode)).filter((p): p is string => !!p);
+  if (problems.length) out.push('', ...problems.map(p => `Warning: ${p}`));
+  deps.print(out.join('\n'));
 }
 
 type Run = (s: {
@@ -258,7 +347,7 @@ function oneId(a: { positionals: string[] }, usage: string): string {
   return id;
 }
 
-const SUBCOMMANDS: Record<(typeof TASK_SUBCOMMANDS)[number], Run> = {
+const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | 'prime'>, Run> = {
   async ready({ ctx, deps, tg }) {
     const json = parseArgs(ctx.args, {}).bools.has('--json');
     const tasks = await tg.ready({ kind: 'work' });

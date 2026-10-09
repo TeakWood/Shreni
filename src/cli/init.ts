@@ -13,6 +13,7 @@ import { openKshetraEngine } from '../policy/sthapathi/connect';
 import { idPrefixFor, registerProject, type ProjectMode } from '../policy/init/project';
 import { ensureMigrated, migrateDeps, realProbe } from './db';
 import { readPid, isAlive } from './pid';
+import { setupInstructions } from './task';
 
 export interface InitOpts {
   mode?: string;
@@ -274,6 +275,13 @@ async function initTracker(a: {
         }
         // The schema checks the file as every later command will read it.
         loadTrackerConfig(trackerPath);
+      },
+    },
+    {
+      // The tracker block in each agent CLI's file, and the prime hooks for Claude Code.
+      name: 'Instructions',
+      run: async () => {
+        for (const l of setupInstructions({ kind: 'tracker', path: trackerPath, config: loadTrackerConfig(trackerPath) })) deps.print(`  ${l}`);
       },
     },
   ];

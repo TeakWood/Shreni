@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, onTestFinished } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { sql } from 'kysely';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -444,3 +444,60 @@ describe('shreni task by hand: claim, finish, release, cancel, approve, upgrade'
   });
 });
 
+
+describe('shreni task setup and prime', { timeout: PGLITE_TIMEOUT }, () => {
+  it('setup writes the tracker block for each agent CLI and the prime hooks; prime prints it with the memories', async () => {
+    const { repo, run } = await setup();
+    writeFileSync(join(repo, '.shreni', 'tracker.yaml'), `${readFileSync(join(repo, '.shreni', 'tracker.yaml'), 'utf8')}providers: [claude, codex]\n`);
+    writeFileSync(join(repo, 'CLAUDE.md'), '# Ours\n');
+    expect(await run('setup')).toMatch(/CLAUDE\.md: added\n.*AGENTS\.md: created\n.*settings\.json: prime hooks installed/);
+    expect(readFileSync(join(repo, 'CLAUDE.md'), 'utf8')).toMatch(/^# Ours\n\n<!-- shreni:begin tracker v1 -->/);
+
+    await run('remember', 'use pnpm, never npm', '--key', 'pnpm');
+    const primed = await run('prime');
+    expect(primed).toMatch(/^## Task tracking\n/);
+    expect(primed).toContain('- **pnpm**: use pnpm, never npm');
+    expect(primed).not.toContain('Warning:');
+  });
+
+  it('prime warns about a file whose block is missing or behind, and still prints when the database is down', async () => {
+    const { repo, run, deps } = await setup();
+    writeFileSync(join(repo, 'CLAUDE.md'), '<!-- shreni:begin tracker v0 -->\nold\n<!-- shreni:end -->\n');
+    deps.open = async () => { throw new Error('connect ECONNREFUSED'); };
+    const primed = await run('prime');
+    expect(primed).toMatch(/^## Task tracking/);
+    expect(primed).toContain('(memories unavailable: connect ECONNREFUSED)');
+    expect(primed).toMatch(/Warning: .*CLAUDE\.md's block is v0, behind v1; run shreni task setup/);
+    expect(readFileSync(join(repo, 'CLAUDE.md'), 'utf8')).toContain('tracker v0');
+  });
+
+  it('in a Kshetra, setup and prime use the Kshetra block, never the tracker one', async () => {
+    const { repo, run } = await setup('kshetra');
+    writeFileSync(join(repo, 'CLAUDE.md'), `x\n<!-- shreni:begin tracker v1 -->\nclaim away\n<!-- shreni:end -->\n`);
+    // A tracker block another agent CLI's file kept from before the Kshetra goes too.
+    writeFileSync(join(repo, 'AGENTS.md'), `y\n<!-- shreni:begin tracker v1 -->\nclaim away\n<!-- shreni:end -->\n`);
+    writeFileSync(join(repo, 'GEMINI.md'), 'no block here\n');
+    await run('setup');
+    expect(readFileSync(join(repo, 'AGENTS.md'), 'utf8')).toMatch(/^y\n<!-- shreni:begin kshetra v1 -->/);
+    expect(readFileSync(join(repo, 'GEMINI.md'), 'utf8')).toBe('no block here\n');
+    const text = readFileSync(join(repo, 'CLAUDE.md'), 'utf8');
+    expect(text).toMatch(/^x\n<!-- shreni:begin kshetra v1 -->\n## Shreni\n/);
+    expect(text).not.toContain('claim away');
+    expect(await run('prime')).toMatch(/^## Shreni\n\nThis project is a Kshetra/);
+  });
+
+  it('setup leaves a Kshetra still on beads alone, and prime waits only briefly for the database', async () => {
+    const { repo, run } = await setup('kshetra');
+    const file = join(repo, '.shreni', 'kshetra.yaml');
+    writeFileSync(file, readFileSync(file, 'utf8').replace(/^project: .*\n/m, ''));
+    await expect(run('setup')).rejects.toThrow(/Kshetra web is still on beads/);
+    expect(existsSync(join(repo, 'CLAUDE.md'))).toBe(false);
+
+    const { run: run2, deps: deps2 } = await setup();
+    const seen: unknown[] = [];
+    const open = deps2.open;
+    deps2.open = async (c, o) => { seen.push(o); return open(c); };
+    await run2('prime');
+    expect(seen).toEqual([{ connectTimeout: 3 }]);
+  });
+});

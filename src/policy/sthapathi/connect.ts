@@ -15,9 +15,14 @@ export interface KshetraEngine {
 }
 
 /** Opens the database a project's config names: a Kshetra's, or a tracker's for shreni task. */
-export async function openKshetraEngine(kshetra: Pick<ProjectConfig, 'database'>, opts: { name?: string } = {}): Promise<KshetraEngine> {
+export async function openKshetraEngine(
+  kshetra: Pick<ProjectConfig, 'database'>, opts: { name?: string; connectTimeout?: number } = {},
+): Promise<KshetraEngine> {
   const target = resolveDatabase(kshetra, loadUserConfig());
-  const auth = { ...(target.user ? { username: target.user } : {}), ...(target.password ? { password: target.password } : {}) };
+  const auth = {
+    ...(target.user ? { username: target.user } : {}), ...(target.password ? { password: target.password } : {}),
+    ...(opts.connectTimeout ? { connect_timeout: opts.connectTimeout } : {}),
+  };
   const sql = postgres(target.url, { max: 4, onnotice: () => {}, ...auth });
   const session = postgres(target.url, {
     max: 1, max_lifetime: null, idle_timeout: 0, onnotice: () => {}, ...auth,

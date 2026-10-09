@@ -9,7 +9,9 @@ import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
 import { ragIndexDir } from '../kshetra/state-locations';
 import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
-import { GATES_DEFAULTS, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
+import { GATES_DEFAULTS, loadKshetraConfig, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
+import { setupInstructions } from './task';
+import { LEGACY_SECTION } from '../policy/init/instructions';
 import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
 import { detectToolchain, suggestPack, type DetectedStack } from './detect-toolchain';
 import { createInterface } from 'readline';
@@ -763,49 +765,7 @@ export function scaffoldConventions(repoPath: string): { styleGuide: string; arc
 
 // ── Step 8: Append SHRENI INTEGRATION to CLAUDE.md ───────────────────────────
 
-export const SHRENI_SECTION = `
-## SHRENI INTEGRATION
-
-This project is managed by Shreni. The Sthapathi daemon picks up beads issues and
-implements them via autonomous agents (Silpi, Viharapala, Parikshaka).
-
-**If your system prompt assigns you a Silpi/Viharapala/Parikshaka role for a
-specific bead, this section does NOT apply to you** — do your assigned job
-(implement / review / analyze) with your tools. The rules below govern
-interactive human sessions only.
-
-**Interactive sessions: task producer only.**
-Create beads issues for the daemon to implement — do NOT implement tasks yourself.
-
-Prohibited in interactive sessions:
-  bd update --claim            Sthapathi claims tasks, not interactive agents
-  bd close                     Sthapathi closes tasks on completion
-  git checkout -b / git branch Sthapathi owns all bead-* branches
-
-Useful commands:
-  shreni status --all          Show all kshetra states
-  shreni agents                Show live agent activity
-  shreni logs --kshetra <id>   Round-by-round agent logs
-  shreni pause --kshetra <id>  Pause task pickup
-  shreni resume --kshetra <id> Resume task pickup
-
-### Toolchain config sync
-
-Shreni runs build/test/lint from the pointers in \`.shreni/kshetra.yaml\` (stack.*),
-not by re-discovering your toolchain. Whenever you add or change a toolchain
-config file — a new test runner (vitest/jest/pytest), linter (eslint), tsconfig,
-a new package.json/Makefile script, or you switch package managers — update the
-matching pointer in \`.shreni/kshetra.yaml\` in the same change:
-
-  stack.buildCommand   the build/compile gate (e.g. \`pnpm build\`)
-  stack.testRunner     the test command (e.g. \`pnpm test\`)
-  stack.lintCommand    the lint gate (e.g. \`pnpm lint\`); omit to skip lint
-
-Prefer pointing at a project script (\`pnpm test\`) over duplicating globs. The
-escape hatches stack.testFileGlobs / stack.failCountPattern are for non-standard
-setups only — set them only when the harness must find tests WITHOUT running the
-runner. A stale pointer means Shreni runs the wrong gate.
-`;
+export const SHRENI_SECTION = LEGACY_SECTION;
 
 export function appendShreniIntegration(repoPath: string): void {
   const claudePath = join(repoPath, 'CLAUDE.md');
@@ -1139,7 +1099,8 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
       run: async () => {
         createBeadsSymlink(repoPath, beadsPath);
         addToGitignore(repoPath);
-        await setupClaudeHooks(repoPath, beadsPath);
+        // On the engine the prime hooks come with the instructions block (Config).
+        if (!engine) await setupClaudeHooks(repoPath, beadsPath);
       },
     },
     {
@@ -1174,7 +1135,12 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           ...(engine || kept.project ? { database, project: kept.project } : {}),
         });
         configPath = writeKshetraConfig(repoPath, yamlContent);
-        appendShreniIntegration(repoPath);
+        if (engine) {
+          // The Kshetra block in its provider's file, and the prime hooks (policy spec, "Instructions for agent sessions").
+          for (const l of setupInstructions({ kind: 'kshetra', path: configPath, config: loadKshetraConfig(configPath) })) console.log(`  ${l}`);
+        } else {
+          appendShreniIntegration(repoPath);
+        }
         createRagIndexStub(opts.slug);
       },
     },
