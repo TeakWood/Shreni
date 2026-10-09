@@ -1,5 +1,6 @@
 import { sql, type Transaction } from 'kysely';
 import { LOCK_NAMESPACE } from './locks';
+import { jsonb } from './sql-values';
 
 // Event writes (engine spec, "Events and history"). A transaction buffers its
 // events and writes them last, under each project's events lock held until
@@ -54,7 +55,7 @@ export async function writeEvents(tx: Transaction<any>, events: readonly NewEven
         actor_role: e.actorRole,
         from_state: e.fromState ?? null,
         to_state: e.toState ?? null,
-        payload: sql`cast(${JSON.stringify(e.payload ?? {})} as jsonb)`,
+        payload: jsonb(e.payload ?? {}),
         request_id: e.requestId ?? null,
         at: e.at ?? sql`taskgraph.now()`,
       })))

@@ -454,7 +454,7 @@ These hold no matter how many workers run or what order their calls arrive in. E
 **The cycle check.** A new edge "A depends on B" creates a cycle exactly when B already depends, directly or transitively, on A. Inside the lock, the engine walks B's dependencies:
 
 ```sql
-select pg_advisory_xact_lock(hashtext('taskgraph:deps:' || $project));
+select pg_advisory_xact_lock($depsNamespace, hashtext($project));   -- two-key form: each lock kind has its own namespace
 
 with recursive reach(id) as (
   select $b::text
@@ -548,6 +548,7 @@ type TaskFilter = {
 Errors are typed and carry stable codes:
 
 - `CycleError`; `NotFound`; `ValidationError`, with every finding.
+- `InvalidRequest`: a call's input is malformed, or an edit the rules forbid: a kind change on a task with children or attempts, a delete past `create.state`, with attempts or with children, a reparent into the task's own subtree, or a task joining a plan that is approved or discarded.
 - `NotPermitted`: the actor's role may not make a call that isn't a move, or not with the task in its current state. A refused move is `MoveRefused` with reason `NotPermitted`.
 - `MoveRefused`, with the task's current state and a reason: the guard's, `NotPermitted`, `ChildrenLive`, or `DependentsLive` with the waiting tasks.
 - `LeaseLost`, and `LeaseHeld`, which names the holder.

@@ -62,6 +62,21 @@ describe('openTaskGraph', { timeout: PGLITE_TIMEOUT }, () => {
     await client.migrate();
     const p = await client.projects.create({ name: 'web', idPrefix: 'web', actor: ann });
     expect((await client.projects.get(p.id)).name).toBe('web');
+
+    // arrays, json and timestamps through the production driver
+    const as = client.project(p.id).as(ann);
+    const hold = new Date('2026-11-01T00:00:00Z');
+    const task = await as.tasks.create({ title: 't', tags: ['a', 'b'], spec: { checks: [1] }, holdUntil: hold });
+    expect(task).toMatchObject({ tags: ['a', 'b'], spec: { checks: [1] }, holdUntil: hold, state: 'proposed' });
+    const other = await as.tasks.create({ title: 'u' });
+    await as.deps.add(task.id, other.id);
+    expect(await as.tasks.update(task.id, { tags: [], holdUntil: null })).toMatchObject({ tags: [], holdUntil: null });
+    // json is stored as objects, not as strings holding json
+    const kinds = await w.sql`
+      select (select jsonb_typeof(definition) from taskgraph.lifecycles) as definition,
+             (select jsonb_typeof(payload) from taskgraph.events where kind = 'task.updated') as payload,
+             (select jsonb_typeof(spec) from taskgraph.tasks where id = ${task.id}) as spec`;
+    expect([...kinds]).toEqual([{ definition: 'object', payload: 'object', spec: 'object' }]);
   });
 });
 

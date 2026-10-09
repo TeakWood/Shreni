@@ -4,6 +4,8 @@ import { PostgresJsDialect } from './pg-dialect';
 import { migrate, pendingMigrations, type MigrationReport } from './migrate';
 import { defineLifecycle, registerLifecycle, type Call, type Lifecycle } from './lifecycle';
 import { checkPermission } from './permissions';
+import { tasksApi } from './tasks';
+import { depsApi, linksApi, notesApi } from './deps';
 import { runTransaction } from './tx';
 import { NotFound, SchemaBehind, VersionMismatch } from './errors';
 import type { Actor } from './types';
@@ -156,8 +158,20 @@ export class ProjectHandle {
 }
 
 export class ActorHandle {
+  readonly tasks: ReturnType<typeof tasksApi>;
+  readonly deps: ReturnType<typeof depsApi>;
+  readonly links: ReturnType<typeof linksApi>;
+  readonly notes: ReturnType<typeof notesApi>;
+
   /** @internal Use tg.as(actor). */
-  constructor(/** @internal */ readonly project: ProjectHandle, readonly actor: Actor) {}
+  constructor(/** @internal */ readonly project: ProjectHandle, readonly actor: Actor) {
+    // In the constructor body: field initializers would run before the
+    // parameter properties above are set.
+    this.tasks = tasksApi(this);
+    this.deps = depsApi(this);
+    this.links = linksApi(this);
+    this.notes = notesApi(this);
+  }
 
   /**
    * Throws NotPermitted unless this actor's role may make `call` on a task in

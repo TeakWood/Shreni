@@ -12,4 +12,5 @@ export { defineLifecycle, defineGuard, SYSTEM_ROLE, CALLS } from './lifecycle';
 export type { Lifecycle, Move, Guard, GuardFn, StateFlags, Call } from './lifecycle';
 export type { MigrationReport } from './migrate';
 export type { Actor, Task } from './types';
+export type { NewTask, TaskPatch, WriteOptions } from './tasks';
 export * from './errors';

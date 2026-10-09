@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { LifecycleInvalid, type LifecycleViolation } from './errors';
 import type { Actor, Task } from './types';
 import { runTransaction } from './tx';
+import { jsonb } from './sql-values';
 
 // The lifecycle the caller declares (engine spec, "Task lifecycle" and
 // "Versions and upgrades"): states, where new tasks land, the moves between
@@ -284,7 +285,7 @@ export async function registerLifecycle(db: Kysely<any>, def: Lifecycle): Promis
   const storedHash = await runTransaction(db, async ({ db: tx }) => {
     await sql`
       insert into taskgraph.lifecycles (name, version, definition, hash)
-      values (${def.name}, ${def.version}, cast(${JSON.stringify(serializeLifecycle(def))} as jsonb), ${hash})
+      values (${def.name}, ${def.version}, ${jsonb(serializeLifecycle(def))}, ${hash})
       on conflict (name, version) do nothing`.execute(tx);
     const stored = await sql<{ hash: string }>`
       select hash from taskgraph.lifecycles where name = ${def.name} and version = ${def.version}`.execute(tx);

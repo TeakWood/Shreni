@@ -21,6 +21,13 @@ export class NotFound extends TaskGraphError {
   }
 }
 
+/** A call's input is malformed, or the edit is one the rules forbid. */
+export class InvalidRequest extends TaskGraphError {
+  constructor(message: string) {
+    super('InvalidRequest', message);
+  }
+}
+
 /** The actor's role may not make this call, or not with the task in its current state. */
 export class NotPermitted extends TaskGraphError {
   constructor(readonly call: string, readonly role: string, readonly state?: string) {
