@@ -1,9 +1,9 @@
 import { join } from 'path';
 import { createScheduler, type Scheduler, type SchedulerHooks } from '../sthapathi/index';
-import { selectNext, prepareTask } from '../sthapathi/pickup';
+import { selectNext, prepareTask, preFlightCheck, PreFlightError } from '../sthapathi/pickup';
 import { runSilpiViharapalaLoop } from '../sthapathi/dispatch';
 import { handleCycleError, AgentAbortedError } from '../sthapathi/errors';
-import { recoverKshetra, scheduleResume } from '../sthapathi/recover';
+import { recoverKshetra, resetWorkTree, scheduleResume } from '../sthapathi/recover';
 import { untrackCommittedRepoMap } from '../sthapathi/repo-map-migration';
 import { runWatchdogOnce } from '../sthapathi/watchdog';
 import { branchName } from '../sthapathi/branch';
@@ -14,6 +14,8 @@ import {
   clearStuckPauseOnRecover,
   isKshetraManuallyPaused,
   loadState,
+  pauseKshetra,
+  recordStall,
   setPhase,
   setAblations,
 } from '../kshetra/state';
@@ -34,6 +36,10 @@ import { findRoleCredentialGaps } from './provider-preflight';
 import { ablationGuardError, ablationBanner, activeAblations } from '../kshetra/ablation';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
+import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/connect';
+import { EngineQueue, takeWorkerLock, UNAVAILABLE_RETRY_MS, WorkerLockHeld, workerName } from '../policy/sthapathi/leases';
+import type { Release } from '../taskgraph';
+import { engineHooks } from '../policy/sthapathi/hooks';
 
 // The worker runtime, factored out of src/cli/worker.ts (epic 7h3 / Study B3) so
 // the daemon (`shreni start` → `__worker`) and `shreni drain` share ONE copy of
@@ -68,10 +74,15 @@ export interface WorkerRuntimeOptions {
   // to the epic's subtree so only in-scope beads are worked. Omitted for the
   // daemon and an unscoped drain — the whole ready queue is fair game.
   inScope?: (task: Task) => boolean;
+  // The epic that inScope is the subtree of, so a Kshetra on the task graph
+  // engine can claim within it (the engine's filter takes the epic, not a predicate).
+  scopeEpic?: string;
 }
 
 export interface WorkerRuntime {
   readonly kshetra: KshetraConfig;
+  /** Closes the engine's connections (dropping the worker lock); nothing to do on beads. */
+  close(): Promise<void>;
   readonly scheduler: Scheduler;
   readonly hooks: SchedulerHooks;
   /** The startup sequence — MUST complete before the first cycle is driven, so
@@ -138,6 +149,48 @@ export function createWorkerRuntime(
   let activeRun: ActiveRun | undefined;
   let healing = false;
 
+  // A Kshetra registered on the task graph engine (its kshetra.yaml names the
+  // project's uuid) is worked through the engine's claims and leases (policy
+  // spec, "Running work"); one still on beads keeps the bd path until the
+  // migration release removes it. Opened in startup; until then, and if
+  // opening failed, an engine Kshetra picks up nothing rather than fall back to bd.
+  const onEngine = !!kshetra.project;
+  let engine: { conn: KshetraEngine; hooks: ReturnType<typeof engineHooks>; queue: EngineQueue; lock: Release } | undefined;
+  // When opening the engine first failed, for the retry window (policy spec, "The database").
+  let engineDownSince: number | undefined;
+
+  /**
+   * The engine, opening it if startup couldn't. If it stays unreachable past
+   * the retry window, pauses the Kshetra for a manual resume. Also checks the
+   * worker lock is still this worker's: a dropped session connection loses it.
+   */
+  async function ensureEngine(k: KshetraConfig): Promise<typeof engine> {
+    if (engine) {
+      if (await engine.lock.held()) return engine;
+      logErr('the worker lock was lost (the session connection dropped); pausing');
+      await close();
+      pauseKshetra(k, { manual: true, reason: 'worker_lock_lost', message: 'the worker lock was lost; resume to take it again' });
+      return undefined;
+    }
+    try {
+      await startEngine();
+      engineDownSince = undefined;
+      return engine;
+    } catch (err) {
+      if (err instanceof WorkerLockHeld) {
+        pauseKshetra(k, { manual: true, reason: 'worker_lock_held', message: err.message });
+        return undefined;
+      }
+      engineDownSince ??= Date.now();
+      logErr('cannot open the task graph engine:', err);
+      if (Date.now() - engineDownSince >= UNAVAILABLE_RETRY_MS) {
+        pauseKshetra(k, { manual: true, reason: 'database_unavailable', message: `cannot open the database: ${(err as Error).message}` });
+        engineDownSince = undefined;
+      }
+      return undefined;
+    }
+  }
+
   // Run one task through the Silpi↔Viharapala loop (or the PR fix+finalize path
   // for a follow-up bead), funnelling any throw into the error handler — the same
   // loop and error policy the scheduler's WORK phase and resume both use.
@@ -168,6 +221,10 @@ export function createWorkerRuntime(
       // runs first, so returning null here idles the cycle before any mutation.
       if (healing) return null;
       if (isKshetraManuallyPaused(k)) return null;
+      if (onEngine) {
+        const e = await ensureEngine(k);
+        return e ? e.hooks.selectNext(k) : null;
+      }
       // Follow-up beads are prioritised over fresh work (ARD §4.1): finish
       // in-flight PRs before opening new WIP. Cheap — a bd label query. A
       // follow-up bead is on-scope by construction (its parent bead was worked
@@ -176,7 +233,10 @@ export function createWorkerRuntime(
       if (followup) return followup;
       return selectNext(k, options.inScope);
     },
-    prepareTask,
+    async prepareTask(task: Task, k: KshetraConfig): Promise<Task | null> {
+      if (onEngine) return engine ? engine.hooks.prepareTask(task, k) : null;
+      return prepareTask(task, k);
+    },
     async runTask(task: Task, k: KshetraConfig): Promise<void> {
       // Publish a cancellation handle so the resume watcher can abort a hung run
       // and RECOVER in-process. `done` resolves in the finally, after the loop has
@@ -186,7 +246,8 @@ export function createWorkerRuntime(
       const done = new Promise<void>(resolve => { resolveDone = resolve; });
       activeRun = { controller, task, done };
       try {
-        await runTaskSafely(k, task, branchName(task), controller.signal);
+        if (onEngine && engine) await engine.hooks.runTask(task, k);
+        else await runTaskSafely(k, task, branchName(task), controller.signal);
       } finally {
         activeRun = undefined;
         resolveDone();
@@ -228,6 +289,47 @@ export function createWorkerRuntime(
     return closed;
   }
 
+  /**
+   * Opens the engine and takes the Kshetra's worker lock, refusing to start
+   * (WorkerLockHeld, naming the holder's host) if another worker has it.
+   */
+  async function startEngine(): Promise<void> {
+    if (options.inScope && !options.scopeEpic) {
+      throw new Error('a scoped run on the task graph engine needs the epic it is scoped to (scopeEpic)');
+    }
+    const conn = await openKshetraEngine(kshetra);
+    try {
+      const tg = conn.shreni.tg.project(kshetra.project!);
+      const lock = await takeWorkerLock(tg);
+      const queue = new EngineQueue(tg, tg.as({ id: `sthapathi:${kshetra.id}`, role: 'orchestrator' }), workerName(),
+        options.scopeEpic ? { within: options.scopeEpic } : {});
+      const hooks = engineHooks({
+        queue,
+        preflight: (task, k) => preFlightCheck(task, k),
+        // The run's own abort (self-heal) and the lease's both stop the agents.
+        run: (task, k, signal) => {
+          const signals = [signal, activeRun?.controller.signal].filter((x): x is AbortSignal => !!x);
+          return runTaskSafely(k, task, branchName(task), AbortSignal.any(signals)).then(() => {});
+        },
+        onUnavailable: (k, err) => {
+          logErr('database unavailable for a minute; pausing', err);
+          pauseKshetra(k, { manual: true, reason: 'database_unavailable', message: `the database stayed unreachable: ${err.message}` });
+        },
+        onLeaseLost: task => log(`lease on ${task.id} lost; another worker has it now`),
+        onPreflightRefused: (task, k, err) => {
+          if (!(err instanceof PreFlightError)) throw err;
+          console.warn(`${logTag} preflight refused ${task.id}: ${err.message}; claim given back`);
+          recordStall(k, 'preflight');
+        },
+      });
+      engine = { conn, hooks, queue, lock };
+      log(`on the task graph engine as ${workerName()} (worker lock held)`);
+    } catch (err) {
+      await conn.close().catch(() => {});
+      throw err;
+    }
+  }
+
   async function startup(): Promise<number> {
     // Load the optional extension FIRST, before any events are emitted or the
     // loop is driven, so a registered extension's sinks/meter are in place from
@@ -263,6 +365,13 @@ export function createWorkerRuntime(
       { allowAblation },
     );
     emitLotManifest(kshetra.id, entrypoint, labels, sections);
+    if (onEngine) {
+      await startEngine();
+      // Leases return interrupted work by themselves; only the work tree needs resetting.
+      await resetWorkTree(kshetra);
+      if (clearStuckPauseOnRecover(kshetra)) log('cleared stale stuck pause after recovery');
+      return 0;
+    }
     await sync();
     const resumable = await recoverKshetra(kshetra);
     // RECOVER has reconciled the drift a stuck pause escalated over, so a leftover
@@ -292,6 +401,7 @@ export function createWorkerRuntime(
   }
 
   function startTimers(): () => void {
+    if (onEngine) return startEngineTimers();
     const syncTimer = setInterval(
       () => sync().catch(err => logErr('beads sync failed:', err)),
       BEADS_SYNC_INTERVAL_MS,
@@ -348,10 +458,55 @@ export function createWorkerRuntime(
     };
   }
 
+  // On the engine: no beads sync or bd PR reconcile; the watchdog and liveness
+  // heartbeat as on beads, with the watchdog asking the engine for ready work.
+  function startEngineTimers(): () => void {
+    const watchdogTimer = setInterval(() => {
+      runWatchdogOnce(kshetra, () => scheduler.getPhase(kshetra.id), Date.now(), {
+        hasReadyWork: async () => !!engine && (await engine.queue.peek()) !== null,
+      }).catch((err: unknown) => logErr('watchdog failed:', err));
+    }, WATCHDOG_INTERVAL_MS);
+    const heartbeatTimer = setInterval(() => {
+      if (scheduler.getPhase(kshetra.id) !== 'IDLE') touchHeartbeat(kshetra.id);
+    }, HEARTBEAT_INTERVAL_MS);
+    // Self-heal on the engine: on a stuck resume, abort the hung run; the run's
+    // end gives its claim back (hooks.runTask), so only the work tree needs resetting.
+    let prevPause: PauseSnapshot | undefined;
+    const resumeWatchTimer = setInterval(() => {
+      const curr = loadState().kshetras[kshetra.id] as PauseSnapshot | undefined;
+      if (shouldSelfHeal(prevPause, curr, activeRun !== undefined, healing)) {
+        const run = activeRun!;
+        healing = true;
+        log(`stuck resume detected — aborting ${run.task.id}`);
+        run.controller.abort(new AgentAbortedError('self-heal'));
+        run.done
+          .then(() => resetWorkTree(kshetra))
+          .then(() => log('self-heal complete — back to IDLE'))
+          .catch((err: unknown) => logErr('self-heal failed:', err))
+          .finally(() => { healing = false; });
+      }
+      prevPause = curr;
+    }, RESUME_WATCH_INTERVAL_MS);
+    return () => {
+      clearInterval(watchdogTimer);
+      clearInterval(heartbeatTimer);
+      clearInterval(resumeWatchTimer);
+      scheduler.flushPhase(kshetra.id);
+    };
+  }
+
+  /** Closes the engine connections, which also drops the worker lock. */
+  async function close(): Promise<void> {
+    const e = engine;
+    engine = undefined;
+    await e?.conn.close();
+  }
+
   return {
     kshetra,
     scheduler,
     hooks,
+    close,
     startup,
     sync,
     sweepEpics,

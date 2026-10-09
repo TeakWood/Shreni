@@ -11,7 +11,7 @@ import { movesApi, type MoveOptions } from './moves';
 import { readsApi } from './reads';
 import { approveTaskApi, plansApi, type ApprovalOptions } from './plans';
 import type { Validator } from './validators';
-import { Session, type Release } from './session';
+import { lockKey, Session, type Release } from './session';
 import { activateApi, diffApi } from './upgrade';
 import { claimApi, expireLeasesApi, leasedApi } from './claims';
 import { exportProject, importProject, purgeProject, type ImportCallback, type ImportReport, type ProjectBundle, type PurgeReport } from './bundle';
@@ -232,6 +232,12 @@ export class ProjectHandle {
      * it. Held until released, or until the client or its connection closes.
      */
     trySession(name: string): Promise<Release | null>;
+    /**
+     * Who holds the session lock `name`: the application_name the holder's
+     * session connection set (a worker names its host and pid there), '' when
+     * it set none, or null when no one holds it.
+     */
+    holder(name: string): Promise<string | null>;
   };
   /** The lease sweep on its own, as system; claim runs it first. Returns how many leases it returned. */
   readonly expireLeases: ReturnType<typeof expireLeasesApi>;
@@ -246,7 +252,19 @@ export class ProjectHandle {
     this.events = reads.events;
     this.ready = reads.ready;
     this.lifecycles = diffApi(this);
-    this.locks = { trySession: name => client.session.trySession(id, name) };
+    this.locks = {
+      trySession: name => client.session.trySession(id, name),
+      holder: async name => {
+        await client.need('0001_core');
+        const r = await raw<{ app: string | null }>`
+          select a.application_name as app
+            from pg_locks l join pg_stat_activity a on a.pid = l.pid
+           where l.locktype = 'advisory' and l.granted
+             and ((l.classid::bigint << 32) | l.objid::bigint) = ${lockKey(id, name)}::bigint
+           limit 1`.execute(client.db);
+        return r.rows[0] ? (r.rows[0].app ?? '') : null;
+      },
+    };
     this.expireLeases = expireLeasesApi(client, id);
   }
 

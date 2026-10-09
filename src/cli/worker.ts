@@ -1,5 +1,6 @@
 import { loadRegistry } from '../kshetra/registry';
 import { createWorkerRuntime, workerPreconditionError } from './worker-runtime';
+import { WorkerLockHeld } from '../policy/sthapathi/leases';
 import { parseLabels } from './labels';
 import { claimForThisProcess } from './pid';
 
@@ -71,6 +72,12 @@ runtime.startup()
   })
   .catch(err => {
     console.error(`[shreni worker:${kshetraId}] startup failed:`, err);
+    // Another worker already runs this Kshetra (possibly on another machine):
+    // refuse to start rather than arm a loop that would pick up nothing.
+    if (err instanceof WorkerLockHeld) {
+      releaseOwnership();
+      process.exit(1);
+    }
     // Arm the poll loop anyway so a recovery/resume hiccup doesn't leave the
     // worker permanently idle — the normal gated pickup path is the safe fallback.
     stop ??= runtime.scheduler.scheduleLoop(runtime.kshetra, runtime.hooks);
@@ -83,8 +90,12 @@ stopTimers = runtime.startTimers();
 function shutdown(): void {
   stop?.();
   stopTimers?.();
-  releaseOwnership();
-  process.exit(0);
+  // Close the engine's connections (dropping the worker lock) before giving up
+  // the pid file, so a restart never finds this worker's lock still held. If
+  // closing hangs, the exit drops the connections anyway.
+  const exit = () => { releaseOwnership(); process.exit(0); };
+  void runtime.close().catch(() => {}).finally(exit);
+  setTimeout(exit, 5_000).unref();
 }
 
 process.on('SIGTERM', shutdown);

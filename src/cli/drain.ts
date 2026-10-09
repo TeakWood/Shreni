@@ -262,6 +262,7 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
     allowAblation: opts.allowAblation,
     entrypoint: opts.entrypoint ?? 'drain',
     inScope,
+    scopeEpic: opts.epic,
   });
   const client = bd(kshetra);
   const idsInScope = (tasks: Task[]): string[] =>
@@ -438,6 +439,8 @@ async function runOwnedDrain(
     return result;
   } finally {
     stopTimers();
+    // Close the engine's connections, dropping the worker lock (beads: nothing to do).
+    await driver.runtime.close?.().catch(() => {});
     process.removeListener('SIGINT', onSigint);
     process.removeListener('SIGTERM', onSigterm);
   }

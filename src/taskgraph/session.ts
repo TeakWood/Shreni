@@ -21,7 +21,7 @@ import { InvalidRequest, Unavailable } from './errors';
 export type Release = (() => Promise<void>) & { held(): Promise<boolean> };
 
 /** A 63-bit key for pg_advisory_lock(bigint), from the project and the name. */
-function lockKey(projectId: string, name: string): string {
+export function lockKey(projectId: string, name: string): string {
   const h = createHash('sha256').update(`taskgraph.session\0${projectId}\0${name}`).digest();
   return (h.readBigUInt64BE(0) & 0x7fff_ffff_ffff_ffffn).toString();
 }

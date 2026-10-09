@@ -51,6 +51,23 @@ export function parseInFlightTasks(raw: string): Task[] {
 // reopen the bead for a fresh cycle, under an attempt budget. This codifies the
 // manual recovery captured in `bd remember [shreni-worker-recovery]`.
 // See the Sthapathi workflow design §4.3.
+/**
+ * Steps 1 and 2 of recovery, the git half: a clean main and no stale bead-*
+ * branches. A Kshetra on the task graph engine needs only this; its leases
+ * return interrupted work by themselves (policy spec, "Running work").
+ */
+export async function resetWorkTree(kshetra: KshetraConfig, opts: { keepBranch?: string } = {}): Promise<void> {
+  const g = git(kshetra);
+  const main = kshetra.repo.mainBranch;
+  await g.resetHard();
+  await g.checkout(main);
+  await g.clean();
+  for (const branch of await g.branches('bead-')) {
+    if (branch === opts.keepBranch) continue;
+    await g.deleteBranch(branch, { force: true });
+  }
+}
+
 export async function recoverKshetra(
   kshetra: KshetraConfig,
   opts: { keepBranch?: string } = {},
