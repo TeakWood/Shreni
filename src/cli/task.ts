@@ -94,10 +94,18 @@ const defaultDeps = (): TaskDeps => ({
   },
 });
 
-/** The repo's project config, from the nearest .shreni/tracker.yaml or .shreni/kshetra.yaml above `cwd`. */
-export function findProjectConfig(cwd: string): {
-  kind: 'tracker' | 'kshetra'; path: string; config: ProjectConfig & { project: string }; kshetraId?: string;
-} {
+/** No .shreni/tracker.yaml or kshetra.yaml in or above the directory: not a Shreni repo. */
+export class NoProjectConfig extends Error {
+  constructor(cwd: string) {
+    super(`no .shreni/tracker.yaml or .shreni/kshetra.yaml in ${cwd} or above; run shreni init in the repo`);
+    this.name = 'NoProjectConfig';
+  }
+}
+
+type FoundConfig<C> = { kind: 'tracker' | 'kshetra'; path: string; config: C; kshetraId?: string };
+
+/** The nearest .shreni/tracker.yaml or .shreni/kshetra.yaml above `cwd`, registered with a project or not. */
+export function findConfigFile(cwd: string): FoundConfig<ProjectConfig> {
   for (let dir = resolve(cwd); ; dir = dirname(dir)) {
     const tracker = join(dir, '.shreni', 'tracker.yaml');
     const kshetra = join(dir, '.shreni', 'kshetra.yaml');
@@ -107,28 +115,35 @@ export function findProjectConfig(cwd: string): {
       const kind = found[0] === tracker ? 'tracker' : 'kshetra';
       const kshetraConfig = kind === 'kshetra' ? loadKshetraConfig(found[0]) : undefined;
       const config: ProjectConfig = kshetraConfig ?? loadTrackerConfig(found[0]);
-      if (!config.project) throw new Error(`${found[0]} names no project yet; run shreni init`);
-      return { kind, path: found[0], config: config as ProjectConfig & { project: string }, ...(kshetraConfig ? { kshetraId: kshetraConfig.id } : {}) };
+      return { kind, path: found[0], config, ...(kshetraConfig ? { kshetraId: kshetraConfig.id } : {}) };
     }
     // A repo's own root ends the walk, so a clone nested in a tracked repo never acts on the outer project.
-    if (existsSync(join(dir, '.git')) || dirname(dir) === dir) {
-      throw new Error(`no .shreni/tracker.yaml or .shreni/kshetra.yaml in ${resolve(cwd)} or above; run shreni init in the repo`);
-    }
+    if (existsSync(join(dir, '.git')) || dirname(dir) === dir) throw new NoProjectConfig(resolve(cwd));
   }
+}
+
+/** The repo's project config, from the nearest .shreni/tracker.yaml or .shreni/kshetra.yaml above `cwd`; it must name its project. */
+export function findProjectConfig(cwd: string): FoundConfig<ProjectConfig & { project: string }> {
+  const found = findConfigFile(cwd);
+  if (!found.config.project) throw new Error(`${found.path} names no project yet; run shreni init`);
+  return found as FoundConfig<ProjectConfig & { project: string }>;
 }
 
 /**
  * The project a command works on: the Kshetra a planning session was launched
  * for (SHRENI_KSHETRA, since its worktree may not carry the config), else the
- * repo's own config found from `cwd`.
+ * repo's own config found from `cwd`. With requireProject false, a config that
+ * init hasn't registered yet is returned too, for what it names (its database).
  */
-export function resolveProject(cwd: string, env: NodeJS.ProcessEnv): ReturnType<typeof findProjectConfig> {
+export function resolveProject(cwd: string, env: NodeJS.ProcessEnv): FoundConfig<ProjectConfig & { project: string }>;
+export function resolveProject(cwd: string, env: NodeJS.ProcessEnv, opts: { requireProject: false }): FoundConfig<ProjectConfig>;
+export function resolveProject(cwd: string, env: NodeJS.ProcessEnv, opts: { requireProject?: boolean } = {}): FoundConfig<ProjectConfig> {
   const id = env.SHRENI_KSHETRA;
-  if (!id) return findProjectConfig(cwd);
+  if (!id) return opts.requireProject === false ? findConfigFile(cwd) : findProjectConfig(cwd);
   const k = loadRegistry().find(x => x.id === id);
   if (!k) throw new Error(`SHRENI_KSHETRA names Kshetra ${id}, which isn't registered`);
-  if (!k.project) throw new Error(`Kshetra ${id} isn't on the task graph engine`);
-  return { kind: 'kshetra', path: `registry:${id}`, config: k as ProjectConfig & { project: string }, kshetraId: k.id };
+  if (!k.project && opts.requireProject !== false) throw new Error(`Kshetra ${id} isn't on the task graph engine`);
+  return { kind: 'kshetra', path: `registry:${id}`, config: k, kshetraId: k.id };
 }
 
 /** One acceptance check from "given … when … then …". */

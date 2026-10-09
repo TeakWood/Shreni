@@ -37,6 +37,7 @@ import { runInit } from './init';
 import { runTelemetry } from './telemetry';
 import { runTask, TASK_USAGE } from './task';
 import { runPlan, PLAN_USAGE } from './plan';
+import { runDb, DB_USAGE } from './db';
 import { parseLabels } from './labels';
 import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -386,6 +387,12 @@ export const COMMANDS: Command[] = [
         upgrade: ctx.has('--upgrade'),
       });
     },
+  },
+  {
+    name: 'db',
+    summary: 'Check the database this repo uses: server, login, version, database, pg_dump',
+    usage: DB_USAGE,
+    run: async ctx => { await runDb(ctx); },
   },
   {
     name: 'plan',
