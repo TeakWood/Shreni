@@ -11,7 +11,8 @@ import { movesApi, type MoveOptions } from './moves';
 import { readsApi } from './reads';
 import { approveTaskApi, plansApi, type ApprovalOptions } from './plans';
 import type { Validator } from './validators';
-import { lockKey, Session, type Release } from './session';
+import { lockKey, Session, type Listen, type Release } from './session';
+import { NOTIFY_CHANNEL } from './events';
 import { activateApi, diffApi } from './upgrade';
 import { claimApi, expireLeasesApi, leasedApi } from './claims';
 import { exportProject, importProject, purgeProject, type ImportCallback, type ImportReport, type ProjectBundle, type PurgeReport } from './bundle';
@@ -19,7 +20,7 @@ import { exportProject, importProject, purgeProject, type ImportCallback, type I
 type ReadsApi = ReturnType<typeof readsApi>;
 import { runTransaction, type EngineTx } from './tx';
 import { LeaseLost, NotFound, NotPermitted, SchemaBehind, VersionMismatch, type Finding } from './errors';
-import type { Actor, Task } from './types';
+import type { Actor, Task, TaskGraphEvent } from './types';
 
 // The engine's entry point (engine spec, "API"): one client per process, one
 // handle per project, and every write through an actor. Client calls
@@ -40,6 +41,8 @@ export interface OpenTaskGraphOptions {
    * for tg.locks with `sql`. The caller owns it and ends it.
    */
   session?: postgres.Sql;
+  /** With `db`: how to LISTEN on it, for events.subscribe (PGlite's own listen in tests). */
+  listen?: Listen;
   /** The caller's validators, run after the engine's own in plans.validate and approval. */
   validators?: Validator[];
   /**
@@ -227,7 +230,19 @@ export class ProjectHandle {
   readonly tasks: ReadsApi['tasks'];
   readonly plans: ReadsApi['plans'];
   readonly attempts: ReadsApi['attempts'];
-  readonly events: ReadsApi['events'];
+  readonly events: ReadsApi['events'] & {
+    /**
+     * Calls `handler` with the project's new events, in order and without
+     * gaps: after `after` (an event id), or from now. Woken by NOTIFY, it
+     * reads the rows itself, and after a reconnect it catches up from its
+     * cursor, so events written while the connection was down still arrive.
+     * A handler error goes to `onError`; the cursor has moved past that batch.
+     */
+    subscribe(
+      handler: (events: TaskGraphEvent[]) => void | Promise<void>,
+      opts?: { after?: string; onError?: (err: unknown) => void },
+    ): Promise<() => Promise<void>>;
+  };
   /** Ready work, in claim order: what a claim would pick next. */
   readonly ready: ReadsApi['ready'];
   readonly lifecycles: ReturnType<typeof diffApi>;
@@ -255,7 +270,7 @@ export class ProjectHandle {
     this.tasks = reads.tasks;
     this.plans = reads.plans;
     this.attempts = reads.attempts;
-    this.events = reads.events;
+    this.events = { ...reads.events, subscribe: (handler, opts = {}) => subscribeEvents(this, handler, opts) };
     this.ready = reads.ready;
     this.lifecycles = diffApi(this);
     this.locks = {
@@ -409,7 +424,7 @@ export async function openTaskGraph(options: OpenTaskGraphOptions): Promise<Task
   const lifecycle = defineLifecycle(options.lifecycle);
   const owns = !options.db;
   const db = options.db ?? new Kysely<any>({ dialect: new PostgresJsDialect({ sql: options.sql! }) });
-  const client = new TaskGraphClient(db, lifecycle, owns, new Session(db, options.session, !!options.sql),
+  const client = new TaskGraphClient(db, lifecycle, owns, new Session(db, options.session, !!options.sql, options.listen),
     options.validators ?? [], options.validatorConfig ?? {});
   try {
     await client.refresh();
@@ -418,4 +433,48 @@ export async function openTaskGraph(options: OpenTaskGraphOptions): Promise<Task
     throw err;
   }
   return client;
+}
+
+/** events.subscribe: LISTEN for the project's notifications, and read what is new from the cursor. */
+async function subscribeEvents(
+  tg: ProjectHandle, handler: (events: TaskGraphEvent[]) => void | Promise<void>,
+  opts: { after?: string; onError?: (err: unknown) => void },
+): Promise<() => Promise<void>> {
+  await tg.client.need('0001_core');
+  let cursor = opts.after ?? (await raw<{ id: string | null }>`
+    select max(id)::text as id from taskgraph.events where project_id = ${tg.id}`.execute(tg.client.db)).rows[0]?.id ?? '0';
+  let stopped = false;
+  let running: Promise<void> | null = null;
+  let again = false;
+  // One catch-up at a time; a wake during one runs another after it.
+  const catchUp = (): void => {
+    if (stopped) return;
+    if (running) {
+      again = true;
+      return;
+    }
+    running = (async () => {
+      do {
+        again = false;
+        for (;;) {
+          const batch = await tg.events.since(cursor);
+          if (!batch.length || stopped) break;
+          cursor = batch[batch.length - 1].id;
+          await handler(batch);
+        }
+      } while (again && !stopped);
+    })().catch(err => { opts.onError?.(err); }).finally(() => { running = null; });
+  };
+  const unlisten = await tg.client.session.listen(NOTIFY_CHANNEL, payload => {
+    try {
+      if ((JSON.parse(payload) as { project?: string }).project === tg.id) catchUp();
+    } catch {
+      // Not ours to read.
+    }
+  }, catchUp);
+  return async () => {
+    stopped = true;
+    await unlisten();
+    await running;
+  };
 }

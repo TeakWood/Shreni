@@ -17,6 +17,13 @@ import { InvalidRequest, Unavailable } from './errors';
 // is the new session's. Statements run one at a time, so the bookkeeping
 // never races.
 
+/**
+ * A LISTEN of the caller's own, for a database that isn't postgres.js (PGlite
+ * in tests): returns the unlisten. `onRelisten`, when the caller can tell, is
+ * called after its connection came back, when notifications may have been missed.
+ */
+export type Listen = (channel: string, onNotify: (payload: string) => void, onRelisten?: () => void) => Promise<() => Promise<void>>;
+
 /** Releases a session lock; calling it again does nothing. `held()` says whether the lock is still this session's. */
 export type Release = (() => Promise<void>) & { held(): Promise<boolean> };
 
@@ -45,7 +52,10 @@ export class Session {
    * Kysely instance, used when there is none and the client wasn't given a
    * postgres.js pool (PGlite in tests, a single session already).
    */
-  constructor(private readonly db: Kysely<any>, private readonly dedicated?: postgres.Sql, private readonly pooled = false) {
+  constructor(
+    private readonly db: Kysely<any>, private readonly dedicated?: postgres.Sql, private readonly pooled = false,
+    private readonly listenOn?: Listen,
+  ) {
     if (dedicated) {
       // max can arrive as a string from a URL or the environment.
       const o = dedicated.options as { max?: number | string; max_lifetime?: unknown; idle_timeout?: unknown };
@@ -131,6 +141,55 @@ export class Session {
         }
       }),
     });
+  }
+
+  /** Per channel: the one LISTEN this session keeps, and the subscribers it hands each notification to. */
+  private readonly channels = new Map<string, {
+    subs: Set<{ onNotify: (payload: string) => void; onListen: () => void }>;
+    ready: Promise<() => Promise<void>>;
+  }>();
+
+  /**
+   * LISTENs on `channel`: `onNotify` gets each payload, and `onListen` runs
+   * once listening starts and again after every reconnect, when notifications
+   * may have been missed. One LISTEN per channel serves every subscriber, so
+   * unsubscribing never depends on the driver's own bookkeeping across a
+   * reconnect. Returns the unsubscribe.
+   */
+  async listen(channel: string, onNotify: (payload: string) => void, onListen: () => void): Promise<() => Promise<void>> {
+    if (this.closed) throw new InvalidRequest('the client is closed');
+    if (!this.dedicated && !this.listenOn) {
+      throw new InvalidRequest('events.subscribe needs a session connection: pass openTaskGraph a session instance');
+    }
+    const sub = { onNotify, onListen };
+    let ch = this.channels.get(channel);
+    if (!ch) {
+      const subs = new Set<typeof sub>();
+      const notify = (payload: string) => { for (const s of subs) s.onNotify(payload); };
+      const listened = () => { for (const s of subs) s.onListen(); };
+      const ready = this.dedicated
+        // postgres.js keeps a direct connection of its own for LISTEN, and listens again after it reconnects.
+        ? this.dedicated.listen(channel, notify, listened).then(l => () => l.unlisten())
+        : this.listenOn!(channel, notify, listened);
+      ch = { subs, ready };
+      this.channels.set(channel, ch);
+      ready.catch(() => { if (this.channels.get(channel) === ch) this.channels.delete(channel); });
+    }
+    ch.subs.add(sub);
+    try {
+      await ch.ready;
+    } catch (err) {
+      ch.subs.delete(sub);
+      throw err;
+    }
+    // A late subscriber's own start: the shared LISTEN is already up.
+    onListen();
+    const mine = ch;
+    return async () => {
+      if (!mine.subs.delete(sub) || mine.subs.size) return;
+      if (this.channels.get(channel) === mine) this.channels.delete(channel);
+      await (await mine.ready)();
+    };
   }
 
   /**

@@ -25,6 +25,9 @@ export interface NewEvent {
   at?: Date;
 }
 
+/** The channel every event write notifies on, with { project, id } for the project's highest new event. */
+export const NOTIFY_CHANNEL = 'taskgraph';
+
 // About 12 parameters per event; well under Postgres's 65,535 per statement.
 const CHUNK = 1000;
 
@@ -63,6 +66,12 @@ export async function writeEvents(tx: Transaction<any>, events: readonly NewEven
       .execute();
     // bigint ids come back as strings from some drivers; keep them as strings
     ids.push(...rows.map(r => String(r.id)));
+  }
+  // The wake-up hint: delivered on commit only, ids only; listeners read the rows (events.since).
+  const last = new Map<string, string>();
+  events.forEach((e, i) => last.set(e.projectId, ids[i]));
+  for (const [project, id] of last) {
+    await sql`select pg_notify(${NOTIFY_CHANNEL}, ${JSON.stringify({ project, id })})`.execute(tx);
   }
   return ids;
 }

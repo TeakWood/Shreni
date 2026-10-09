@@ -60,7 +60,11 @@ if (precondErr) {
 const runtime = createWorkerRuntime(kshetra, { labels, allowAblation, entrypoint: 'worker' });
 
 // Assigned once startup recovery has finished and the poll loop is armed.
-let stop: (() => void) | undefined;
+let stop: ReturnType<typeof runtime.scheduler.scheduleLoop> | undefined;
+// Others' writes that may make work ready wake the loop between polls; one
+// during startup is kept for the loop once it is armed.
+let wokeEarly = false;
+runtime.onWake(() => { if (stop) stop.wake(); else wokeEarly = true; });
 let stopTimers: (() => void) | undefined;
 
 // Startup: open the engine (taking the worker lock), reset the work tree and
@@ -68,6 +72,7 @@ let stopTimers: (() => void) | undefined;
 runtime.startup()
   .then(() => {
     stop = runtime.scheduler.scheduleLoop(runtime.kshetra, runtime.hooks);
+    if (wokeEarly) stop.wake();
   })
   .catch(err => {
     console.error(`[shreni worker:${kshetraId}] startup failed:`, err);

@@ -38,7 +38,8 @@ export interface Scheduler {
   // one-shot tick `shreni drain` awaits — it drives cycles itself rather than
   // firing-and-forgetting through setInterval, so it can act on the outcome.
   runCycle(kshetra: KshetraConfig, hooks: SchedulerHooks): Promise<CycleOutcome>;
-  scheduleLoop(kshetra: KshetraConfig, hooks: SchedulerHooks, intervalMs?: number): () => void;
+  /** Returns the stop; its `wake()` runs the next cycle now when the loop is waiting out its interval. */
+  scheduleLoop(kshetra: KshetraConfig, hooks: SchedulerHooks, intervalMs?: number): (() => void) & { wake(): void };
   start(kshetras: KshetraConfig[], hooks: SchedulerHooks, intervalMs?: number): () => void;
   getActive(kshetraId: string): Task | undefined;
   // True while ANY work for this kshetra is outstanding: a task is dispatched
@@ -177,7 +178,7 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
     kshetra: KshetraConfig,
     hooks: SchedulerHooks,
     intervalMs = DEFAULT_INTERVAL_MS,
-  ): () => void {
+  ): (() => void) & { wake(): void } {
     // Self-rescheduling loop (epic 7h3 / Study B3): each cycle schedules the next
     // one when it settles, with the delay chosen by the OUTCOME —
     //   'ran'  → re-tick immediately (0ms). A task just merged and the next bead
@@ -196,6 +197,10 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
     let stopped = false;
     let inFlight = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // A wake that came mid-cycle, honoured when the cycle ends; and whether the
+    // last cycle was declined, whose back-off a wake doesn't cut short.
+    let woken = false;
+    let backingOff = false;
 
     const schedule = (delayMs: number): void => {
       if (stopped) return;
@@ -208,7 +213,10 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
       runCycle(kshetra, hooks)
         .then((outcome) => {
           inFlight = false;
-          schedule(outcome === 'ran' ? 0 : intervalMs);
+          backingOff = outcome === 'declined';
+          const wake = woken && !backingOff;
+          woken = false;
+          schedule(outcome === 'ran' || wake ? 0 : intervalMs);
         })
         .catch((err: unknown) => {
           console.error(`[sthapathi] cycle error for "${kshetra.id}":`, err);
@@ -218,10 +226,24 @@ export function createScheduler(opts: { onPhase?: (kshetraId: string, phase: Pha
     }
 
     schedule(intervalMs);
-    return () => {
+    const stop = () => {
       stopped = true;
       if (timer) clearTimeout(timer);
     };
+    // A notification that work may be ready (engine spec, "Events and history"):
+    // a waiting loop ticks at once; one mid-cycle ticks again as soon as it ends;
+    // one backing off after a declined cycle keeps its interval, so it can't spin.
+    const wake = () => {
+      if (stopped) return;
+      if (inFlight) {
+        woken = true;
+        return;
+      }
+      if (backingOff) return;
+      if (timer) clearTimeout(timer);
+      schedule(0);
+    };
+    return Object.assign(stop, { wake });
   }
 
   function start(

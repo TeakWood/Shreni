@@ -18,7 +18,7 @@ export type { NewTask, TaskPatch, WriteOptions } from './tasks';
 export type { MoveOptions } from './moves';
 export type { LifecycleDiff } from './upgrade';
 export type { Claim, ClaimOptions } from './claims';
-export type { Release } from './session';
+export type { Release, Listen } from './session';
 export type { Validator, ValidatorContext, PlanSnapshot, Dep, Link } from './validators';
 export type { ValidationReport, ApprovedPlan, ApprovalOptions } from './plans';
 export { BUNDLE_FORMAT } from './bundle';

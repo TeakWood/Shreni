@@ -128,6 +128,38 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     await runtime.close();
   });
 
+  it('given an idle worker, when a task becomes ready, then it is claimed within 1 s', async () => {
+    run.mockClear();
+    const t = await createTestDb();
+    shreni = await openShreni({ db: t.db, lifecycle: taskLifecycle, listen: (c, f) => t.pglite.listen(c, f) });
+    onTestFinished(async () => { await shreni.close(); await t.close(); });
+    await shreni.migrate();
+    const p = await shreni.tg.projects.create({ name: 'web', idPrefix: 'web', actor: { id: 'a', role: 'developer' } });
+    const kshetra = {
+      id: 'web', name: 'web', project: p.id, database: 'local', plan: { validators: {} },
+      repo: { path: mkdtempSync(join(tmpdir(), 'shreni-engine-')), remote: 'x', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
+      stack: { language: 'ts' },
+      gates: { build: { level: 'block' }, test: { level: 'block' }, lint: { level: 'warn' } },
+      agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
+      conventions: {},
+    } as unknown as KshetraConfig;
+    const { createWorkerRuntime } = await import('./worker-runtime');
+    const runtime = createWorkerRuntime(kshetra, { entrypoint: 'drain' });
+    await runtime.startup();
+    // A minute between polls: only the wake-up can make this quick.
+    const loop = runtime.scheduler.scheduleLoop(kshetra, runtime.hooks, 60_000);
+    runtime.onWake(() => loop.wake());
+    onTestFinished(() => loop());
+
+    const t0 = Date.now();
+    const task = await shreni.tg.project(p.id).as({ id: 's', role: 'system' }).tasks.create({ title: 'ready now' });
+    while (run.mock.calls.length === 0 && Date.now() - t0 < 1_000) await new Promise(r => setTimeout(r, 10));
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(await t.pglite.query<any>(`select task_id from taskgraph.attempts`).then(r => r.rows)).toEqual([{ task_id: task.id }]);
+    loop();
+    await runtime.close();
+  });
+
   it('claims and runs through the engine and takes the worker lock', async () => {
     run.mockClear();
     const t = await createTestDb();

@@ -1,7 +1,7 @@
 import { Kysely } from 'kysely';
 import type postgres from 'postgres';
 import {
-  openTaskGraph, PostgresJsDialect, type Lifecycle, type MigrationReport, type TaskGraphClient, type Validator,
+  openTaskGraph, PostgresJsDialect, type Lifecycle, type Listen, type MigrationReport, type TaskGraphClient, type Validator,
   type ValidatorConfig,
 } from '../../taskgraph';
 import { sql, type Transaction } from 'kysely';
@@ -22,6 +22,8 @@ export interface OpenShreniOptions {
   session?: postgres.Sql;
   /** A Kysely instance instead, as tests do over PGlite. */
   db?: Kysely<any>;
+  /** With `db`: its LISTEN, for events.subscribe (PGlite's own in tests). */
+  listen?: Listen;
   lifecycle: Lifecycle;
   validators?: Validator[];
   validatorConfig?: ValidatorConfig;
@@ -51,6 +53,7 @@ export async function openShreni(options: OpenShreniOptions): Promise<ShreniClie
   const tg = await openTaskGraph({
     ...(options.sql ? { sql: options.sql } : { db: options.db! }),
     session: options.session,
+    ...(options.listen ? { listen: options.listen } : {}),
     lifecycle: options.lifecycle,
     validators: options.validators,
     validatorConfig: options.validatorConfig,

@@ -17,7 +17,8 @@ export interface TestEngine {
 /** A migrated engine with one project, `web`, on the given lifecycle; closed when the test ends. */
 export async function openEngine(lifecycle: Lifecycle = testLifecycle()): Promise<TestEngine> {
   const t = await createMigratedTestDb();
-  const client = await openTaskGraph({ db: t.db, lifecycle });
+  // PGlite's own LISTEN, so events.subscribe works as it does on a session connection.
+  const client = await openTaskGraph({ db: t.db, lifecycle, listen: (channel, fn) => t.pglite.listen(channel, fn) });
   onTestFinished(async () => { await client.close(); await t.close(); });
   const project = await client.projects.create({ name: 'web', idPrefix: 'web', actor: { id: 'ann', role: 'developer' } });
   const tg = client.project(project.id);

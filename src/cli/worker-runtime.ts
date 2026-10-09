@@ -112,6 +112,12 @@ export interface WorkerRuntime {
   isInFlight(): boolean;
   /** True while a self-heal (abort + RECOVER of a hung run) is in progress. */
   isHealing(): boolean;
+  /**
+   * Called when someone else's write to the project may have made work ready
+   * (engine spec, "Events and history"): the daemon wakes its poll loop with it.
+   * The worker's own writes never call it, so a refused claim can't spin.
+   */
+  onWake(fn: () => void): void;
 }
 
 // The precondition guards `shreni start`/drain both run before building a
@@ -165,8 +171,9 @@ export function createWorkerRuntime(
   // opening failed, it picks up nothing.
   let engine: {
     conn: KshetraEngine; hooks: ReturnType<typeof engineHooks>; queue: EngineQueue; lock: Release;
-    tg: ProjectHandle; as: ActorHandle;
+    tg: ProjectHandle; as: ActorHandle; unsubscribe?: () => Promise<void>;
   } | undefined;
+  let wake: (() => void) | undefined;
   // When opening the engine first failed, for the retry window (policy spec, "The database").
   let engineDownSince: number | undefined;
 
@@ -363,6 +370,15 @@ export function createWorkerRuntime(
       engine = { conn, hooks, queue, lock, tg, as };
       registerEngineStore(kshetra.id, store);
       log(`on the task graph engine as ${workerName()} (worker lock held)`);
+      // Woken by others' writes; the poll stays as the fallback, so a lost subscription only costs latency.
+      const own = new Set([`sthapathi:${kshetra.id}`, 'parikshaka']);
+      try {
+        engine.unsubscribe = await tg.events.subscribe(events => {
+          if (events.some(e => !own.has(e.actor))) wake?.();
+        }, { onError: err => logErr('event subscription:', err) });
+      } catch (err) {
+        log(`no wake-up on events (${(err as Error).message}); polling only`);
+      }
     } catch (err) {
       await conn.close().catch(() => {});
       throw err;
@@ -486,6 +502,7 @@ export function createWorkerRuntime(
     const e = engine;
     engine = undefined;
     unregisterEngineStore(kshetra.id);
+    await e?.unsubscribe?.().catch(() => {});
     await e?.conn.close();
   }
 
@@ -493,6 +510,7 @@ export function createWorkerRuntime(
     kshetra,
     scheduler,
     hooks,
+    onWake: fn => { wake = fn; },
     close,
     startup,
     sweepEpics,

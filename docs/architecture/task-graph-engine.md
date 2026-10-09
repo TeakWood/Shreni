@@ -111,7 +111,7 @@ Versions are the latest on npm as of this spec.
 
 One Postgres database holds every project. Every row carries `project_id`, and every call goes through a handle for one project. The engine's tables live in a `taskgraph` schema; a caller keeps its own tables in another schema, so its writes can join the engine's transactions. Shreni's are listed in the policy spec's [Shreni's tables](task-lifecycle.md#shrenis-tables).
 
-**Hosting (2026-10-05): self-run Postgres, with one database holding many projects, never one per project.** A move to Supabase or Neon comes later, as a dump and restore plus a new connection string; the engine needs nothing from a host beyond plain Postgres 15 or newer and one direct connection for its listener and session locks (see Connections under [Events and history](#events-and-history)). Until then, Shreni backs the database up with periodic local dumps ([Backups](task-lifecycle.md#backups)). The same schema serves two setups:
+**Hosting (2026-10-05): self-run Postgres, with one database holding many projects, never one per project.** A move to Supabase or Neon comes later, as a dump and restore plus a new connection string; the engine needs nothing from a host beyond plain Postgres 15 or newer and direct connections for its session locks and its listener (see Connections under [Events and history](#events-and-history)). Until then, Shreni backs the database up with periodic local dumps ([Backups](task-lifecycle.md#backups)). The same schema serves two setups:
 
 | Who | Database | Holds |
 | --- | --- | --- |
@@ -477,6 +477,7 @@ One client per process, opened with the caller's lifecycle and validators, and o
 // One client per process: the pool, plus one session connection for LISTEN and session locks
 const client = await openTaskGraph({
   sql,                          // a postgres.js instance
+  session,                      // a direct postgres.js instance, max: 1: session locks; LISTEN on a direct connection of its own
   lifecycle: taskLifecycle,
   validators: [acceptanceChecksPresent, coverageLinks],
   clock: () => new Date(),      // injectable for tests
@@ -533,7 +534,8 @@ tg.tasks.search(text)
 tg.plans.get(id); tg.plans.list({ status? })      // status: open, approved, discarded
 tg.attempts.list(taskId)
 as.notes.add(taskId, text)
-tg.events.since(cursor, limit); tg.events.subscribe(handler): Unsubscribe
+tg.events.since(cursor, limit)
+tg.events.subscribe(handler, { after?, onError? }): Promise<Unsubscribe>   // new events in order, from `after` or now; catches up after a reconnect
 
 // Transactions: the same API, plus tx.sql for the caller's own tables
 tg.transaction(async (tx) => { /* … */ })
@@ -718,11 +720,11 @@ Heartbeats update the task row but write no event; they would swamp the log.
 
 **Notifications.** Each transaction that writes events calls `pg_notify('taskgraph', …)` with the project and the highest event id. Postgres delivers notifications only on commit, so a rolled-back change never notifies. The payload carries ids only; listeners then read rows with `events.since(cursor)`.
 
-**Who listens.** Any number of processes; Shreni's listeners are Sthapathi and Phalaka ([Running work](task-lifecycle.md#running-work)).
+**Who listens.** Any number of processes; Shreni's listeners are Sthapathi and Phalaka ([Running work](task-lifecycle.md#running-work)). `events.subscribe` LISTENs on the session connection's own listener, reads each notified project's rows with `events.since` from its cursor, one catch-up at a time, and runs a catch-up again whenever the listener reconnects, so events written while it was down still arrive, in order and once. A client opened on a Kysely instance (PGlite in tests) passes its own `listen` for it.
 
 **Commit order.** Identity ids are assigned at insert, not at commit, so a reader could see id 42 commit before 41 and move its cursor past 41. The engine prevents that at the source: each transaction writes its events last, under a per-project advisory lock held until it commits, so a project's event ids commit in order and `events.since(cursor)` needs no trailing window. The lock covers only the last milliseconds of a write, and is always the last lock taken.
 
-**Connections.** `LISTEN` needs a session-level connection. Poolers in transaction mode (PgBouncer, and hosted poolers run that way) don't support it, so the client holds one direct session connection, for the listener and for session locks, while queries use the pool. The caller passes it as `session`: a postgres.js instance on a direct connection with `max: 1`, `max_lifetime: null` and no `idle_timeout`, so it stays one session; the client refuses one that isn't. A statement stuck on a half-open connection is left to postgres.js's keep-alive. Every session statement also returns the backend's pid, so a reconnect shows in the very statement that runs on the new backend: the old session's locks went with it, and each `Release`'s `held()` turns false, rather than a worker carrying on as if it still held its lock. A worker that must not run twice checks `held()` before each round of work. Session statements run one at a time; lock keys are 63-bit hashes of the project and the name, and a name is held once per client, so taking it twice in one process gets `null`.
+**Connections.** `LISTEN` needs a session-level connection. Poolers in transaction mode (PgBouncer, and hosted poolers run that way) don't support it, so the client holds direct connections outside the pool: one session connection for session locks, and the one postgres.js opens beside it for LISTEN, which it re-listens on after a reconnect; queries use the pool. One LISTEN per channel serves every subscriber in the process. The caller passes it as `session`: a postgres.js instance on a direct connection with `max: 1`, `max_lifetime: null` and no `idle_timeout`, so it stays one session; the client refuses one that isn't. A statement stuck on a half-open connection is left to postgres.js's keep-alive. Every session statement also returns the backend's pid, so a reconnect shows in the very statement that runs on the new backend: the old session's locks went with it, and each `Release`'s `held()` turns false, rather than a worker carrying on as if it still held its lock. A worker that must not run twice checks `held()` before each round of work. Session statements run one at a time; lock keys are 63-bit hashes of the project and the name, and a name is held once per client, so taking it twice in one process gets `null`.
 
 ## Import, export and purge
 

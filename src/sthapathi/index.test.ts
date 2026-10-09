@@ -343,6 +343,52 @@ describe('scheduleLoop', () => {
     expect((hooks.selectNext as ReturnType<typeof vi.fn>).mock.calls.length).toBe(countAtStop);
   });
 
+  it('wake runs the next cycle now while the loop waits out its interval', async () => {
+    vi.useFakeTimers();
+    const scheduler = createScheduler();
+    const hooks = makeHooks();
+    const loop = scheduler.scheduleLoop(KSHETRA, hooks, 60_000);
+    loop.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    loop();
+  });
+
+  it('a wake mid-cycle runs another cycle as soon as that one ends', async () => {
+    vi.useFakeTimers();
+    const scheduler = createScheduler();
+    let finish: (v: null) => void = () => {};
+    const hooks = makeHooks({ selectNext: vi.fn().mockImplementationOnce(() => new Promise(r => { finish = r; })).mockResolvedValue(null) });
+    const loop = scheduler.scheduleLoop(KSHETRA, hooks, 60_000);
+    loop.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    loop.wake(); // lands while the first cycle is still selecting
+    finish(null);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(2);
+    loop();
+  });
+
+  it('a wake never cuts short the back-off after a declined cycle', async () => {
+    vi.useFakeTimers();
+    const scheduler = createScheduler();
+    const hooks = makeHooks({
+      selectNext: vi.fn().mockResolvedValue({ id: 't1', title: 't', priority: 2 } as Task),
+      prepareTask: vi.fn().mockResolvedValue(null),
+    });
+    const loop = scheduler.scheduleLoop(KSHETRA, hooks, 60_000);
+    loop.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    loop.wake();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(hooks.selectNext).toHaveBeenCalledTimes(2);
+    loop();
+  });
+
   it('swallows errors and continues looping', async () => {
     vi.useFakeTimers();
     const scheduler = createScheduler();
