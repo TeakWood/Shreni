@@ -278,6 +278,104 @@ function leftBranches(repo: string, id: string): string[] {
   }
 }
 
+/**
+ * Moves a project to this Shreni's lifecycle version (policy spec, "Lifecycle
+ * upgrades in practice"): shows what changes, refuses what activation would,
+ * asks for the version typed back, dumps first, then activates. Used by
+ * shreni task upgrade and by shreni start.
+ */
+export async function upgradeProject(o: {
+  tg: ProjectHandle; me: ActorHandle; shreni: ShreniClient; config: ProjectConfig;
+  deps: Pick<TaskDeps, 'print' | 'ask' | 'backup'>; force?: boolean;
+}): Promise<void> {
+  const { tg, me, shreni, deps } = o;
+  const force = !!o.force;
+  const { version, name } = shreni.tg.lifecycle;
+  const diff = await tg.lifecycles.diff(version);
+  if (diff.from.version === version) return deps.print(`already on ${name}@${version}`);
+  if (diff.from.version > version) {
+    throw new Error(`the project is on ${diff.from.name}@${diff.from.version}, newer than this Shreni's ${name}@${version}; upgrade Shreni instead`);
+  }
+  const list = (label: string, xs: string[]) => (xs.length ? [`  ${label}: ${xs.join(', ')}`] : []);
+  const flags = (f: Record<string, true>) => Object.keys(f).join(',') || 'none';
+  deps.print([
+    `${diff.from.name}@${diff.from.version} → ${name}@${version}`,
+    ...list('states added', diff.states.added), ...list('states removed', diff.states.removed),
+    ...diff.flags.map(f => `  state ${f.state}: ${flags(f.from)} → ${flags(f.to)}`),
+    ...list('moves added', diff.moves.added), ...list('moves removed', diff.moves.removed),
+    ...list('moves changed', diff.changedMoves),
+    ...diff.roles.map(r => `  ${r.move} roles: +${r.added.join(',') || '-'} -${r.removed.join(',') || '-'}`),
+    ...diff.guards.map(g => `  ${g.move} guard: ${g.from ?? 'none'} → ${g.to ?? 'none'}`),
+    ...list('hooks changed', diff.hooks), ...list('permissions changed', diff.permissions),
+    ...(diff.create ? ['  the create rules change'] : []),
+    ...diff.tasks.map(t => `  ${t.id}: ${t.from} → ${t.to}`),
+    ...diff.leases.map(l => `  lease on ${l.taskId} (worker ${l.worker})${l.live ? ', live' : ''}`),
+  ].join('\n'));
+  // What activation would refuse is refused before asking.
+  const blockers = [
+    ...diff.unmapped.map(u => `no state ${u.state} for ${u.tasks.join(', ')}`),
+    ...diff.broken,
+    ...(force ? [] : diff.leases.filter(l => l.live).map(l => `a live lease on ${l.taskId} (worker ${l.worker}); wait for it, or pass --force to end it`)),
+  ];
+  if (blockers.length) throw new Error(`can't upgrade:\n${blockers.map(b => `  - ${b}`).join('\n')}`);
+  const target = `${name}@${version}`;
+  if ((await deps.ask(`Type ${target} to upgrade: `)).trim() !== target) throw new Error('not upgraded');
+  // An upgrade can move real tasks, so a dump comes first, and the upgrade waits for it.
+  deps.print(await deps.backup(o.config, 'pre-upgrade'));
+  await me.lifecycles.activate(version, { force });
+  deps.print(`upgraded to ${target}`);
+}
+
+/**
+ * How the project's lifecycle differs from this Shreni's, or null when they
+ * match: an older one is upgraded with shreni task upgrade, a newer (or
+ * another) one needs a newer Shreni.
+ */
+export async function lifecycleGap(shreni: ShreniClient, projectId: string): Promise<{ on: string; runs: string; newer: boolean } | null> {
+  const p = await shreni.tg.projects.get(projectId);
+  const { name, version } = shreni.tg.lifecycle;
+  if (p.lifecycleName === name && p.lifecycleVersion === version) return null;
+  return {
+    on: `${p.lifecycleName}@${p.lifecycleVersion}`, runs: `${name}@${version}`,
+    newer: p.lifecycleName !== name || p.lifecycleVersion > version,
+  };
+}
+
+/** What a gap means for a Kshetra, in words. */
+export function lifecycleGapMessage(id: string, gap: { on: string; runs: string; newer: boolean }): string {
+  return gap.newer
+    ? `${id}: its project is on ${gap.on}, newer than this Shreni's ${gap.runs}; upgrade Shreni instead`
+    : `${id}: its project is on ${gap.on}, older than this Shreni's ${gap.runs}`;
+}
+
+/**
+ * Before a worker starts (policy spec, "Lifecycle upgrades in practice"): a
+ * project on an older lifecycle is shown the change and asked, in a terminal;
+ * a detached start refuses and prints the command.
+ */
+export async function ensureLifecycleCurrent(k: KshetraConfig, overrides: Partial<TaskDeps> = {}): Promise<void> {
+  const deps: TaskDeps = { ...defaultDeps(), ...overrides };
+  const conn = await deps.open(k);
+  try {
+    const gap = await lifecycleGap(conn.shreni, k.project!);
+    if (!gap) return;
+    if (gap.newer) throw new Error(lifecycleGapMessage(k.id, gap));
+    if (!deps.interactive()) {
+      throw new Error(`${lifecycleGapMessage(k.id, gap)}; run shreni start in a terminal to see the change and upgrade it`);
+    }
+    // No worker may hold it, here or elsewhere: an upgrade changes the rules under it.
+    const tg = conn.shreni.tg.project(k.project!);
+    const holder = await tg.locks.holder('worker');
+    if (holder !== null) throw new Error(`${lifecycleGapMessage(k.id, gap)}, and a worker (${holder || 'on another machine'}) still holds it; stop that worker first`);
+    const user = deps.user();
+    if (!user) throw new Error('no developer to act as: set user in ~/.shreni/config.yaml, or git config user.email');
+    deps.print(`${lifecycleGapMessage(k.id, gap)}.`);
+    await upgradeProject({ tg, me: tg.as({ id: user, role: 'developer' }), shreni: conn.shreni, config: k, deps });
+  } finally {
+    await conn.close().catch(() => {});
+  }
+}
+
 /** How long prime waits for the database before printing without the memories. */
 const PRIME_CONNECT_S = 3;
 
@@ -589,40 +687,6 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
 
   async upgrade({ ctx, deps, tg, me, shreni, found }) {
     const a = parseArgs(ctx.args, { bool: ['--force'] });
-    const force = a.bools.has('--force');
-    const { version, name } = shreni.tg.lifecycle;
-    const diff = await tg.lifecycles.diff(version);
-    if (diff.from.version === version) return deps.print(`already on ${name}@${version}`);
-    if (diff.from.version > version) {
-      throw new Error(`the project is on ${diff.from.name}@${diff.from.version}, newer than this Shreni's ${name}@${version}; upgrade Shreni instead`);
-    }
-    const list = (label: string, xs: string[]) => (xs.length ? [`  ${label}: ${xs.join(', ')}`] : []);
-    const flags = (f: Record<string, true>) => Object.keys(f).join(',') || 'none';
-    deps.print([
-      `${diff.from.name}@${diff.from.version} → ${name}@${version}`,
-      ...list('states added', diff.states.added), ...list('states removed', diff.states.removed),
-      ...diff.flags.map(f => `  state ${f.state}: ${flags(f.from)} → ${flags(f.to)}`),
-      ...list('moves added', diff.moves.added), ...list('moves removed', diff.moves.removed),
-      ...list('moves changed', diff.changedMoves),
-      ...diff.roles.map(r => `  ${r.move} roles: +${r.added.join(',') || '-'} -${r.removed.join(',') || '-'}`),
-      ...diff.guards.map(g => `  ${g.move} guard: ${g.from ?? 'none'} → ${g.to ?? 'none'}`),
-      ...list('hooks changed', diff.hooks), ...list('permissions changed', diff.permissions),
-      ...(diff.create ? ['  the create rules change'] : []),
-      ...diff.tasks.map(t => `  ${t.id}: ${t.from} → ${t.to}`),
-      ...diff.leases.map(l => `  lease on ${l.taskId} (worker ${l.worker})${l.live ? ', live' : ''}`),
-    ].join('\n'));
-    // What activation would refuse is refused before asking.
-    const blockers = [
-      ...diff.unmapped.map(u => `no state ${u.state} for ${u.tasks.join(', ')}`),
-      ...diff.broken,
-      ...(force ? [] : diff.leases.filter(l => l.live).map(l => `a live lease on ${l.taskId} (worker ${l.worker}); wait for it, or pass --force to end it`)),
-    ];
-    if (blockers.length) throw new Error(`can't upgrade:\n${blockers.map(b => `  - ${b}`).join('\n')}`);
-    const target = `${name}@${version}`;
-    if ((await deps.ask(`Type ${target} to upgrade: `)).trim() !== target) throw new Error('not upgraded');
-    // An upgrade can move real tasks, so a dump comes first, and the upgrade waits for it.
-    deps.print(await deps.backup(found.config, 'pre-upgrade'));
-    await me.lifecycles.activate(version, { force });
-    deps.print(`upgraded to ${target}`);
+    await upgradeProject({ tg, me, shreni, config: found.config, deps, force: a.bools.has('--force') });
   },
 };

@@ -6,6 +6,7 @@ import { createTestDb, PGLITE_TIMEOUT } from '../taskgraph/test/pglite';
 import { openShreni, type ShreniClient } from '../policy/db/client';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import type { KshetraConfig } from '../kshetra/config';
+import { defineLifecycle } from '../taskgraph';
 
 // The worker runtime in engine mode (policy spec, "Running work"): a Kshetra
 // whose kshetra.yaml names its engine project is worked through the engine;
@@ -34,6 +35,11 @@ vi.mock('../sthapathi/pickup', async orig => {
 });
 vi.mock('../sthapathi/lot-manifest', async orig => ({ ...(await orig<object>()), collectLotManifest: async () => ({}) }));
 vi.mock('../ext/loader', async orig => ({ ...(await orig<object>()), loadExtension: async () => false }));
+const paused = vi.fn();
+vi.mock('../kshetra/state', async orig => ({
+  ...(await orig<object>()),
+  pauseKshetra: (...a: unknown[]) => { paused(...a); },
+}));
 
 async function setup() {
   const t = await createTestDb();
@@ -98,6 +104,27 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     await orc.moveClaimed((await orc.claim({ worker: 'w', leaseMs: 60_000 }))!, 'finish');
     await runtime.hooks.selectNext(kshetra);
     expect((await tg.tasks.get(later.id)).state).toBe('done');
+    await runtime.close();
+  });
+
+  it('on a project still on an older lifecycle, pauses once with the command that upgrades it', async () => {
+    const t = await createTestDb();
+    const v1 = defineLifecycle({ ...taskLifecycle, version: 1, moves: taskLifecycle.moves.filter(m => m.name !== 'confirm') });
+    const old = await openShreni({ db: t.db, lifecycle: v1 });
+    await old.migrate();
+    const p = await old.tg.projects.create({ name: 'web', idPrefix: 'web', actor: { id: 'a', role: 'developer' } });
+    await old.close();
+    shreni = await openShreni({ db: t.db, lifecycle: taskLifecycle });
+    onTestFinished(async () => { await shreni.close(); await t.close(); });
+    const { kshetra } = { kshetra: { id: 'web', name: 'web', project: p.id, database: 'local', repo: { path: mkdtempSync(join(tmpdir(), 'shreni-engine-')) } } as unknown as KshetraConfig };
+    paused.mockClear();
+    const { createWorkerRuntime } = await import('./worker-runtime');
+    const runtime = createWorkerRuntime(kshetra, { entrypoint: 'drain' });
+    await expect(runtime.startup()).rejects.toThrow(/run shreni task upgrade in its repo, then shreni resume --kshetra web/);
+    expect(paused).toHaveBeenCalledWith(kshetra, expect.objectContaining({
+      manual: true, reason: 'lifecycle_behind',
+      message: expect.stringMatching(/web: its project is on shreni\.task@1, older than this Shreni's shreni\.task@2; run shreni task upgrade/),
+    }));
     await runtime.close();
   });
 

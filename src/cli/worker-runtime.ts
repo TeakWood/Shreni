@@ -42,6 +42,7 @@ import { reconcileContainers } from '../policy/sthapathi/epics';
 import { registerEngineStore, unregisterEngineStore, type EngineTaskStore } from '../sthapathi/task-store';
 import { git } from '../sthapathi/git';
 import { sql } from 'kysely';
+import { lifecycleGap, lifecycleGapMessage } from './task';
 
 // The worker runtime, factored out of src/cli/worker.ts (epic 7h3 / Study B3) so
 // the daemon (`shreni start` → `__worker`) and `shreni drain` share ONE copy of
@@ -63,6 +64,19 @@ const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 const RESUME_WATCH_INTERVAL_MS = 5 * 1000;
 
 // 'run' is `shreni run`, a one-cycle drain (Shreni-beads-nhw) — same runtime.
+/**
+ * The project is on another lifecycle version than this worker runs: an older
+ * one is moved by shreni task upgrade, a newer one needs a newer Shreni.
+ */
+export class LifecycleBehind extends Error {
+  constructor(id: string, gap: { on: string; runs: string; newer: boolean }) {
+    super(gap.newer
+      ? `${lifecycleGapMessage(id, gap)}, then shreni resume --kshetra ${id}`
+      : `${lifecycleGapMessage(id, gap)}; run shreni task upgrade in its repo, then shreni resume --kshetra ${id}`);
+    this.name = 'LifecycleBehind';
+  }
+}
+
 export type WorkerEntrypoint = 'worker' | 'drain' | 'run';
 
 export interface WorkerRuntimeOptions {
@@ -178,6 +192,11 @@ export function createWorkerRuntime(
         pauseKshetra(k, { manual: true, reason: 'worker_lock_held', message: err.message });
         return undefined;
       }
+      if (err instanceof LifecycleBehind) {
+        logErr(err.message);
+        pauseKshetra(k, { manual: true, reason: 'lifecycle_behind', message: err.message });
+        return undefined;
+      }
       engineDownSince ??= Date.now();
       logErr('cannot open the task graph engine:', err);
       if (Date.now() - engineDownSince >= UNAVAILABLE_RETRY_MS) {
@@ -291,6 +310,9 @@ export function createWorkerRuntime(
   async function startEngine(): Promise<void> {
     const conn = await openKshetraEngine(kshetra);
     try {
+      // Every write would be refused on an older lifecycle: say so once, rather than fail each poll.
+      const gap = await lifecycleGap(conn.shreni, kshetra.project!);
+      if (gap) throw new LifecycleBehind(kshetra.id, gap);
       const tg = conn.shreni.tg.project(kshetra.project!);
       const lock = await takeWorkerLock(tg);
       const queue = new EngineQueue(tg, tg.as({ id: `sthapathi:${kshetra.id}`, role: 'orchestrator' }), workerName(),
@@ -382,7 +404,13 @@ export function createWorkerRuntime(
       { allowAblation },
     );
     emitLotManifest(kshetra.id, entrypoint, labels, sections);
-    await startEngine();
+    try {
+      await startEngine();
+    } catch (err) {
+      // Recorded, so status and Phalaka say why, then the worker stops with the same words.
+      if (err instanceof LifecycleBehind) pauseKshetra(kshetra, { manual: true, reason: 'lifecycle_behind', message: err.message });
+      throw err;
+    }
     // Leases return interrupted work by themselves; only the work tree needs resetting.
     await resetWorkTree(kshetra);
     if (clearStuckPauseOnRecover(kshetra)) log('cleared stale stuck pause after recovery');

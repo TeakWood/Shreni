@@ -41,7 +41,17 @@ vi.mock('../policy/sthapathi/reads', () => ({
 }));
 // The engine connection, the worker lock and the queue: stubs (no database).
 vi.mock('../policy/sthapathi/connect', () => ({
-  openKshetraEngine: async () => ({ shreni: { tg: { project: () => ({ as: () => ({}) }) } }, close: async () => {} }),
+  openKshetraEngine: async () => ({
+    shreni: {
+      tg: {
+        project: () => ({ as: () => ({}) }),
+        // A project on the lifecycle this process runs.
+        lifecycle: { name: 'shreni.task', version: 2 },
+        projects: { get: async () => ({ lifecycleName: 'shreni.task', lifecycleVersion: 2 }) },
+      },
+    },
+    close: async () => {},
+  }),
 }));
 vi.mock('../policy/sthapathi/leases', async importOriginal => ({
   ...(await importOriginal<typeof import('../policy/sthapathi/leases')>()),

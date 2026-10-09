@@ -8,7 +8,9 @@ import { createTestDb, PGLITE_TIMEOUT } from '../taskgraph/test/pglite';
 import { openShreni, type ShreniClient } from '../policy/db/client';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import { makeContext } from './registry';
-import { findProjectConfig, parseCheck, runTask, type TaskDeps } from './task';
+import { ensureLifecycleCurrent, findProjectConfig, lifecycleGap, parseCheck, runTask, type TaskDeps } from './task';
+import { defineLifecycle } from '../taskgraph';
+import type { KshetraConfig } from '../kshetra/config';
 import { takeWorkerLock } from '../policy/sthapathi/leases';
 import { VersionMismatch } from '../taskgraph';
 
@@ -556,6 +558,56 @@ describe('shreni task unblock', { timeout: PGLITE_TIMEOUT }, () => {
     const out = await run('unblock', t.id, '--reason', 'reviewer was wrong');
     expect(out).toContain(`bead-${t.id}/add-login is still there, so the worker won't start ${t.id} afresh; delete it first: git -C ${repo} branch -D bead-${t.id}/add-login`);
     expect(git('branch', '--list', `bead-${t.id}/*`).toString()).toContain(`bead-${t.id}/add-login`);
+  });
+});
+
+describe('a project on an older lifecycle', { timeout: PGLITE_TIMEOUT }, () => {
+  /** A project made on v1 (the lifecycle without confirm), opened by this Shreni. */
+  async function behind() {
+    const t = await createTestDb();
+    const v1 = defineLifecycle({ ...taskLifecycle, version: 1, moves: taskLifecycle.moves.filter(m => m.name !== 'confirm') });
+    const old = await openShreni({ db: t.db, lifecycle: v1 });
+    await old.migrate();
+    const p = await old.tg.projects.create({ name: 'web', idPrefix: 'web', actor: { id: ME, role: 'developer' } });
+    await old.close();
+    const shreni = await openShreni({ db: t.db, lifecycle: taskLifecycle });
+    onTestFinished(async () => { await shreni.close(); await t.close(); });
+    const k = { id: 'web', project: p.id, database: 'local', repo: { path: '/repos/web' } } as unknown as KshetraConfig;
+    return { shreni, p, k };
+  }
+
+  it('shreni start, detached, refuses and prints the command; in a terminal, shows the change and upgrades on the version typed back', async () => {
+    const { shreni, p, k } = await behind();
+    expect(await lifecycleGap(shreni, p.id)).toEqual({ on: 'shreni.task@1', runs: 'shreni.task@2', newer: false });
+    const out: string[] = [];
+    const base = {
+      open: async () => ({ shreni, close: async () => {} }), user: () => ME, print: (l: string) => out.push(l),
+      backup: async () => 'dumped first: test.dump',
+    };
+    await expect(ensureLifecycleCurrent(k, { ...base, interactive: () => false }))
+      .rejects.toThrow(/web: its project is on shreni\.task@1, older than this Shreni's shreni\.task@2; run shreni start in a terminal/);
+    await expect(ensureLifecycleCurrent(k, { ...base, interactive: () => true, ask: async () => 'no' })).rejects.toThrow(/not upgraded/);
+    await ensureLifecycleCurrent(k, { ...base, interactive: () => true, ask: async () => 'shreni.task@2' });
+    expect(out.join('\n')).toMatch(/shreni\.task@1 → shreni\.task@2[\s\S]*moves added: confirm[\s\S]*dumped first[\s\S]*upgraded to shreni\.task@2/);
+    expect(await lifecycleGap(shreni, p.id)).toBeNull();
+    // Current now: nothing asked.
+    await ensureLifecycleCurrent(k, { ...base, interactive: () => true, ask: async () => { throw new Error('not asked'); } });
+  });
+
+  it('never upgrades under a worker that holds the Kshetra, and refuses a project newer than this Shreni', async () => {
+    const { shreni, p, k } = await behind();
+    const base = { open: async () => ({ shreni, close: async () => {} }), user: () => ME, print: () => {}, backup: async () => 'no dump' };
+    const lock = await takeWorkerLock(shreni.tg.project(p.id));
+    await expect(ensureLifecycleCurrent(k, { ...base, interactive: () => true, ask: async () => 'shreni.task@2' }))
+      .rejects.toThrow(/older than this Shreni's shreni\.task@2, and a worker .* still holds it; stop that worker first/);
+    await lock();
+
+    // This Shreni on v1, the project on v2.
+    await ensureLifecycleCurrent(k, { ...base, interactive: () => true, ask: async () => 'shreni.task@2' });
+    const v1 = defineLifecycle({ ...taskLifecycle, version: 1, moves: taskLifecycle.moves.filter(m => m.name !== 'confirm') });
+    const older = await openShreni({ db: shreni.db, lifecycle: v1 });
+    await expect(ensureLifecycleCurrent(k, { ...base, open: async () => ({ shreni: older, close: async () => {} }), interactive: () => true }))
+      .rejects.toThrow(/web: its project is on shreni\.task@2, newer than this Shreni's shreni\.task@1; upgrade Shreni instead/);
   });
 });
 

@@ -33,7 +33,7 @@ import { runReport } from './report';
 import { runShow } from './show';
 import { runInit, startRefusal } from './init';
 import { runTelemetry } from './telemetry';
-import { runTask, TASK_USAGE } from './task';
+import { runTask, TASK_USAGE, ensureLifecycleCurrent } from './task';
 import { runPlan, PLAN_USAGE } from './plan';
 import { runDb, DB_USAGE, ensureMigrated, migrateDeps } from './db';
 import { onBeads } from '../policy/migrate/kshetra';
@@ -119,6 +119,18 @@ export const COMMANDS: Command[] = [
       for (const k of targets) {
         if (k.project) await ensureMigrated(k, migrateDeps());
       }
+      // And on this Shreni's lifecycle: offered in a terminal, refused detached.
+      // One refused doesn't stop the others; a worker already running is left as it is.
+      const behind = new Map<string, string>();
+      for (const k of targets.filter(k => k.project && !defaultMigrateDeps().workerRunning(k.id))) {
+        try {
+          await ensureLifecycleCurrent(k);
+        } catch (err) {
+          behind.set(k.id, `${k.id}: not started: ${(err as Error).message}`);
+        }
+      }
+      if (behind.size && targets.every(k => behind.has(k.id))) throw new Error([...behind.values()].join('\n'));
+      for (const l of behind.values()) console.error(l);
       // A Kshetra still on beads is moved first (migration plan, "Upgrading a Kshetra"):
       // offered in a terminal; a detached start refuses and prints the command.
       // A Kshetra with no project can't run: it is refused, naming shreni migrate.
@@ -141,7 +153,7 @@ export const COMMANDS: Command[] = [
       }
       if (left.size && targets.every(k => left.has(k.id))) throw new Error([...left.values()].join('\n'));
       for (const l of left.values()) console.error(l);
-      for (const k of targets.filter(k => !left.has(k.id))) {
+      for (const k of targets.filter(k => !left.has(k.id) && !behind.has(k.id))) {
         const result = startWorker(k.id, labels, allowAblation);
         if (result.status === 'already_running') {
           console.log(`${k.id}: already running (pid ${result.pid})`);
