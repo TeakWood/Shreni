@@ -57,19 +57,25 @@ below. The code review is a HARD GATE: no code from a beads task is pushed until
 a review has run and its findings are resolved.** Work one bead at a time — finish
 this full loop for a bead before starting the next.
 
-1. **Claim** — `bd update <id> --claim`.
-2. **Implement** the change (with tests).
-3. **Quality gates** — `pnpm typecheck` and `pnpm vitest run` must be green (also
+1. **Claim** — `bd update <id> --claim`, then `bd show <id>`: read its acceptance
+   criteria and the spec section it names (for the task graph engine, in
+   `docs/architecture/`).
+2. **Checks first** — write the acceptance criteria as tests and run them. Each
+   must fail, for the reason the check describes, before you write the code.
+3. **Implement** the change until those tests pass.
+4. **Quality gates** — `pnpm typecheck` and `pnpm vitest run` must be green (also
    `pnpm build:web` when the Phalaka frontend under `src/phalaka/web/` changed, so
-   the committed `ui.ts` bundle is regenerated).
-4. **Code review — the gate** — run `/code-review` (high effort) or the
-   code-review subagent over the diff. **Never push an unreviewed beads-task
-   diff.**
-5. **Resolve findings** — fix every confirmed finding, or consciously accept it
-   with a stated reason. Re-run the gates after any fix.
-6. **Push only after the review is clean** — commit and `git push` (per *Session
+   the committed `ui.ts` bundle is regenerated, and `pnpm test:integration`, once
+   it exists, when `src/taskgraph/` changed).
+5. **Code review — the gate** — run `/code-review` (high effort) or the
+   code-review subagent over the diff, checked against the acceptance criteria and
+   the spec section the bead names. **Never push an unreviewed beads-task diff.**
+6. **Resolve findings** — fix every confirmed finding, or consciously accept it
+   with a stated reason. A finding that shows the spec itself is wrong changes the
+   spec first, then the code. Re-run the gates after any fix.
+7. **Push only after the review is clean** — commit and `git push` (per *Session
    Completion*), then `bd close <id>` with a reason.
-7. **Sync the beads repo** — per *Beads Repository & Sync* below.
+8. **Sync the beads repo** — per *Beads Repository & Sync* below.
 
 **CRITICAL RULES:**
 - The review runs BEFORE the push, not after — a pushed-then-reviewed diff defeats
@@ -77,6 +83,8 @@ this full loop for a bead before starting the next.
 - "Tests pass" is NOT a substitute for the review; run both.
 - If you skip the review because a change is trivial, say so explicitly and why —
   do not skip it silently.
+- An epic closes only when its user journeys pass on a real setup, not just in
+  tests — never close one only because its children closed.
 
 ## Beads Repository & Sync
 
