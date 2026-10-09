@@ -7,7 +7,9 @@
 // boundary.test.ts.
 
 export { openTaskGraph } from './client';
-export type { OpenTaskGraphOptions, Project, TaskGraphClient, ProjectHandle, ActorHandle } from './client';
+// For the caller's own tables, over the same postgres.js pool.
+export { PostgresJsDialect } from './pg-dialect';
+export type { OpenTaskGraphOptions, Project, TaskGraphClient, ProjectHandle, ActorHandle, ValidatorConfig } from './client';
 export { defineLifecycle, defineGuard, SYSTEM_ROLE, CALLS } from './lifecycle';
 export type { Lifecycle, Move, Guard, GuardFn, StateFlags, Call } from './lifecycle';
 export type { MigrationReport } from './migrate';
