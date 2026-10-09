@@ -4,7 +4,8 @@ import { PostgresJsDialect } from './pg-dialect';
 import { migrate, pendingMigrations, type MigrationReport } from './migrate';
 import { defineLifecycle, registerLifecycle, type Call, type Lifecycle } from './lifecycle';
 import { checkPermission } from './permissions';
-import { tasksApi } from './tasks';
+import { loadTask, tasksApi } from './tasks';
+import { once as onceFor, type PriorWrite } from './requests';
 import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi, type MoveOptions } from './moves';
 import { readsApi } from './reads';
@@ -14,7 +15,7 @@ import { exportProject, importProject, purgeProject, type ImportCallback, type I
 
 type ReadsApi = ReturnType<typeof readsApi>;
 import { runTransaction, type EngineTx } from './tx';
-import { NotFound, SchemaBehind, VersionMismatch } from './errors';
+import { LeaseLost, NotFound, NotPermitted, SchemaBehind, VersionMismatch } from './errors';
 import type { Actor, Task } from './types';
 
 // The engine's entry point (engine spec, "API"): one client per process, one
@@ -236,15 +237,52 @@ export class ActorHandle {
   constructor(/** @internal */ readonly project: ProjectHandle, readonly actor: Actor) {
     // In the constructor body: field initializers would run before the
     // parameter properties above are set.
-    this.tasks = tasksApi(this);
-    this.deps = depsApi(this);
-    this.links = linksApi(this);
-    this.notes = notesApi(this);
-    const fenced = movesApi(this);
+    // Every write that takes a request id runs once per id (requests.ts).
+    const { client, id: projectId } = project;
+    const once = <T>(requestId: string | undefined, kind: string, taskId: string | undefined,
+                     act: () => Promise<T>, replay: (p: PriorWrite) => Promise<T>) =>
+      onceFor(client.db, projectId, requestId, kind, { actor: actor.id, taskId }, act, replay);
+    const task = (p: PriorWrite) => loadTask(client.db, projectId, p.taskId!);
+    const nothing = async () => {};
+
+    const tasks = tasksApi(this);
+    this.tasks = {
+      ...tasks,
+      create: (input, opts = {}) => once(opts.requestId, 'task.created', undefined, () => tasks.create(input, opts), task),
+      update: (id, patch, opts = {}) => once(opts.requestId, 'task.updated', id, () => tasks.update(id, patch, opts), task),
+      delete: (id, opts = {}) => once(opts.requestId, 'task.deleted', id, () => tasks.delete(id, opts), nothing),
+    };
+    const deps = depsApi(this);
+    this.deps = {
+      add: (a, b, opts = {}) => once(opts.requestId, 'dep.added', a, () => deps.add(a, b, opts), nothing),
+      remove: (a, b, opts = {}) => once(opts.requestId, 'dep.removed', a, () => deps.remove(a, b, opts), nothing),
+    };
+    const links = linksApi(this);
+    this.links = { add: (a, b, kind, opts = {}) => once(opts.requestId, 'link.added', a, () => links.add(a, b, kind, opts), nothing) };
+    const notes = notesApi(this);
+    this.notes = { add: (id, text, opts = {}) => once(opts.requestId, 'note', id, () => notes.add(id, text, opts), nothing) };
+    const moves = movesApi(this);
+    const fenced: ReturnType<typeof movesApi> = (taskId, moveName, opts = {}, fence) =>
+      once(opts.requestId, `move:${moveName}`, taskId, () => moves(taskId, moveName, opts, fence), task);
     this.move = (taskId, moveName, opts) => fenced(taskId, moveName, opts);
     this.moveFenced = fenced;
-    this.lifecycles = activateApi(this);
-    this.claim = claimApi(this);
+    const lifecycles = activateApi(this);
+    this.lifecycles = {
+      activate: (version, opts = {}) => once(opts.requestId, 'lifecycle.upgraded', undefined, () => lifecycles.activate(version, opts), nothing),
+    };
+    const claim = claimApi(this);
+    const claimMove = client.lifecycle.moves.find(m => m.name === client.lifecycle.hooks.onClaim)!;
+    this.claim = async opts => {
+      // The role check runs before any replay, so a replay never hands a claim to a role that can't work.
+      if (!claimMove.by.includes(actor.role)) throw new NotPermitted('claim', actor.role);
+      return once(opts?.requestId, `move:${claimMove.name}`, undefined, () => claim(opts), replayClaim);
+    };
+    const replayClaim = async (p: PriorWrite) => {
+      // The same attempt, while it still holds the task; never a second task.
+      const t = await loadTask(client.db, projectId, p.taskId!);
+      if (t.leaseAttemptId !== p.attemptId) throw new LeaseLost(p.taskId!, p.attemptId!);
+      return { task: t, attemptId: p.attemptId!, expiresAt: t.leaseExpiresAt! };
+    };
     const leased = leasedApi(this);
     this.heartbeat = leased.heartbeat;
     this.moveClaimed = leased.moveClaimed;

@@ -23,6 +23,8 @@ export type ClaimOptions = {
   leaseMs: number;
   /** Narrows what may be claimed, e.g. { within: epicId }; its order and limit are ignored. */
   filter?: TaskFilter;
+  /** A retry with the same id returns the same attempt while it holds the task, LeaseLost after; never a second task. */
+  requestId?: string;
 };
 
 /** The longest lease a claim may ask for; a worker renews with heartbeats instead. */
@@ -131,7 +133,7 @@ export function claimApi(as: ActorHandle) {
       emit({
         projectId, taskId: id, attemptId: task.leaseAttemptId!, kind: `move:${claimMove.name}`,
         actor: as.actor.id, actorRole: as.actor.role, fromState: claimableState(lifecycle), toState: claimMove.to,
-        payload: { worker: opts.worker, leaseMs: opts.leaseMs },
+        payload: { worker: opts.worker, leaseMs: opts.leaseMs }, requestId: opts.requestId,
       });
       return { task, attemptId: task.leaseAttemptId!, expiresAt: task.leaseExpiresAt! };
     });

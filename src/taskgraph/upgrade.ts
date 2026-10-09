@@ -209,7 +209,7 @@ export function activateApi(as: ActorHandle) {
      * migrate map, and writes lifecycle.upgraded. Only the version this
      * process runs can be activated, since its code holds the guards.
      */
-    async activate(version: number, opts: { force?: boolean } = {}): Promise<void> {
+    async activate(version: number, opts: { force?: boolean; requestId?: string } = {}): Promise<void> {
       if (version !== lifecycle.version) {
         throw new InvalidRequest(`this process runs ${lifecycle.name}@${lifecycle.version}; activate ${version} from a process that runs it`);
       }
@@ -260,6 +260,7 @@ export function activateApi(as: ActorHandle) {
             name: lifecycle.name, from: p.from.version, to: version, force: !!opts.force,
             moved: p.changes.length, leasesEnded: p.leases.map(l => ({ taskId: l.taskId, worker: l.worker })),
           },
+          requestId: opts.requestId,
         });
       });
     },
