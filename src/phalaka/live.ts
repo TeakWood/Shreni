@@ -1,6 +1,6 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { TaskGraphEvent } from '../taskgraph/index.js';
-import { subscribeTracker } from '../policy/sthapathi/reads.js';
+import { closeSharedReads, readerKey, subscribeTracker } from '../policy/sthapathi/reads.js';
 import { invalidateProjectReads } from './beads-read.js';
 
 // Live task views (policy spec, "Running work"; engine spec, "Events and
@@ -13,17 +13,25 @@ import { invalidateProjectReads } from './beads-read.js';
 export const RESYNC_MS = 30_000;
 
 export interface TaskFeedOptions {
-  kshetras(): KshetraConfig[];
+  /** The registered Kshetras, or null when the registry couldn't be read: that resync is skipped. */
+  kshetras(): KshetraConfig[] | null;
   /** Called with a Kshetra and the tasks its new events name. */
   onChange(kshetraId: string, taskIds: string[]): void;
   subscribe?: typeof subscribeTracker;
+  /** Closes the read connection a Kshetra no longer uses as configured. */
+  release?: (k: KshetraConfig) => Promise<void>;
+  /** The reader a Kshetra uses: by default its id, project and resolved database url. */
+  keyOf?: (k: KshetraConfig) => string;
   log?(line: string): void;
   resyncMs?: number;
 }
 
 export class TaskFeed {
-  /** Kshetra id:project → its unsubscribe, once subscribed. */
+  /** Kshetra id:project:database → its unsubscribe, once subscribed, and the config it was made for. */
   private readonly subs = new Map<string, Promise<(() => Promise<void>) | null>>();
+  private readonly configs = new Map<string, KshetraConfig>();
+  /** Keys missing from the last resync: released only when missing twice in a row, so a config caught mid-edit isn't. */
+  private readonly missing = new Set<string>();
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
 
@@ -38,12 +46,28 @@ export class TaskFeed {
   /** Follows every registered Kshetra on the engine, and stops following one that left. */
   sync(): void {
     if (this.closed) return;
-    const want = new Map(this.o.kshetras().filter(k => k.project).map(k => [`${k.id}:${k.project}`, k]));
+    const list = this.o.kshetras();
+    // A registry that couldn't be read says nothing about who left.
+    if (!list) return;
+    // A Kshetra pointed at another database or project is followed afresh; the old reader is closed.
+    const keyOf = this.o.keyOf ?? readerKey;
+    const want = new Map(list.filter(k => k.project).map(k => [keyOf(k), k]));
     for (const [key, sub] of this.subs) {
-      if (!want.has(key)) {
-        this.subs.delete(key);
-        void sub.then(un => un?.()).catch(() => {});
+      if (want.has(key)) {
+        this.missing.delete(key);
+        continue;
       }
+      if (!this.missing.has(key)) {
+        this.missing.add(key);
+        continue;
+      }
+      const old = this.configs.get(key)!;
+      this.missing.delete(key);
+      this.subs.delete(key);
+      this.configs.delete(key);
+      // Rows the old reader cached are another database's.
+      invalidateProjectReads(old.project!);
+      void sub.then(un => un?.()).catch(() => {}).then(() => (this.o.release ?? closeSharedReads)(old)).catch(() => {});
     }
     for (const [key, k] of want) {
       if (this.subs.has(key)) continue;
@@ -53,9 +77,11 @@ export class TaskFeed {
           // Tried again on the next sync; until then the cache and polling cover it.
           this.o.log?.(`[phalaka] can't follow ${k.id}'s events: ${(err as Error).message}`);
           this.subs.delete(key);
+          this.configs.delete(key);
           return null;
         });
       this.subs.set(key, sub);
+      this.configs.set(key, k);
     }
   }
 

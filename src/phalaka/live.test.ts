@@ -38,6 +38,7 @@ describe('the live task feed', { timeout: PGLITE_TIMEOUT }, () => {
       kshetras: () => [k],
       onChange: (kshetraId, taskIds) => rung.push({ kshetraId, taskIds }),
       subscribe: async (kk, handler, onError) => tg.events.subscribe(handler, { onError }),
+      keyOf: kk => kk.id,
     });
     feed.start();
     onTestFinished(() => feed.close());
@@ -52,7 +53,7 @@ describe('the live task feed', { timeout: PGLITE_TIMEOUT }, () => {
     expect(invalidated).toContain(k.project);
   });
 
-  it('follows the registry: a Kshetra that leaves is unsubscribed, one with no project never subscribed, a failure retried', async () => {
+  it('follows the registry: a Kshetra that leaves (two resyncs running) is unsubscribed, one with no project never subscribed, a failure retried', async () => {
     const unsubscribed: string[] = [];
     let fail = true;
     const subscribe = vi.fn(async (k: KshetraConfig) => {
@@ -61,7 +62,10 @@ describe('the live task feed', { timeout: PGLITE_TIMEOUT }, () => {
     });
     let list = [{ id: 'a', project: 'p-a' }, { id: 'beads' }, { id: 'flaky', project: 'p-f' }] as unknown as KshetraConfig[];
     const logs: string[] = [];
-    const feed = new TaskFeed({ kshetras: () => list, onChange: () => {}, subscribe: subscribe as never, log: l => logs.push(l) });
+    const feed = new TaskFeed({
+      kshetras: () => list, onChange: () => {}, subscribe: subscribe as never, log: l => logs.push(l),
+      keyOf: k => `${k.id}:${k.project}`, release: async () => {},
+    });
     feed.sync();
     await new Promise(r => setTimeout(r, 10));
     expect(subscribe.mock.calls.map(c => c[0].id)).toEqual(['a', 'flaky']);
@@ -71,9 +75,43 @@ describe('the live task feed', { timeout: PGLITE_TIMEOUT }, () => {
     list = [{ id: 'flaky', project: 'p-f' }] as unknown as KshetraConfig[];
     feed.sync();
     await new Promise(r => setTimeout(r, 10));
+    // Missing once might be a config caught mid-edit: kept.
+    expect(unsubscribed).toEqual([]);
+    feed.sync();
+    await new Promise(r => setTimeout(r, 10));
     expect(unsubscribed).toEqual(['a']);
     expect(subscribe.mock.calls.map(c => c[0].id)).toEqual(['a', 'flaky', 'flaky']);
+    // A registry that couldn't be read closes nothing.
+    const before = unsubscribed.length;
+    list = null as unknown as KshetraConfig[];
+    feed.sync();
+    feed.sync();
+    await new Promise(r => setTimeout(r, 10));
+    expect(unsubscribed).toHaveLength(before);
     await feed.close();
     expect(unsubscribed).toEqual(['a', 'flaky']);
+  });
+
+  it('given a Kshetra\'s database entry changes, follows the new database within one resync and closes the old reader', async () => {
+    const seen: string[] = [];
+    const released: string[] = [];
+    const subscribe = vi.fn(async (k: KshetraConfig) => {
+      seen.push(`${k.id}@${k.database}`);
+      return async () => {};
+    });
+    let list = [{ id: 'web', project: 'p', database: 'local' }] as unknown as KshetraConfig[];
+    const feed = new TaskFeed({
+      kshetras: () => list, onChange: () => {}, subscribe: subscribe as never,
+      release: async k => { released.push(`${k.id}@${k.database}`); },
+      keyOf: k => `${k.id}:${k.project}:${k.database}`,
+    });
+    feed.sync();
+    list = [{ id: 'web', project: 'p', database: 'acme' }] as unknown as KshetraConfig[];
+    feed.sync();
+    feed.sync();
+    await new Promise(r => setTimeout(r, 10));
+    expect(seen).toEqual(['web@local', 'web@acme']);
+    expect(released).toEqual(['web@local']);
+    await feed.close();
   });
 });

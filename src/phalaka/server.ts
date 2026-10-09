@@ -28,7 +28,7 @@ export async function createPhalakaServer(port = DEFAULT_PORT) {
   registerPhalakaStream(fastify, stream);
   // Each Kshetra's task events ring the browser (and drop the stale reads).
   const feed = new TaskFeed({
-    kshetras: () => { try { return loadRegistry(); } catch { return []; } },
+    kshetras: () => { try { return loadRegistry(); } catch { return null; } },
     onChange: (kshetraId, taskIds) => stream.publish('tasks', { kshetraId, taskIds }),
     log: line => console.error(line),
   });

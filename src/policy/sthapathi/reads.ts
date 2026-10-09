@@ -5,6 +5,7 @@ import type { KshetraConfig } from '../../kshetra/config';
 import { registeredStore } from '../../sthapathi/task-store';
 import { requireProject } from '../../kshetra/config';
 import { openKshetraEngine } from './connect';
+import { loadUserConfig, resolveDatabase } from '../../kshetra/user-config';
 import { PR_NEEDS_FOLLOWUP_LABEL } from '../../sthapathi/pr-followup';
 import { taskLifecycle } from '../lifecycle/lifecycle';
 import { lastEventId } from '../db/bundle';
@@ -236,8 +237,31 @@ export async function subscribeTracker(
   return (await sharedEntry(kshetra)).tg.events.subscribe(handler, { onError });
 }
 
+/**
+ * A long-lived reader's key: a Kshetra pointed at another database, or a
+ * database entry pointed at another server, or another project, is another reader.
+ */
+export function readerKey(k: KshetraConfig): string {
+  let where: string;
+  try {
+    where = resolveDatabase(k, loadUserConfig()).url;
+  } catch {
+    where = k.database ?? 'local';
+  }
+  return `${k.id}:${k.project}:${where}`;
+}
+const sharedKey = readerKey;
+
+/** Closes the long-lived reader for this Kshetra as configured, once nothing reads through it. */
+export async function closeSharedReads(kshetra: KshetraConfig): Promise<void> {
+  const entry = shared.get(sharedKey(kshetra));
+  if (!entry) return;
+  shared.delete(sharedKey(kshetra));
+  await entry.then(e => e.close()).catch(() => {});
+}
+
 function sharedEntry(kshetra: KshetraConfig) {
-  const key = `${kshetra.id}:${kshetra.project}`;
+  const key = sharedKey(kshetra);
   let entry = shared.get(key);
   if (!entry) {
     entry = openKshetraEngine(kshetra, { name: 'shreni-read' }).then(conn => {
