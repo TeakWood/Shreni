@@ -114,6 +114,11 @@ function sortKeys(v: unknown): unknown {
 // digest is stored; the config itself never is.
 export function hashResolvedConfig(kshetra: KshetraConfig): string {
   const clone = structuredClone(kshetra) as KshetraConfig;
+  // The shared base's defaults (T4.1) are left out while they're unchanged,
+  // so a kshetra.yaml that didn't change keeps the hash it had before them.
+  const base = clone as Partial<KshetraConfig>;
+  if (base.database === 'local') delete base.database;
+  if (base.plan && Object.keys(base.plan.validators ?? {}).length === 0) delete base.plan;
   // Record ENFORCED gate levels: apply the test/lint clamp AND the enforcement
   // ablation (epic 8wi — every gate warn), so the hash reflects what was enforced.
   const enfAblated = isAblated(kshetra, 'enforcement');

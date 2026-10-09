@@ -4,6 +4,7 @@ import * as yaml from 'js-yaml';
 import { resolve } from 'path';
 import { providerDefaultModel } from '../agents/providers/registry.js';
 import { AblationConfigSchema } from './ablation.js';
+import { ProjectConfigBase } from './project-config.js';
 
 // Single source of truth for the default agent model. Codex/Gemini have no
 // bakeable default (providerDefaultModel returns null, OQ1), so the schema
@@ -275,10 +276,11 @@ const BudgetConfigSchema = z.object({
   perKshetraUsd: z.number().finite().positive().optional(),
 });
 
-export const KshetraConfigSchema = z.object({
+// The shared base (project-config.ts) holds name, description, project,
+// database and plan.validators; a Kshetra adds everything a worker needs.
+// beads stays until the migration release removes it (T4.13).
+export const KshetraConfigSchema = ProjectConfigBase.extend({
   id: z.string().regex(/^[a-z0-9-]+$/, 'id must be lowercase alphanumeric with hyphens'),
-  name: z.string(),
-  description: z.string().optional(),
   repo: RepoConfigSchema,
   beads: BeadsConfigSchema,
   stack: StackConfigSchema,
