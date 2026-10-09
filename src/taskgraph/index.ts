@@ -11,7 +11,7 @@ export type { OpenTaskGraphOptions, Project, TaskGraphClient, ProjectHandle, Act
 export { defineLifecycle, defineGuard, SYSTEM_ROLE, CALLS } from './lifecycle';
 export type { Lifecycle, Move, Guard, GuardFn, StateFlags, Call } from './lifecycle';
 export type { MigrationReport } from './migrate';
-export type { Actor, Task } from './types';
+export type { Actor, Task, TaskDetail, TaskFilter, Plan, PlanFilter, Attempt, TaskGraphEvent } from './types';
 export type { NewTask, TaskPatch, WriteOptions } from './tasks';
 export type { MoveOptions } from './moves';
 export * from './errors';

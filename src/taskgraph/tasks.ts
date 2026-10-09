@@ -66,7 +66,7 @@ const TaskPatchSchema = z.strictObject({
   holdUntil: z.date().nullable().optional(), parent: z.string().min(1).nullable().optional(),
 });
 
-function parse<T>(schema: z.ZodType<T>, input: unknown): T {
+export function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   const r = schema.safeParse(input);
   if (!r.success) {
     throw new InvalidRequest(r.error.issues.map(i => `${i.path.join('.') || 'input'}: ${i.message}`).join('; '));

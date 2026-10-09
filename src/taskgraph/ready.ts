@@ -1,11 +1,9 @@
-import { sql, type Kysely, type RawBuilder } from 'kysely';
+import { sql, type RawBuilder } from 'kysely';
 import type { Lifecycle } from './lifecycle';
-import { TASK_COLUMNS, toTask, type TaskRow } from './tasks';
 import { textArray } from './sql-values';
-import type { Task } from './types';
 
 // The ready predicate (engine spec, "Claiming and leases"): what a claim may
-// pick. Shared by ready() and, later, the claim query, so the two can't drift.
+// pick. Shared by ready() (reads.ts) and, later, the claim query, so the two can't drift.
 
 /** The lifecycle's states that satisfy a dependency. */
 export const satisfyingStates = (lifecycle: Lifecycle) =>
@@ -45,14 +43,3 @@ export function readyWhere(lifecycle: Lifecycle): RawBuilder<boolean> {
 
 /** Claim order: boosted first, then priority, then age. */
 export const CLAIM_ORDER = sql`t.boosted desc, t.priority, t.created_at, t.id`;
-
-export async function readyTasks(
-  db: Kysely<any>, projectId: string, lifecycle: Lifecycle, opts: { limit?: number } = {},
-): Promise<Task[]> {
-  const r = await sql<TaskRow>`
-    select ${TASK_COLUMNS} from taskgraph.tasks t
-     where t.project_id = ${projectId} and ${readyWhere(lifecycle)}
-     order by ${CLAIM_ORDER}
-     ${opts.limit !== undefined ? sql`limit ${opts.limit}` : sql``}`.execute(db);
-  return r.rows.map(toTask);
-}

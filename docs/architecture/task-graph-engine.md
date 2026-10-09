@@ -523,12 +523,12 @@ tg.expireLeases(): Promise<number>                // the sweep claim runs first;
 tg.locks.trySession(name): Promise<Release | null>   // a session advisory lock on the client's session connection
 
 // Reads
-tg.tasks.get(id)                                  // with its deps and their states, and its live claim
+tg.tasks.get(id)                                  // with its deps and their states, and its live claim, marked expired once lapsed
 tg.tasks.list(filter); tg.tasks.count(filter); tg.ready(filter)
 tg.tasks.children(id); tg.tasks.subtree(id); tg.tasks.settled()
 tg.tasks.history(id)                              // its events, notes included, oldest first
 tg.tasks.search(text)
-tg.plans.get(id); tg.plans.list(filter)
+tg.plans.get(id); tg.plans.list({ status? })      // status: open, approved, discarded
 tg.attempts.list(taskId)
 as.notes.add(taskId, text)
 tg.events.since(cursor, limit); tg.events.subscribe(handler): Unsubscribe
