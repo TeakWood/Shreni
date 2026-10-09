@@ -348,16 +348,20 @@ export async function purgeProject(
 ): Promise<PurgeReport> {
   // Not stamped with a lifecycle: a project on any version can be purged.
   return runTransaction(db, async ({ db: tx }) => {
-    const p = await sql<{ name: string }>`select name from taskgraph.projects where id = ${projectId} for update`.execute(tx);
+    const p = await sql<{ name: string }>`select name from taskgraph.projects where id = ${projectId}`.execute(tx);
     if (!p.rows[0]) throw new NotFound('project', projectId);
     const { name } = p.rows[0];
     if (opts.confirmName !== name) throw new InvalidRequest(`type the project's name, ${JSON.stringify(name)}, to purge it`);
     await sql`select set_config('taskgraph.purging', ${projectId}, true)`.execute(tx);
     // Every write to a project locks a task row, the graph or the project row
-    // (a new task's foreign key). Holding all three first means a writer in
-    // flight finishes before the deletes, or finds its task gone after.
+    // (a new task's foreign key, and the version fence's share lock). Writers
+    // take their task row before the project row, so purge does too: the
+    // graph, then the task rows, then the project row last. A writer in
+    // flight then finishes before the deletes, or finds its task gone after.
     await lockGraph(tx, projectId);
-    await sql`select 1 from taskgraph.tasks where project_id = ${projectId} for update`.execute(tx);
+    await sql`select 1 from taskgraph.tasks where project_id = ${projectId} order by id for update`.execute(tx);
+    const locked = await sql`select 1 from taskgraph.projects where id = ${projectId} for update`.execute(tx);
+    if (!locked.rows[0]) throw new NotFound('project', projectId);
     const counts: Record<string, number> = {};
     const del = async (key: string, table: string) => {
       const r = await sql`delete from ${sql.table(`taskgraph.${table}`)} where project_id = ${projectId}`.execute(tx);

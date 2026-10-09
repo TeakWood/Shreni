@@ -1,5 +1,4 @@
 import { describe, it, expect, onTestFinished } from 'vitest';
-import postgres from 'postgres';
 import { openEngine } from './test/engine';
 import { createWireTestDb } from './test/pglite';
 import { testLifecycle } from './test/lifecycle';
@@ -94,45 +93,4 @@ describe('tg.locks.trySession', { timeout: 30_000 }, () => {
   });
 });
 
-// Two processes need two real sessions, which PGlite can't give; this runs
-// against any Postgres named by TASKGRAPH_TEST_DATABASE_URL, and in the
-// concurrency tier.
-const url = process.env.TASKGRAPH_TEST_DATABASE_URL;
-describe.skipIf(!url)('session locks across processes (real Postgres)', { timeout: 60_000 }, () => {
-  it('B gets nothing while A holds the worker lock, and gets it once A\'s connection is gone; A learns it lost it', async () => {
-    const sqlA = postgres(url!, { max: 2, onnotice: () => {} });
-    const sqlB = postgres(url!, { max: 2, onnotice: () => {} });
-    const sessionA = postgres(url!, { max: 1, max_lifetime: null, onnotice: () => {} });
-    const sessionB = postgres(url!, { max: 1, max_lifetime: null, onnotice: () => {} });
-    onTestFinished(async () => {
-      for (const s of [sqlA, sqlB, sessionA, sessionB]) await s.end({ timeout: 1 });
-    });
-    const a = await openTaskGraph({ sql: sqlA, session: sessionA, lifecycle: testLifecycle() });
-    await a.migrate();
-    const b = await openTaskGraph({ sql: sqlB, session: sessionB, lifecycle: testLifecycle() });
-    const p = await a.projects.create({ name: 'locks', idPrefix: 'lk', actor: ann });
-
-    const held = (await a.project(p.id).locks.trySession('worker'))!;
-    expect(await b.project(p.id).locks.trySession('worker')).toBeNull();
-
-    // A's session connection dies without A closing anything, as when its process crashes
-    const [{ pid }] = await sessionA`select pg_backend_pid() as pid`;
-    await sqlB`select pg_terminate_backend(${pid})`;
-    // termination is a signal: B gets the lock once A's backend has gone
-    let got = null;
-    for (let i = 0; i < 50 && !got; i++) {
-      got = await b.project(p.id).locks.trySession('worker');
-      if (!got) await new Promise(r => setTimeout(r, 100));
-    }
-    expect(got).toBeTypeOf('function');
-
-    // A finds the lock gone: its session reconnected to a new backend
-    let lost = false;
-    for (let i = 0; i < 3 && !lost; i++) lost = !(await held.held().catch(() => false));
-    expect(lost).toBe(true);
-    expect(await a.project(p.id).locks.trySession('other')).toBeTypeOf('function'); // the new session works
-    await got!();
-    await a.close();
-    await b.close();
-  });
-});
+// Two processes contending needs two real sessions: session.integration.test.ts.

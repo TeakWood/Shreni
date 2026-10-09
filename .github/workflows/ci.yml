@@ -39,6 +39,23 @@ jobs:
       - run: pnpm build
       - run: pnpm test
 
+  # The task graph engine's concurrency tier (engine spec, "Testing"): real
+  # Postgres through Testcontainers (Docker is on ubuntu-latest), covering
+  # SKIP LOCKED contention, fencing, sibling completions, retried claims,
+  # session locks, event order and the races the PGlite unit tier can't reach.
+  engine-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:integration
+
   # Tier 1 — hermetic bd+git integration (Shreni-beads-k3n.3). Runs the harness
   # that mocks nothing at the bd/git seam, so it needs the real bd binary on
   # PATH and a git identity for the fixture commits. gh is pre-installed on

@@ -82,8 +82,10 @@ type EventRow = {
   actor: string; actor_role: string; from_state: string | null; to_state: string | null; payload: Record<string, unknown>;
   request_id: string | null; at: Date;
 };
-const EVENT_COLUMNS = sql.raw(`id::text as id, project_id, task_id, plan_id, attempt_id, kind, actor, actor_role,
-  from_state, to_state, payload, request_id, at`);
+// Qualified, and read through the alias e: `id::text as id` would otherwise
+// make `order by id` sort the text, putting '10' before '9'.
+const EVENT_COLUMNS = sql.raw(`e.id::text as id, e.project_id, e.task_id, e.plan_id, e.attempt_id, e.kind, e.actor,
+  e.actor_role, e.from_state, e.to_state, e.payload, e.request_id, e.at`);
 const toEvent = (r: EventRow): TaskGraphEvent => ({
   id: r.id, projectId: r.project_id, taskId: r.task_id, planId: r.plan_id, attemptId: r.attempt_id, kind: r.kind,
   actor: r.actor, actorRole: r.actor_role, fromState: r.from_state, toState: r.to_state, payload: r.payload,
@@ -175,8 +177,8 @@ export function readsApi(tg: ProjectHandle) {
       const conn = await db();
       await loadTask(conn, projectId, id);
       const r = await sql<EventRow>`
-        select ${EVENT_COLUMNS} from taskgraph.events
-         where project_id = ${projectId} and task_id = ${id} order by id`.execute(conn);
+        select ${EVENT_COLUMNS} from taskgraph.events e
+         where e.project_id = ${projectId} and e.task_id = ${id} order by e.id`.execute(conn);
       return r.rows.map(toEvent);
     },
 
@@ -241,9 +243,9 @@ export function readsApi(tg: ProjectHandle) {
       if (!CURSOR.test(cursor) || BigInt(cursor) > MAX_BIGINT) throw new InvalidRequest(`an event cursor is an event id, not ${JSON.stringify(cursor)}`);
       if (!(Number.isInteger(limit) && limit > 0)) throw new InvalidRequest(`limit must be a positive whole number, not ${limit}`);
       const r = await sql<EventRow>`
-        select ${EVENT_COLUMNS} from taskgraph.events
-         where project_id = ${projectId} and id > cast(cast(${cursor} as text) as bigint)
-         order by id limit ${limit}`.execute(await db());
+        select ${EVENT_COLUMNS} from taskgraph.events e
+         where e.project_id = ${projectId} and e.id > cast(cast(${cursor} as text) as bigint)
+         order by e.id limit ${limit}`.execute(await db());
       return r.rows.map(toEvent);
     },
   };

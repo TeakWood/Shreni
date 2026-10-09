@@ -225,3 +225,25 @@ describe('review follow-ups', { timeout: 30_000 }, () => {
     expect(ids(await tg2.tasks.subtree(mine.id))).toEqual([`${mine.id}.1`]);
   });
 });
+
+describe('event order past nine events', { timeout: 30_000 }, () => {
+  it('pages and histories follow the numeric id, not its text', async () => {
+    const e = await openEngine();
+    const t = await e.as('system').tasks.create({ title: 't' });
+    for (let i = 0; i < 12; i++) await e.as('developer').notes.add(t.id, `n${i}`);
+    const ids: string[] = [];
+    let cursor = '0';
+    for (;;) {
+      const page = await e.tg.events.since(cursor, 5);
+      if (!page.length) break;
+      ids.push(...page.map(x => x.id));
+      cursor = page[page.length - 1].id;
+    }
+    const numeric = [...ids].sort((a, b) => Number(a) - Number(b));
+    expect(ids).toEqual(numeric);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBeGreaterThanOrEqual(14);
+    const h = (await e.tg.tasks.history(t.id)).map(x => x.id);
+    expect(h).toEqual([...h].sort((a, b) => Number(a) - Number(b)));
+  });
+});
