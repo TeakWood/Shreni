@@ -58,7 +58,7 @@ Every caller goes through Shreni's policy layer, which owns the lifecycle defini
 | Owned by the engine | Owned by Shreni |
 | --- | --- |
 | Tables: projects, plans, tasks, dependencies, links, attempts, events | Tables: project details, intents, acceptance checks, memories, attempt evidence |
-| Readiness: dependencies satisfied, approved, not held, every container above it claimable; claim order: boosted first, then priority, then age | What "ready" means beyond that: which moves boost, scope filters |
+| Readiness: dependencies satisfied, approved, not held, every container above it claimable with its own dependencies satisfied; claim order: boosted first, then priority, then age | What "ready" means beyond that: which moves boost, scope filters |
 | Enforcing declared transitions atomically | Declaring the states and transitions, and their guards |
 | Leases, fencing tokens, expiry | Lease duration, heartbeat cadence, what happens on expiry |
 | Running validators inside approval | Writing the validators and their config |
@@ -344,7 +344,7 @@ declare function defineLifecycle(def: Lifecycle): Lifecycle;   // checked with z
 
 **Containers.** A task of kind `container` (an epic, for Shreni) groups work. It is never claimed; its state changes only through moves the caller fires. Three rules keep a container and its children consistent:
 
-- **A container holds its subtree.** A work task is claimable only while every container above it is in the claimable state, so parking or blocking a container takes its whole subtree out of the queue.
+- **A container holds its subtree.** A work task is claimable only while every container above it is in the claimable state with its own dependencies satisfied, so parking or blocking a container, or making it wait on unfinished work, takes its whole subtree out of the queue. An epic that waits on another epic therefore waits with all its tasks, as it does in beads.
 - **A container can't close over live children.** A move into a terminal state is refused while any child is non-terminal. A task can't be created or reparented under a container that is already terminal.
 - **Settling is checked under the parent's lock.** Creating, deleting or reparenting a child, or moving one into a terminal state, first locks the parent row. Siblings therefore change one at a time, and the transaction that settles the last child sees all the others and emits `children.settled`. `tasks.settled()` lists containers in the claimable state whose children have all settled, for a caller that was down when the event fired.
 
@@ -438,7 +438,7 @@ These hold no matter how many workers run or what order their calls arrive in. E
 | Only declared moves happen | Transaction, then a trigger | `UPDATE … SET state = $to WHERE state = ANY($from) RETURNING`; zero rows means the move is refused, which also catches races. A trigger on the engine's tables refuses an undeclared change from any client, and the delete of a task that has left `create.state` outside a purge |
 | New tasks start where the lifecycle says | Transaction, then a trigger | `tasks.create` takes the state from the create rules, never the caller; the trigger refuses an insert in any other state outside an import |
 | Only processes that may write, write | Trigger | Each write sets its engine and lifecycle versions with `set local`; the trigger refuses a lifecycle mismatch, or an engine older than the schema's `min_writer`, with `VersionMismatch` |
-| Only ready work is claimed | Claim query | Claimable state, kind `work`, every dependency in a dependency-satisfying state, every container above it in the claimable state, not held, not leased |
+| Only ready work is claimed | Claim query | Claimable state, kind `work`, every dependency in a dependency-satisfying state, every container above it in the claimable state with its own dependencies satisfied, not held, not leased |
 | At most one live lease per task | Claim query | Row lock with `SKIP LOCKED`, then a compare-and-set on the lease columns; a check constraint keeps the lease's attempt and expiry paired |
 | A lease exists only in the leased state | Transaction, then a trigger | Any move out of the leased state, fenced or not, ends the attempt with that move as its outcome and clears the lease; the trigger refuses a lease on a task in any other state |
 | A worker whose lease lapsed can't write | Transaction | Every leased call carries its attempt id, which is the fencing token: `WHERE lease_attempt_id = $attemptId` |
@@ -451,7 +451,7 @@ These hold no matter how many workers run or what order their calls arrive in. E
 | Terminal states are final | Lifecycle registration | A lifecycle with a move out of a terminal state is refused |
 | Containers are never claimed | Claim query | `kind = 'work'` in the claim predicate |
 
-**The cycle check.** A new edge "A depends on B" creates a cycle exactly when B already depends, directly or transitively, on A. Inside the lock, the engine walks B's dependencies:
+**The cycle check.** A new edge "A depends on B" is refused with `CycleError` when one of A and B contains the other, since a container settles only after its children, and a reparent is refused the same way when a dependency would join the moved subtree to its new ancestors; an import refuses such an edge too. Otherwise it creates a cycle exactly when B already depends, directly or transitively, on A. Inside the lock, the engine walks B's dependencies:
 
 ```sql
 select pg_advisory_xact_lock($depsNamespace, hashtext($project));   -- two-key form: each lock kind has its own namespace
@@ -616,7 +616,7 @@ with next as (
            on dep.project_id = d.project_id and dep.id = d.depends_on_id
         where d.project_id = t.project_id and d.task_id = t.id
           and dep.state <> all ($satisfying))
-     and not exists (                           -- every container above it in the claimable state
+     and not exists (                           -- every container above it claimable, its own dependencies satisfied
        with recursive up as (
          select p.id, p.parent_id, p.state
            from taskgraph.tasks p
@@ -626,7 +626,12 @@ with next as (
            from taskgraph.tasks p join up on p.id = up.parent_id
           where p.project_id = t.project_id
        )
-       select 1 from up where up.state <> $claimable)
+       select 1 from up
+        where up.state <> $claimable
+           or exists (select 1 from taskgraph.task_deps d
+                        join taskgraph.tasks dep on dep.project_id = d.project_id and dep.id = d.depends_on_id
+                       where d.project_id = t.project_id and d.task_id = up.id
+                         and dep.state <> all ($satisfying)))
    order by t.boosted desc, t.priority, t.created_at
    for update of t skip locked
    limit 1
@@ -723,7 +728,7 @@ Heartbeats update the task row but write no event; they would swamp the log.
 
 Three calls work on a whole project: bringing data in, taking a copy out, and removing it.
 
-- **`projects.import(bundle)`** creates a project and loads it in one transaction: plans; tasks with their own ids, states, origins, timestamps, boost, hold and leases; dependencies, through the cycle check; links; attempts; and past events with their original `at` and order, such as notes and close reasons, followed by its own `project.imported`. The project keeps the bundle's id when it has one, so a restore leaves the repo's Shreni config pointing at it; the bundle must be on the importing process's lifecycle version. Tasks keep the bundle's origins, so a restore is exact; Shreni's beads importer gives its tasks origin `imported` when it builds the bundle. It refuses a bundle no engine path could produce: duplicate rows, references to rows it lacks, parent loops, a leased state without its one open attempt as lease, live children under a terminal container, or live tasks waiting on work that can't satisfy them. It bypasses the create rules and moves, since the trigger allows an insert in any declared state while importing (never a state change), and sets each parent's `next_child` past its highest imported child. An optional callback runs inside the same transaction, so the caller can write its own rows with it, as Shreni does for memories. It takes only the engine's own bundle; Shreni's importer turns beads into one first, so the engine never learns the beads format.
+- **`projects.import(bundle)`** creates a project and loads it in one transaction: plans; tasks with their own ids, states, origins, timestamps, boost, hold and leases; dependencies, through the cycle check; links; attempts; and past events with their original `at` and order, such as notes and close reasons, followed by its own `project.imported`. The project keeps the bundle's id when it has one, so a restore leaves the repo's Shreni config pointing at it; the bundle must be on the importing process's lifecycle version. Tasks keep the bundle's origins, so a restore is exact; Shreni's beads importer gives its tasks origin `imported` when it builds the bundle. It refuses a bundle no engine path could produce: duplicate rows, references to rows it lacks, parent loops, a leased state without its one open attempt as lease, live children under a terminal container, live tasks waiting on work that can't satisfy them, or a dependency between a task and a container above it. It bypasses the create rules and moves, since the trigger allows an insert in any declared state while importing (never a state change), and sets each parent's `next_child` past its highest imported child. An optional callback runs inside the same transaction, so the caller can write its own rows with it, as Shreni does for memories. It takes only the engine's own bundle; Shreni's importer turns beads into one first, so the engine never learns the beads format.
 - **`projects.export(id)`** returns the same bundle for one project, every row and event, read in one snapshot; an optional callback runs inside that snapshot, so the caller reads its own rows as of the same moment, as Shreni does for its tables. The bundle survives JSON, and keeps times to the millisecond, so a project can be snapshotted, moved to another database, or restored with purge and import.
 - **`projects.purge(id)`** deletes every row of a project, events included, in one transaction, after the caller types the project's name back. It is the only way past the events trigger: it sets a session flag naming the project, and the trigger then allows deletes of that project's rows only. Its record goes to `purges`, since the project's own events go with it.
 

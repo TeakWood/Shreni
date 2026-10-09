@@ -14,20 +14,24 @@ export const claimableState = (lifecycle: Lifecycle) =>
 
 /**
  * True for a ready task `t`: claimable state, kind work, not held, every
- * dependency satisfied, and every container above it in the claimable state.
+ * dependency satisfied, and every container above it in the claimable state
+ * with its own dependencies satisfied.
  */
 export function readyWhere(lifecycle: Lifecycle): RawBuilder<boolean> {
   const claimable = claimableState(lifecycle);
+  const satisfying = textArray(satisfyingStates(lifecycle));
+  /** Whether the task `who` waits on work in a state that doesn't satisfy it. */
+  const waits = (who: string) => sql`exists (
+      select 1
+        from taskgraph.task_deps d
+        join taskgraph.tasks dep on dep.project_id = d.project_id and dep.id = d.depends_on_id
+       where d.project_id = t.project_id and d.task_id = ${sql.ref(who)}
+         and dep.state <> all (${satisfying}))`;
   return sql<boolean>`(
     t.state = ${claimable}
     and t.kind = 'work'
     and (t.hold_until is null or t.hold_until <= taskgraph.now())
-    and not exists (
-      select 1
-        from taskgraph.task_deps d
-        join taskgraph.tasks dep on dep.project_id = d.project_id and dep.id = d.depends_on_id
-       where d.project_id = t.project_id and d.task_id = t.id
-         and dep.state <> all (${textArray(satisfyingStates(lifecycle))}))
+    and not ${waits('t.id')}
     and not exists (
       with recursive up as (
         select p.id, p.parent_id, p.state
@@ -38,7 +42,7 @@ export function readyWhere(lifecycle: Lifecycle): RawBuilder<boolean> {
           from taskgraph.tasks p join up on p.id = up.parent_id
          where p.project_id = t.project_id
       )
-      select 1 from up where up.state <> ${claimable}))`;
+      select 1 from up where up.state <> ${claimable} or ${waits('up.id')}))`;
 }
 
 /** Claim order: boosted first, then priority, then age. */

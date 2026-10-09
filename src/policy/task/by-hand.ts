@@ -57,7 +57,15 @@ export async function claimByHand(tg: ProjectHandle, me: ActorHandle, id: string
   const waiting = t.deps.filter(d => !finished(d.state));
   if (waiting.length) throw new InvalidRequest(`${id} waits on ${waiting.map(d => `${d.id} (${d.state})`).join(', ')}`);
   if (t.holdUntil && new Date(t.holdUntil) > new Date()) throw new InvalidRequest(`${id} is held until ${new Date(t.holdUntil).toISOString()}`);
-  throw new InvalidRequest(`${id} isn't ready: its epic may be held, or a worker claimed it first`);
+  // A container above it that is held, or waits on unfinished work, holds it too.
+  for (let p = t.parentId; p;) {
+    const c = await tg.tasks.get(p);
+    if (!CLAIMABLE.includes(c.state)) throw new InvalidRequest(`${id} is under ${c.id}, which is ${c.state}`);
+    const w = c.deps.filter(d => !finished(d.state));
+    if (w.length) throw new InvalidRequest(`${id} is under ${c.id}, which waits on ${w.map(d => `${d.id} (${d.state})`).join(', ')}`);
+    p = c.parentId;
+  }
+  throw new InvalidRequest(`${id} isn't ready: a worker may have claimed it first`);
 }
 
 /**

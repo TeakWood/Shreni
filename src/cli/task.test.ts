@@ -253,6 +253,16 @@ describe('shreni task by hand: claim, finish, release, cancel, approve, upgrade'
     expect((await tg.tasks.get(a.id)).state).toBe('claimed');
   });
 
+  it('a claim under an epic that waits on unfinished work says which epic, and on what', async () => {
+    const { tg, run } = await setup();
+    const sys = tg.as({ id: 's', role: 'system' });
+    const first = await sys.tasks.create({ title: 'first' });
+    const epic = await sys.tasks.create({ title: 'epic', kind: 'container' });
+    const a = await sys.tasks.create({ title: 'a', parent: epic.id });
+    await tg.as({ id: ME, role: 'developer' }).deps.add(epic.id, first.id);
+    await expect(run('claim', a.id)).rejects.toThrow(new RegExp(`${a.id} is under ${epic.id}, which waits on ${first.id} \\(open\\)`));
+  });
+
   it('given a shell that isn\'t interactive, when approve runs, then it refuses', async () => {
     const { tg, run } = await setup();
     const t = await tg.as({ id: ME, role: 'developer' }).tasks.create({ title: 'lone' });

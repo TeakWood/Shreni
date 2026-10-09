@@ -80,6 +80,19 @@ const ran = (what: string) => RAN.set(what, (RAN.get(what) ?? 0) + 1);
 const edge = (a: string, b: string) => `${a}>${b}`;
 const pick = (m: Model, i: number) => m.tasks[i % m.tasks.length];
 const children = (m: Model, id: string) => m.tasks.filter(t => t.parent === id);
+/** The task and every container above it. */
+const upFrom = (m: Model, id: string | null) => {
+  const out = new Set<string>();
+  for (let p = id; p; p = m.tasks.find(x => x.id === p)!.parent) out.add(p);
+  return out;
+};
+/** The task and everything below it. */
+const downFrom = (m: Model, id: string): Set<string> => new Set([id, ...children(m, id).flatMap(c => [...downFrom(m, c.id)])]);
+/** Whether a dependency joins a set of tasks to another, either way. */
+const joins = (m: Model, a: Set<string>, b: Set<string>) => [...m.deps].some(e => {
+  const [x, y] = e.split('>');
+  return (a.has(x) && b.has(y)) || (b.has(x) && a.has(y));
+});
 const dependents = (m: Model, id: string) => m.tasks.filter(t => m.deps.has(edge(t.id, id)));
 
 /** Does b already reach a through dependencies (so a -> b would close a cycle)? */
@@ -98,13 +111,16 @@ function reaches(m: Model, from: string, to: string): boolean {
 
 function modelReady(m: Model): string[] {
   const byId = new Map(m.tasks.map(t => [t.id, t]));
+  const depsSatisfied = (t: MTask) => m.tasks.every(d => !m.deps.has(edge(t.id, d.id)) || SATISFIES.has(d.state));
+  // A container waiting on unfinished work holds its subtree, as a parked one does.
   const ancestorsClaimable = (t: MTask) => {
-    for (let p = t.parent; p; p = byId.get(p)!.parent) if (byId.get(p)!.state !== CLAIMABLE) return false;
+    for (let p = t.parent; p; p = byId.get(p)!.parent) {
+      if (byId.get(p)!.state !== CLAIMABLE || !depsSatisfied(byId.get(p)!)) return false;
+    }
     return true;
   };
   return m.tasks
-    .filter(t => t.state === CLAIMABLE && t.kind === 'work' && !t.held && ancestorsClaimable(t)
-      && m.tasks.every(d => !m.deps.has(edge(t.id, d.id)) || SATISFIES.has(d.state)))
+    .filter(t => t.state === CLAIMABLE && t.kind === 'work' && !t.held && ancestorsClaimable(t) && depsSatisfied(t))
     .sort((a, b) => Number(b.boosted) - Number(a.boosted) || a.priority - b.priority || a.createdAt - b.createdAt)
     .map(t => t.id);
 }
@@ -161,6 +177,8 @@ class Edit implements fc.AsyncCommand<Model, Real> {
       let inside = false;
       for (let p: string | null = parent.id; p; p = m.tasks.find(x => x.id === p)!.parent) if (p === t.id) inside = true;
       if (inside || (TERMINAL.has(parent.state) && !TERMINAL.has(t.state))) refusal = InvalidRequest;
+      // nor may a dependency join the moved subtree to its new ancestors
+      else if (joins(m, upFrom(m, parent.id), downFrom(m, t.id))) refusal = CycleError;
     }
     const out = await expectOutcome(r.tg.as({ id: this.role, role: this.role }).tasks.update(t.id, {
       priority: this.priority,
@@ -186,7 +204,7 @@ class AddDep implements fc.AsyncCommand<Model, Real> {
     const b = pick(m, this.b);
     // the engine checks the target's state before the cycle
     const refusal = TERMINAL.has(b.state) && !SATISFIES.has(b.state) ? InvalidRequest
-      : a.id === b.id || reaches(m, b.id, a.id) ? CycleError : null;
+      : a.id === b.id || reaches(m, b.id, a.id) || upFrom(m, a.id).has(b.id) || upFrom(m, b.id).has(a.id) ? CycleError : null;
     await expectOutcome(r.tg.as({ id: 'dev', role: 'developer' }).deps.add(a.id, b.id), refusal);
     if (!refusal) m.deps.add(edge(a.id, b.id));
   }

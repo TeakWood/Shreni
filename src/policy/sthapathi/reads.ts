@@ -146,7 +146,10 @@ export function engineReads(shreni: ShreniClient, tg: ProjectHandle): TrackerRea
       labels: labelsOf(t),
       ...(t.parentId ? { parent: t.parentId } : {}),
       ...(notes.has(t.id) ? { notes: notes.get(t.id) } : {}),
-      ...(acceptance.has(t.id) ? { acceptance_criteria: acceptance.get(t.id) } : {}),
+      // Checks when it has them; an imported task keeps beads' free text in its spec.
+      ...(acceptance.has(t.id) ? { acceptance_criteria: acceptance.get(t.id) }
+        : typeof t.spec.acceptanceCriteria === 'string' ? { acceptance_criteria: t.spec.acceptanceCriteria } : {}),
+      ...(typeof t.spec.design === 'string' ? { design: t.spec.design } : {}),
       created_at: t.createdAt.toISOString(), updated_at: t.updatedAt.toISOString(),
       ...(t.closedAt ? { closed_at: t.closedAt.toISOString() } : {}),
       ...(closeReason.has(t.id) ? { close_reason: closeReason.get(t.id) } : {}),

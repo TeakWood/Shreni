@@ -148,6 +148,15 @@ function checkGraph(b: ProjectBundle, lifecycle: Lifecycle): void {
   };
   for (const n of out.keys()) if (!state.has(n)) visit(n);
 
+  // A dependency between a task and a container above it never settles.
+  for (const d of b.deps) {
+    for (const [x, y] of [[d.taskId, d.dependsOnId], [d.dependsOnId, d.taskId]]) {
+      for (let p = parent.get(x); p; p = parent.get(p)) {
+        if (p === y) throw new CycleError(d.taskId, d.dependsOnId, 'one contains the other, and a container settles only after its children');
+      }
+    }
+  }
+
   // Leases: a task is in the leased state exactly when it holds a lease, and
   // the lease is its one open attempt.
   const flags = (s: string) => lifecycle.states[s] ?? {};

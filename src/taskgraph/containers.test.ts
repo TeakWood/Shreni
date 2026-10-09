@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { openEngine, type TestEngine } from './test/engine';
-import { InvalidRequest, MoveRefused } from './errors';
+import { CycleError, InvalidRequest, MoveRefused } from './errors';
 
 // Containers and dependents (engine spec, "Containers" and "Cancelled work
 // doesn't strand its dependents").
@@ -27,6 +27,38 @@ describe('ready()', { timeout: 30_000 }, () => {
     expect(ids(await e.tg.ready())).toEqual([loose.id]);
     await e.as('developer').move(epic.id, 'unpark');
     expect(ids(await e.tg.ready()).sort()).toEqual([a.id, b.id, loose.id].sort());
+  });
+
+  it('lists none of the subtree of a container that waits on unfinished work', async () => {
+    const e = await openEngine();
+    const sys = e.as('system');
+    const first = await sys.tasks.create({ title: 'first' });
+    const epic = await sys.tasks.create({ title: 'epic', kind: 'container' });
+    const sub = await sys.tasks.create({ title: 'sub', kind: 'container', parent: epic.id });
+    const a = await sys.tasks.create({ title: 'a', parent: sub.id });
+    await e.as('developer').deps.add(epic.id, first.id);
+    expect(ids(await e.tg.ready())).toEqual([first.id]);
+    // The claim query uses the same predicate: it takes the blocker, then nothing.
+    const c = await e.as('orchestrator').claim({ worker: 'w/1', leaseMs: 3_600_000 });
+    expect(c?.task.id).toBe(first.id);
+    expect(await e.as('orchestrator').claim({ worker: 'w/2', leaseMs: 3_600_000 })).toBeNull();
+
+    await e.as('developer').move(first.id, 'finish');
+    expect(ids(await e.tg.ready())).toEqual([a.id]);
+  });
+
+  it('refuse a dependency between a task and a container above it, and a reparent that would make one', async () => {
+    const e = await openEngine();
+    const sys = e.as('system');
+    const dev = e.as('developer');
+    const epic = await sys.tasks.create({ title: 'epic', kind: 'container' });
+    const sub = await sys.tasks.create({ title: 'sub', kind: 'container', parent: epic.id });
+    const a = await sys.tasks.create({ title: 'a', parent: sub.id });
+    const loose = await sys.tasks.create({ title: 'loose' });
+    await expect(dev.deps.add(epic.id, a.id)).rejects.toThrow(/one contains the other/);
+    await expect(dev.deps.add(a.id, epic.id)).rejects.toBeInstanceOf(CycleError);
+    await dev.deps.add(epic.id, loose.id);
+    await expect(dev.tasks.update(loose.id, { parent: sub.id })).rejects.toThrow(/moving .* under .* would put one inside the other/);
   });
 
   it('leaves out containers, held tasks and tasks with unsatisfied dependencies, in claim order', async () => {

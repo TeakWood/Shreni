@@ -2,7 +2,7 @@ import { sql, type Kysely, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import type { ActorHandle } from './client';
 import { newTaskId, nextChildId } from './ids';
-import { InvalidRequest, NotFound } from './errors';
+import { CycleError, InvalidRequest, NotFound } from './errors';
 import { assertParentOpen, containerSettled, isTerminal, lockWithParent } from './containers';
 import { LOCK_NAMESPACE } from './locks';
 import { jsonb, textArray, timestamp } from './sql-values';
@@ -260,6 +260,28 @@ export function tasksApi(as: ActorHandle) {
               )
               select exists (select 1 from up where id = ${id}) as hit`.execute(db);
             if (loop.rows[0].hit) throw new InvalidRequest(`task ${patch.parent} is inside ${id}'s subtree`);
+            // Nor may a dependency join the moved subtree to its new ancestors:
+            // a container waiting on its own descendant, or the reverse, never settles.
+            const joined = await sql<{ task_id: string; depends_on_id: string }>`
+              with recursive up(id, parent_id) as (
+                select id, parent_id from taskgraph.tasks where project_id = ${projectId} and id = ${patch.parent}
+                union
+                select t.id, t.parent_id from taskgraph.tasks t join up on t.id = up.parent_id
+                 where t.project_id = ${projectId}
+              ), down(id) as (
+                select ${id}::text
+                union
+                select t.id from taskgraph.tasks t join down on t.parent_id = down.id
+                 where t.project_id = ${projectId}
+              )
+              select d.task_id, d.depends_on_id from taskgraph.task_deps d
+               where d.project_id = ${projectId}
+                 and ((d.task_id in (select id from up) and d.depends_on_id in (select id from down))
+                   or (d.task_id in (select id from down) and d.depends_on_id in (select id from up)))
+               limit 1`.execute(db);
+            if (joined.rows[0]) {
+              throw new CycleError(joined.rows[0].task_id, joined.rows[0].depends_on_id, `moving ${id} under ${patch.parent} would put one inside the other`);
+            }
           }
           change('parent', 'parent_id', task.parentId, patch.parent, patch.parent);
         }

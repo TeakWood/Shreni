@@ -104,7 +104,7 @@ An epic is a task of kind `container`: never claimed, and moved only by Shreni o
 - **Sthapathi doesn't rely on the event.** On start and on each poll it also asks the engine for containers whose children have all settled (`tasks.settled()`), so an event that fired while it was stopped still closes the epic.
 - **All children cancelled.** `childrenSettled` refuses, and Sthapathi flags the epic for the developer, who cancels it or files new work under it. Completing it would mark it done and release its dependents with nothing built.
 - **The intent check fails.** Sthapathi flags the epic, and the intent goes back to planning with the failing checks attached.
-- **Parking or blocking an epic holds its children.** The engine claims a task only while every container above it is in the claimable state, so `park` on an epic takes its whole subtree out of the queue and `unpark` puts it back.
+- **Parking or blocking an epic holds its children.** The engine claims a task only while every container above it is in the claimable state with its own dependencies satisfied, so `park` on an epic takes its whole subtree out of the queue and `unpark` puts it back, and an epic that waits on another epic waits with all its tasks.
 - **Cancelling an epic with live children** is refused by the engine. `shreni task cancel <epic> --with-children` cancels every non-terminal child, waiting tasks before the ones they wait on, and then the epic, in one transaction.
 - **Cancelling a task that others wait on** is refused too, naming the waiting tasks, because nothing would ever release them. `shreni task cancel <id> --drop-deps` removes those edges in the same transaction, so the waiting tasks go ahead without it.
 

@@ -226,6 +226,14 @@ describe('review follow-ups', { timeout: 30_000 }, () => {
       attempts: bundle.attempts.map(x => ({ ...x, endedAt: new Date(), outcome: 'cancel' })) }), /waits on/);
   });
 
+  it('refuses a dependency between a task and a container above it', async () => {
+    const { bundle, epic, imp } = await exported();
+    const child = bundle.tasks.find(t => t.parentId === epic.id)!;
+    const err = await imp({ ...bundle, deps: [...bundle.deps, { taskId: epic.id, dependsOnId: child.id }] }).catch(x => x);
+    expect(err).toBeInstanceOf(CycleError);
+    expect(err.message).toMatch(/one contains the other/);
+  });
+
   it('refuses duplicates inside the bundle, naming them', async () => {
     const { bundle, imp } = await exported();
     await refused(imp({ ...bundle, deps: [...bundle.deps, ...bundle.deps] }), /repeats/);

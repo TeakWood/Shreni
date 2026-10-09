@@ -10,8 +10,8 @@ export class TaskGraphError extends Error {
 
 /** Adding the edge would close a cycle: dependsOnId already waits, directly or not, on taskId. */
 export class CycleError extends TaskGraphError {
-  constructor(readonly taskId: string, readonly dependsOnId: string) {
-    super('CycleError', `${taskId} can't depend on ${dependsOnId}: ${dependsOnId} already depends on ${taskId}`);
+  constructor(readonly taskId: string, readonly dependsOnId: string, why?: string) {
+    super('CycleError', `${taskId} can't depend on ${dependsOnId}: ${why ?? `${dependsOnId} already depends on ${taskId}`}`);
   }
 }
 

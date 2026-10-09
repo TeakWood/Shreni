@@ -36,6 +36,20 @@ export function depsApi(as: ActorHandle) {
           )
           select exists (select 1 from reach where id = ${taskId}) as creates_cycle`.execute(db);
         if (reach.rows[0].creates_cycle) throw new CycleError(taskId, dependsOnId);
+        // A container finishes only once its children settle, so a dependency
+        // between a task and its own ancestor can never be satisfied either.
+        const nested = await sql<{ hit: boolean }>`
+          with recursive up(id, parent_id, start) as (
+            select id, parent_id, id from taskgraph.tasks
+             where project_id = ${projectId} and id in (${taskId}, ${dependsOnId})
+            union
+            select t.id, t.parent_id, up.start from taskgraph.tasks t join up on t.id = up.parent_id
+             where t.project_id = ${projectId}
+          )
+          select exists (
+            select 1 from up where (start = ${taskId} and id = ${dependsOnId}) or (start = ${dependsOnId} and id = ${taskId})
+          ) as hit`.execute(db);
+        if (nested.rows[0].hit) throw new CycleError(taskId, dependsOnId, 'one contains the other, and a container settles only after its children');
         const added = await sql`
           insert into taskgraph.task_deps (project_id, task_id, depends_on_id) values (${projectId}, ${taskId}, ${dependsOnId})
           on conflict do nothing returning 1`.execute(db);
