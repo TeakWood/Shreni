@@ -352,12 +352,13 @@ the target repo root clean.
 
 - **Absolute paths only.** `repo.path` and `beads.path` are used verbatim as the
   cwd for git and exec — the loader does **not** expand `~` or resolve relative
-  paths. `init` writes absolute paths; `migrate` absolutizes them.
+  paths. `init` writes absolute paths.
 - **Resolution.** `shreni register <dir>` prefers `<dir>/.shreni/kshetra.yaml` and
   falls back to a legacy root `<dir>/kshetra.yaml`.
-- **Migrating a legacy layout.** If a project still has a root `kshetra.yaml`, run
-  `shreni migrate <dir>` to move it into `.shreni/`, absolutize its paths,
-  re-register it, and remove the root file. It is idempotent — safe to re-run.
+- **Moving off beads.** `shreni migrate <kshetra>` moves a Kshetra still on beads
+  onto the task graph engine: a dry run, a confirmation and a database dump come
+  first, and `shreni migrate <kshetra> --undo` puts it back until the first new
+  write. It is safe to re-run.
 
 ### Merge policy (push vs pr)
 

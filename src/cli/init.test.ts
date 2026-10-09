@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, onTestFinished } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import * as yaml from 'js-yaml';
@@ -321,6 +321,53 @@ describe('the Database and Project phases on the database', { timeout: PGLITE_TI
     expect(await projectMode(shreni, id)).toBe('tracker');
     expect(await engine.project({ database: 'local', existing: id, repoUrl: '' })).toBe(id);
     expect(out.join('\n')).toMatch(/registered project notes \(.*\) as a tracker[\s\S]*found project notes/);
+  });
+
+  it('the Import phase: a repo with beads and no project yet moves its beads over instead of starting empty', async () => {
+    const t = await createTestDb();
+    const shreni = await openShreni({ db: t.db, lifecycle: taskLifecycle });
+    onTestFinished(async () => { await shreni.close(); await t.close(); });
+    await shreni.migrate();
+    const r = repo();
+    const beads = mkdtempSync(join(tmpdir(), 'shreni-init-beads-'));
+    copyFileSync(join(__dirname, '..', 'policy', 'migrate', 'fixtures', 'shreni-beads.jsonl'), join(beads, 'issues.jsonl'));
+    symlinkSync(beads, join(r, '.beads'));
+    writeFileSync(join(r, '.gitignore'), '.beads\n');
+    mkdirSync(join(r, '.shreni'));
+    const config = join(r, '.shreni', 'tracker.yaml');
+    writeFileSync(config, 'name: shreni\n');
+    const out: string[] = [];
+    const dumps: string[] = [];
+    const engine = initEngine(
+      { interactive: () => false, ask: async () => { throw new Error('not asked'); }, print: l => out.push(l) },
+      { name: 'shreni', mode: 'tracker' },
+      {
+        probe, open: async () => ({ shreni, close: async () => {} }), env: {},
+        exportBeads: async () => false, dump: async db => { dumps.push(db); return 'dumped'; }, manifestsDir: join(r, 'm'),
+      },
+    );
+    // Without a terminal the import needs its confirmation, so it stops before writing.
+    await expect(engine.project({ database: 'local', repoUrl: '', beads: { dir: join(r, '.beads'), repo: r, configPath: config } }))
+      .rejects.toThrow(/needs a confirmation/);
+    expect(await shreni.tg.projects.list()).toEqual([]);
+
+    const yes = initEngine(
+      { interactive: () => true, ask: async () => 'y', print: l => out.push(l) },
+      { name: 'shreni', mode: 'tracker' },
+      {
+        probe, open: async () => ({ shreni, close: async () => {} }), env: {},
+        exportBeads: async () => false, dump: async db => { dumps.push(db); return 'dumped'; }, manifestsDir: join(r, 'm'),
+      },
+    );
+    const id = await yes.project({ database: 'local', repoUrl: '', beads: { dir: join(r, '.beads'), repo: r, configPath: config } });
+    expect(dumps).toEqual(['local']);
+    expect(await projectMode(shreni, id)).toBe('tracker');
+    expect((await shreni.tg.project(id).tasks.list({ limit: 1000 })).length).toBe(457);
+    expect(readFileSync(config, 'utf8')).toBe(`name: shreni\nproject: ${id}\ndatabase: local\n`);
+    expect(existsSync(join(r, '.beads'))).toBe(false);
+    expect(out.join('\n')).toMatch(/held by parked epic/);
+    // Init keeps no record to undo: the config names the project, and the dump is the way back.
+    expect(existsSync(join(r, 'm')) ? readdirSync(join(r, 'm')) : []).toEqual([]);
   });
 
   it('an existing database with pending migrations refuses a run that can\'t ask', async () => {

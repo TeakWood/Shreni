@@ -23,7 +23,7 @@ import { runRestore } from './restore';
 import { runSnapshots } from './snapshots';
 import { runSync } from './sync';
 import { runRegister } from './register';
-import { runMigrate } from './migrate';
+import { runMigrateCommand, MIGRATE_USAGE, migrateKshetra, defaultMigrateDeps } from './migrate';
 import { verifyHooks } from './verify-hooks';
 import { runList } from './list';
 import { startPhalaka, stopPhalaka, statusPhalaka } from './phalaka';
@@ -37,6 +37,7 @@ import { runTelemetry } from './telemetry';
 import { runTask, TASK_USAGE } from './task';
 import { runPlan, PLAN_USAGE } from './plan';
 import { runDb, DB_USAGE, ensureMigrated, migrateDeps } from './db';
+import { onBeads } from '../policy/migrate/kshetra';
 import { parseLabels } from './labels';
 import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -118,7 +119,27 @@ export const COMMANDS: Command[] = [
       for (const k of targets) {
         if (k.project) await ensureMigrated(k, migrateDeps());
       }
-      for (const k of targets) {
+      // A Kshetra still on beads is moved first (migration plan, "Upgrading a Kshetra"):
+      // offered in a terminal; a detached start refuses and prints the command.
+      // One left on beads doesn't stop the others; a worker already running is left as it is.
+      const left = new Map<string, string>();
+      const m = defaultMigrateDeps();
+      for (const k of targets.filter(k => onBeads(k) && !m.workerRunning(k.id))) {
+        if (!m.interactive()) {
+          left.set(k.id, `${k.id} is still on beads; run shreni migrate ${k.id}`);
+          continue;
+        }
+        console.log(`${k.id} is still on beads. Migrating imports its tasks into the database after a dry run and a dump, then removes the .beads link and writes Shreni's block in its instruction file.`);
+        // The dry run is shown, then the question; a no leaves it on beads, and not started.
+        try {
+          await migrateKshetra(k.id, m);
+        } catch (err) {
+          left.set(k.id, `${k.id}: not started: ${(err as Error).message}`);
+        }
+      }
+      if (left.size && targets.every(k => left.has(k.id))) throw new Error([...left.values()].join('\n'));
+      for (const l of left.values()) console.error(l);
+      for (const k of targets.filter(k => !left.has(k.id))) {
         const result = startWorker(k.id, labels, allowAblation);
         if (result.status === 'already_running') {
           console.log(`${k.id}: already running (pid ${result.pid})`);
@@ -340,7 +361,7 @@ export const COMMANDS: Command[] = [
   {
     name: 'init',
     summary: 'Set up a repo: a Kshetra Shreni works, or a tracker project worked by hand',
-    usage: '--mode kshetra|tracker [--slug <id>] [--path <repo-path>] [--providers claude,codex,gemini] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--on-beads] [--dry-run]',
+    usage: '--mode kshetra|tracker [--slug <id>] [--path <repo-path>] [--providers claude,codex,gemini] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--on-beads] [--yes] [--dry-run]',
     run(ctx) {
       const mergePolicy = ctx.flag('--merge-policy');
       if (mergePolicy && mergePolicy !== 'push' && mergePolicy !== 'pr') {
@@ -348,6 +369,7 @@ export const COMMANDS: Command[] = [
       }
       return runInit({
         onBeads: ctx.has('--on-beads'),
+        yes: ctx.has('--yes'),
         mode: ctx.flag('--mode') ?? undefined,
         providers: ctx.flag('--providers') ?? undefined,
         slug: ctx.flag('--slug') ?? undefined,
@@ -404,28 +426,11 @@ export const COMMANDS: Command[] = [
   },
   {
     name: 'migrate',
-    summary: 'Migrate a legacy kshetra config to the canonical location',
-    usage: '<path>',
-    run(ctx) {
-      const kshetraPath = ctx.args[0];
-      if (!kshetraPath) throw new Error('Usage: shreni migrate <path>');
-      const result = runMigrate(kshetraPath);
-      switch (result.status) {
-        case 'migrated':
-          console.log(`Migrated config to ${result.configPath}${result.id ? ` (kshetra "${result.id}" re-registered)` : ''}`);
-          break;
-        case 'already_canonical':
-          console.log(`Already canonical: ${result.configPath} — nothing to migrate`);
-          break;
-        case 'nothing_to_migrate':
-          throw new Error(`No config found to migrate at ${kshetraPath}`);
-      }
-      // 4a2.7: report the beads-repo interactions.jsonl un-ignore outcome.
-      if (result.interactions === 'changed') {
-        console.log('Beads repo now tracks interactions.jsonl (removed the gitignore entry).');
-      }
-    },
+    summary: 'Move a Kshetra off beads onto the task graph engine (--undo puts it back until the first new write)',
+    usage: MIGRATE_USAGE,
+    run: ctx => runMigrateCommand(ctx),
   },
+
   {
     name: 'list',
     summary: 'List all registered kshetras',

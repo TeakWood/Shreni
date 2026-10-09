@@ -73,8 +73,11 @@ export interface InitKshetraOpts {
 export interface InitEngine {
   /** Reaches the server, creates the database if missing, and applies or offers migrations. */
   database(database: string): Promise<void>;
-  /** Registers the project, or finds the one `existing` names; returns its uuid. */
-  project(input: { database: string; existing?: string; repoUrl: string }): Promise<string>;
+  /**
+   * Registers the project, or finds the one `existing` names; returns its uuid.
+   * With `beads` holding issues and no project yet, imports them instead (the Import phase).
+   */
+  project(input: { database: string; existing?: string; repoUrl: string; beads?: { dir: string; repo: string; configPath: string } }): Promise<string>;
 }
 
 /** The project and database an existing config names, kept across a re-run. */
@@ -1078,14 +1081,14 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         // the line. Note: Step 5's .gitignore edit is a DIFFERENT file (the
         // PROJECT repo's .gitignore, for `.shreni`); this is the beads repo's.
         // Best-effort: this is a durability convenience, so a .gitignore hiccup
-        // must never wedge an otherwise-complete Kshetra init. `shreni migrate`
-        // re-applies it later if needed.
+        // must never wedge an otherwise-complete Kshetra init; the line can be
+        // removed by hand later.
         try {
           if (untrackInteractions(beadsPath) === 'changed') {
             console.log('  beads repo now tracks interactions.jsonl (was gitignored)');
           }
         } catch (err) {
-          console.warn(`  could not un-ignore interactions.jsonl (run \`shreni migrate\` later): ${(err as Error).message}`);
+          console.warn(`  could not un-ignore interactions.jsonl (remove that line from the beads repo's .gitignore by hand): ${(err as Error).message}`);
         }
         await hardenBeadsRepo(beadsPath);
         await pushBeadsRepo(beadsPath);
@@ -1148,7 +1151,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
       name: 'Project',
       recovery: `run shreni db check; if the config names a project this database lacks, fix database: or delete project:.`,
       run: async () => {
-        const id = await engine.project({ database, existing: kept.project, repoUrl: repoRemote });
+        const id = await engine.project({ database, existing: kept.project, repoUrl: repoRemote, beads: { dir: beadsPath, repo: repoPath, configPath } });
         recordProjectId(configPath, id);
         // The repo is one kind of project or the other, never both.
         if (opts.replaces && existsSync(opts.replaces)) {

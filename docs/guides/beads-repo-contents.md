@@ -30,8 +30,10 @@ tracking the file:
 
 - **New Kshetras** track it from day one: `shreni init` removes the entry right
   after `bd init`, before the initial beads-repo commit.
-- **Existing Kshetras**: run `shreni migrate <kshetra-path>`. It removes the entry
-  idempotently (safe to re-run) and leaves the rest of bd's `.gitignore` intact.
+- **Existing Kshetras**: remove the `interactions.jsonl` line from the beads
+  repo's `.gitignore` by hand, leaving the rest of bd's `.gitignore` intact.
+  `shreni migrate <kshetra>` moves a Kshetra off beads altogether, and its importer
+  reads `interactions.jsonl` when the beads repo has one.
   It never adds a negation pattern (`!interactions.jsonl`) — bd's `.gitignore`
   warns that negations override the fork protection in `.git/info/exclude`.
 
@@ -63,8 +65,6 @@ is recorded at the write site (`src/ext/ledger-sink.ts`) and the sync site
 ### If a bd upgrade re-adds the ignore
 
 bd owns this `.gitignore`, so a future bd version could regenerate it and re-add
-the `interactions.jsonl` line. That is expected and not fought — **`shreni migrate
-<kshetra-path>` is the recovery**: re-running it re-applies the removal (the
-operation is idempotent, so it is always safe to run again). If you notice
-`interactions.jsonl` has stopped being tracked after a bd upgrade, run migrate
-once more.
+the `interactions.jsonl` line. That is expected and not fought: if you notice
+`interactions.jsonl` has stopped being tracked after a bd upgrade, remove the
+line again by hand.

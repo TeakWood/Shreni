@@ -14,6 +14,8 @@ import { idPrefixFor, registerProject, type ProjectMode } from '../policy/init/p
 import { ensureMigrated, migrateDeps, realProbe } from './db';
 import { readPid, isAlive } from './pid';
 import { setupInstructions } from './task';
+import { migrateOffBeads } from '../policy/migrate/kshetra';
+import { defaultMigrateDeps, migrationsDir, preImportDump } from './migrate';
 
 export interface InitOpts {
   mode?: string;
@@ -33,6 +35,8 @@ export interface InitOpts {
   upgrade?: boolean;
   /** A Kshetra left on beads, with no database or project: what the certification scripts need until beads goes. */
   onBeads?: boolean;
+  /** Imports existing beads without asking, after the dry run passes. */
+  yes?: boolean;
 }
 
 export interface InitDeps {
@@ -42,7 +46,7 @@ export interface InitDeps {
   /** The Kshetra path: today's init-kshetra phases, with the engine's. */
   kshetra(opts: InitKshetraOpts): Promise<void>;
   /** The database and the project for a repo of the given name and mode. */
-  engine(project: { name: string; mode: ProjectMode }): InitEngine;
+  engine(project: { name: string; mode: ProjectMode; yes?: boolean }): InitEngine;
   /** Whether a worker runs for the Kshetra on this machine. */
   workerRunning(id: string): boolean;
   unregister(id: string): void;
@@ -66,12 +70,25 @@ export interface EngineIo {
   probe: DbProbe;
   open: typeof openKshetraEngine;
   env: NodeJS.ProcessEnv;
+  /** What the Import phase uses: bd export, the pre-import dump, and where migrations are recorded. */
+  exportBeads(beadsDir: string): Promise<boolean>;
+  dump(database: string): Promise<string>;
+  manifestsDir: string;
+}
+
+/** Whether a beads export holds any issue. */
+function hasBeadsIssues(dir: string): boolean {
+  const file = join(dir, 'issues.jsonl');
+  return existsSync(file) && /"_type":"issue"|"id":/.test(readFileSync(file, 'utf8'));
 }
 
 /** The Database phase and the Project phase, for a repo of the given name and mode. */
 export function initEngine(
-  deps: Pick<InitDeps, 'interactive' | 'ask' | 'print'>, project: { name: string; mode: ProjectMode },
-  io: EngineIo = { probe: realProbe(), open: openKshetraEngine, env: process.env },
+  deps: Pick<InitDeps, 'interactive' | 'ask' | 'print'>, project: { name: string; mode: ProjectMode; yes?: boolean },
+  io: EngineIo = {
+    probe: realProbe(), open: openKshetraEngine, env: process.env,
+    exportBeads: defaultMigrateDeps().exportBeads, dump: preImportDump, manifestsDir: migrationsDir(),
+  },
 ): InitEngine {
   return {
     async database(database) {
@@ -96,9 +113,22 @@ export function initEngine(
         });
       }
     },
-    async project({ database, existing, repoUrl }) {
+    async project({ database, existing, repoUrl, beads }) {
       const conn = await io.open({ database }, { name: 'shreni-init' });
       try {
+        // The Import phase: a repo with beads data and no project yet moves its beads over.
+        if (!existing && beads && hasBeadsIssues(beads.dir)) {
+          const r = await migrateOffBeads(conn.shreni, {
+            id: project.name, name: project.name, mode: project.mode, repo: beads.repo, beadsDir: beads.dir,
+            configPath: beads.configPath, database, repoUrl: repoUrl || undefined, touches: [], instructions: () => {},
+          }, {
+            exportBeads: io.exportBeads, backup: () => io.dump(database), interactive: deps.interactive, ask: deps.ask,
+            print: l => deps.print(`  ${l}`), manifestsDir: io.manifestsDir,
+          // Init offers no undo: a rerun finds the project the config now names, and the pre-import dump is the way back.
+          }, { yes: project.yes, keepManifest: false });
+          if (r.outcome === 'aborted') throw new Error('the beads import was not done; fix what the dry run found, then run init again');
+          return r.projectId!;
+        }
         const user = loadUserConfig().user ?? 'developer';
         const r = await registerProject(conn.shreni, {
           id: existing, name: project.name, idPrefix: idPrefixFor(project.name), mode: project.mode,
@@ -188,7 +218,7 @@ export async function runInit(opts: InitOpts, deps: InitDeps = defaultInitDeps()
       slug, path, org: opts.org, language: opts.language, beadsPath: opts.beadsPath, provider: opts.provider,
       model: opts.model, mergePolicy: opts.mergePolicy, dryRun: opts.dryRun, pack: opts.pack, noPack: opts.noPack,
       upgrade: opts.upgrade,
-      ...(opts.onBeads ? {} : { engine: deps.engine({ name: slug, mode: 'kshetra' }) }),
+      ...(opts.onBeads ? {} : { engine: deps.engine({ name: slug, mode: 'kshetra', yes: opts.yes }) }),
       ...(isTracker ? { replaces: trackerPath } : {}),
     });
   }
@@ -242,7 +272,7 @@ async function initTracker(a: {
     return;
   }
 
-  const engine = deps.engine({ name: slug, mode: 'tracker' });
+  const engine = deps.engine({ name: slug, mode: 'tracker', yes: opts.yes });
   const steps: { name: string; run(): Promise<void> }[] = [
     { name: 'Database', run: () => engine.database(database) },
     {
@@ -266,7 +296,10 @@ async function initTracker(a: {
     {
       name: 'Project',
       run: async () => {
-        recordProjectId(trackerPath, await engine.project({ database, existing, repoUrl: '' }));
+        const beadsDir = join(path, '.beads');
+        recordProjectId(trackerPath, await engine.project({
+          database, existing, repoUrl: '', ...(existsSync(beadsDir) ? { beads: { dir: beadsDir, repo: path, configPath: trackerPath } } : {}),
+        }));
         if (kshetra) {
           deps.unregister(kshetra.id);
           // Kept aside, not deleted: it is gitignored, and holds the Kshetra's settings.

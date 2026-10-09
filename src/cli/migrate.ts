@@ -1,118 +1,109 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
-import { resolve, join, dirname } from 'path';
+import { execFile } from 'child_process';
 import { homedir } from 'os';
-import * as yaml from 'js-yaml';
-import { loadKshetraConfig, KshetraConfigError } from '../kshetra/config.js';
-import { registerKshetra } from '../kshetra/registry.js';
-import { untrackInteractions, type UntrackResult } from './beads-gitignore.js';
+import { join } from 'path';
+import { createInterface } from 'readline/promises';
+import type { CommandContext } from './registry';
+import { parseArgs, instructionTargets, setupInstructions } from './task';
+import { loadKshetraConfig, type KshetraConfig } from '../kshetra/config';
+import { loadRegistry, resolveConfigPath } from '../kshetra/registry';
+import { loadUserConfig, resolveDatabase } from '../kshetra/user-config';
+import { isLocal, pgTools, takeDump, WAIT_MS } from '../policy/db/backups';
+import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/connect';
+import { migrateOffBeads, undoMigration, type MigrateIo, type MigrateTarget } from '../policy/migrate/kshetra';
+import { readPid, isAlive } from './pid';
 
-export type MigrateStatus = 'migrated' | 'already_canonical' | 'nothing_to_migrate';
+// shreni migrate <kshetra> (migration plan, "Upgrading a Kshetra"): moves a
+// Kshetra off beads onto the task graph engine, or with --undo puts it back
+// until the first write to the new store.
 
-export interface MigrateResult {
-  status: MigrateStatus;
-  id?: string;
-  configPath: string;
-  // Outcome of the beads-repo interactions.jsonl un-ignore (4a2.7). Undefined
-  // when there was no config to resolve a beads path from (nothing_to_migrate),
-  // or when the config could not be loaded.
-  interactions?: UntrackResult;
+export const MIGRATE_USAGE = '<kshetra> [--yes] [--undo]';
+
+export interface MigrateDeps extends Omit<MigrateIo, 'backup'> {
+  open(k: Pick<KshetraConfig, 'database'>): Promise<KshetraEngine>;
+  /** The dump before the import, of the named database, waited for. */
+  dump(database: string): Promise<string>;
+  workerRunning(id: string): boolean;
+  kshetras(): KshetraConfig[];
+  configPath(id: string): string | null;
 }
 
-// Resolve the Kshetra's beads path from a canonical config and stop its repo from
-// gitignoring interactions.jsonl (4a2.7). Idempotent and best-effort: a config
-// that won't load, or a missing .gitignore, simply yields no change rather than
-// failing the migration.
-function fixBeadsGitignore(configPath: string): UntrackResult | undefined {
-  let beadsPath: string;
-  try {
-    beadsPath = loadKshetraConfig(configPath).beads.path;
-  } catch {
-    return undefined; // config not loadable — nothing we can safely act on
-  }
-  return untrackInteractions(beadsPath);
+export const migrationsDir = (home = homedir()) => join(home, '.shreni', 'migrations');
+
+export function defaultMigrateDeps(): MigrateDeps {
+  return {
+    open: k => openKshetraEngine(k, { name: 'shreni-migrate' }),
+    workerRunning(id) {
+      const pid = readPid(id);
+      return pid !== null && isAlive(pid);
+    },
+    kshetras: loadRegistry,
+    configPath: resolveConfigPath,
+    exportBeads: beadsDir => new Promise((resolve, reject) => {
+      execFile('bd', ['export', '-o', join(beadsDir, 'issues.jsonl')], { env: { ...process.env, PATH: process.env.PATH, BEADS_DIR: beadsDir } }, (err, _o, stderr) => {
+        if (!err) return resolve(true);
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return resolve(false);
+        reject(new Error(`bd export failed: ${String(stderr).trim() || err.message}`));
+      });
+    }),
+    dump: preImportDump,
+    interactive: () => !!process.stdin.isTTY && !!process.stdout.isTTY,
+    async ask(question) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        return await rl.question(question);
+      } finally {
+        rl.close();
+      }
+    },
+    print: l => console.log(l),
+    manifestsDir: migrationsDir(),
+  };
 }
 
-// Absolutize a config path field. Expands a leading `~` to the home directory
-// and resolves a relative path against the Kshetra directory. The loader uses
-// repo.path / beads.path verbatim as the git/exec cwd and does NOT expand `~`
-// (config.ts), so migration is where those paths are made absolute.
-function absolutizePath(p: string, baseDir: string): string {
-  if (p === '~') return homedir();
-  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
-  return resolve(baseDir, p);
+/** The dump an import takes first (policy spec, "Backups"), and waits for. */
+export async function preImportDump(database: string): Promise<string> {
+  const target = resolveDatabase({ database }, loadUserConfig());
+  if (!isLocal(target)) return `database "${target.name}" isn't on this machine: no dump taken; its owner backs it up`;
+  return `dumped first: ${await takeDump(target, 'pre-import', pgTools, { wait: WAIT_MS })}`;
 }
 
-// Move a legacy root `<dir>/kshetra.yaml` to the canonical
-// `<dir>/.shreni/kshetra.yaml`, absolutize its repo/beads paths, re-register the
-// Kshetra to point at the new location, and delete the root file. Idempotent:
-// re-running once the canonical file exists (and the root is gone) is a no-op.
-export function runMigrate(kshetraPath: string): MigrateResult {
-  const dir = resolve(kshetraPath);
-  const rootPath = join(dir, 'kshetra.yaml');
-  const canonicalPath = join(dir, '.shreni', 'kshetra.yaml');
+/** What a Kshetra's migration works on. */
+export function kshetraTarget(k: KshetraConfig, configPath: string): MigrateTarget {
+  const t = instructionTargets({ kind: 'kshetra', path: configPath, config: k });
+  return {
+    id: k.id, name: k.id, mode: 'kshetra', repo: k.repo.path, beadsDir: k.beads.path, configPath, project: k.project,
+    database: k.database ?? 'local', repoUrl: k.repo.remote,
+    touches: [...t.files, ...(t.claude ? [join(t.repo, '.claude', 'settings.json')] : [])],
+    instructions: () => { setupInstructions({ kind: 'kshetra', path: configPath, config: loadKshetraConfig(configPath) }); },
+  };
+}
 
-  const rootExists = existsSync(rootPath);
-  const canonicalExists = existsSync(canonicalPath);
+export async function runMigrateCommand(ctx: CommandContext, overrides: Partial<MigrateDeps> = {}): Promise<void> {
+  const deps: MigrateDeps = { ...defaultMigrateDeps(), ...overrides };
+  const a = parseArgs(ctx.args, { command: 'shreni migrate', bool: ['--yes', '--undo'], positionals: 1 });
+  const [id] = a.positionals;
+  if (!id) throw new Error(`Usage: shreni migrate ${MIGRATE_USAGE}`);
+  await migrateKshetra(id, deps, { yes: a.bools.has('--yes'), undo: a.bools.has('--undo') });
+}
 
-  // Already migrated (or a fresh init wrote canonical directly): nothing to do.
-  // If a stale root file lingers next to the canonical one, remove it so there
-  // is exactly one source of truth.
-  if (canonicalExists) {
-    if (rootExists) rmSync(rootPath);
-    // Apply the beads .gitignore fix on every migrate of an already-canonical
-    // Kshetra too — this is the recovery path if a bd upgrade ever re-adds the
-    // interactions.jsonl ignore line. Idempotent, so re-running is safe.
-    const interactions = fixBeadsGitignore(canonicalPath);
-    return { status: rootExists ? 'migrated' : 'already_canonical', configPath: canonicalPath, interactions };
-  }
-
-  if (!rootExists) {
-    return { status: 'nothing_to_migrate', configPath: canonicalPath };
-  }
-
-  // Parse the legacy YAML, absolutize the path fields, and write the canonical
-  // file. We mutate the parsed object (not the raw text) so the paths are fixed;
-  // formatting/comments are not preserved by design (this is a one-time move).
-  let raw: string;
+/** Moves one registered Kshetra off beads, or back with undo. */
+export async function migrateKshetra(id: string, deps: MigrateDeps, opts: { yes?: boolean; undo?: boolean } = {}): Promise<void> {
+  const k = deps.kshetras().find(x => x.id === id);
+  const configPath = deps.configPath(id);
+  if (!k || !configPath) throw new Error(`Kshetra not found: ${id}`);
+  // Preflight: no worker, and a database with no migration pending.
+  if (deps.workerRunning(id)) throw new Error(`${id} has a worker running; shreni stop --kshetra ${id} first`);
+  const conn = await deps.open(k);
   try {
-    raw = readFileSync(rootPath, 'utf8');
-  } catch (err) {
-    throw new KshetraConfigError(rootPath, `Cannot read file: ${(err as Error).message}`, err);
+    const pending = [...await conn.shreni.tg.pendingMigrations(), ...await conn.shreni.pending()];
+    if (pending.length) throw new Error(`the database has pending migrations (${pending.join(', ')}); run shreni db migrate first`);
+    if (opts.undo) return await undoMigration(conn.shreni, id, configPath, deps);
+    const { outcome } = await migrateOffBeads(conn.shreni, kshetraTarget(k, configPath), {
+      ...deps, backup: () => deps.dump(k.database ?? 'local'),
+    }, { yes: opts.yes });
+    if (outcome === 'aborted') throw new Error(`${id} wasn't migrated`);
+    deps.print(outcome === 'unchanged' ? `${id} is already on the engine; nothing to do` : `${id} is on the engine; commit the repo's changes`);
+  } finally {
+    await conn.close().catch(() => {});
   }
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = (yaml.load(raw) ?? {}) as Record<string, unknown>;
-  } catch (err) {
-    throw new KshetraConfigError(rootPath, `Invalid YAML: ${(err as Error).message}`, err);
-  }
-
-  const repo = parsed['repo'] as { path?: string } | undefined;
-  if (repo?.path) repo.path = absolutizePath(repo.path, dir);
-  const beads = parsed['beads'] as { path?: string } | undefined;
-  if (beads?.path) beads.path = absolutizePath(beads.path, dir);
-
-  mkdirSync(dirname(canonicalPath), { recursive: true });
-  writeFileSync(canonicalPath, yaml.dump(parsed), 'utf8');
-
-  // Validate the migrated config and re-register it to the canonical path. If
-  // validation fails, remove the partial canonical file (so a retry doesn't see
-  // an invalid file as "already migrated") and leave the root untouched.
-  let config;
-  try {
-    config = loadKshetraConfig(canonicalPath);
-  } catch (err) {
-    rmSync(canonicalPath, { force: true });
-    throw err;
-  }
-  registerKshetra(config.id, canonicalPath);
-
-  // Only remove the legacy file once the canonical one is written and valid.
-  rmSync(rootPath);
-
-  // Stop the beads repo gitignoring interactions.jsonl (4a2.7) as part of the
-  // same migration. config is already loaded, so use its beads path directly.
-  const interactions = untrackInteractions(config.beads.path);
-
-  return { status: 'migrated', id: config.id, configPath: canonicalPath, interactions };
 }

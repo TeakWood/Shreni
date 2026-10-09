@@ -1194,7 +1194,10 @@ describe('initKshetra', () => {
       await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
       log.mockRestore();
       expect(order).toEqual(['▶ App repo …', '▶ Base branch …', '▶ Database …', 'database local', '▶ Beads repo …', '▶ Repo wiring …', '▶ Config …', '▶ Project …', 'project', '▶ Register …']);
-      expect(e.project).toHaveBeenCalledWith({ database: 'local', existing: undefined, repoUrl: expect.any(String) });
+      expect(e.project).toHaveBeenCalledWith({
+        database: 'local', existing: undefined, repoUrl: expect.any(String),
+        beads: { dir: '/repos/myapp-beads', repo: '/repos/myapp', configPath: '/repos/myapp/.shreni/kshetra.yaml' },
+      });
       // The Kshetra block replaces the old section, and the prime hooks replace bd setup claude's.
       expect(files.get('/repos/myapp/CLAUDE.md')).toMatch(/^<!-- shreni:begin kshetra v1 -->/);
       expect(files.get('/repos/myapp/.claude/settings.json')).toContain('shreni task prime');
