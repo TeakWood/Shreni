@@ -7,6 +7,8 @@ import type { BeadSummary, BeadDetail, KshetraTasksResult } from './beads-read.j
 
 const mockLoadRegistry = vi.fn<() => KshetraConfig[]>();
 vi.mock('../kshetra/registry.js', () => ({ loadRegistry: mockLoadRegistry }));
+// The live feed opens database connections; its own tests cover it (live.test.ts).
+vi.mock('./live.js', () => ({ TaskFeed: class { start() {} async close() {} } }));
 
 const mockReadToken = vi.fn<() => string | null>();
 vi.mock('./token.js', () => ({ readToken: mockReadToken }));

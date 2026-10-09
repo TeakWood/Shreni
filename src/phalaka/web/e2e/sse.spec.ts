@@ -53,6 +53,20 @@ test('an `activity` frame rings a board re-fetch that picks up changed counts', 
   await expect(card.getByText('7 open · 1 active · 0 blocked · 5 closed')).toBeVisible();
 });
 
+test('a `tasks` frame (a task claimed on the engine) rings a board re-fetch', async ({ page }) => {
+  const data = structuredClone(defaultBackendData());
+  const sse = await installMockBackend(page, data);
+  await page.goto('/?token=e2e');
+
+  const card = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Sishya' }) });
+  await expect(card.getByText('1 open · 0 active · 2 blocked · 5 closed')).toBeVisible();
+
+  data.kshetras[0].counts = { open: 0, in_progress: 1, blocked: 2, closed: 5 };
+  await sse.tasks({ kshetraId: 'sishya', taskIds: ['sishya-1'] });
+  // The page re-fetches 300 ms after the frame; the slack is the test driver's, not the page's.
+  await expect(card.getByText('0 open · 1 active · 2 blocked · 5 closed')).toBeVisible({ timeout: 2_000 });
+});
+
 test('dropping the stream falls back to polling and keeps the page fresh', async ({ page }) => {
   const data = structuredClone(defaultBackendData());
   const sse = await installMockBackend(page, data);

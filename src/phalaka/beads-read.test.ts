@@ -26,6 +26,7 @@ const {
   readKshetraTasks,
   readAllKshetraTasks,
   clearBeadsReadCache,
+  invalidateProjectReads,
   isValidBeadId,
   BeadsReadError,
   LIST_CACHE_TTL_MS,
@@ -213,6 +214,27 @@ describe('TTL cache', () => {
     await beadsRead(KSHETRA).list();
     await beadsRead(KSHETRA).list();
     expect(reads.calls).toHaveLength(1);
+  });
+
+  it('re-fetches within the TTL once the project\'s events dropped its reads', async () => {
+    reads.results = [{ ok: '[]' }];
+    await beadsRead(KSHETRA).list();
+    invalidateProjectReads(KSHETRA.project!);
+    await beadsRead(KSHETRA).list();
+    expect(reads.calls.filter(c => c.op === 'list')).toHaveLength(2);
+    // Another project's reads stay cached.
+    invalidateProjectReads('another-project');
+    await beadsRead(KSHETRA).list();
+    expect(reads.calls.filter(c => c.op === 'list')).toHaveLength(2);
+  });
+
+  it('never caches a read that was in flight when the project\'s events dropped its reads', async () => {
+    reads.results = [{ ok: '[]' }];
+    const inFlight = beadsRead(KSHETRA).list();
+    invalidateProjectReads(KSHETRA.project!); // the claim commits while the read runs
+    await inFlight;
+    await beadsRead(KSHETRA).list();
+    expect(reads.calls.filter(c => c.op === 'list')).toHaveLength(2);
   });
 
   it('re-fetches after the TTL expires (cache miss)', async () => {

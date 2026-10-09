@@ -267,7 +267,7 @@ Work done by hand has no worker. Each `shreni task` command acts with role `deve
 - **Swept on every poll.** Sthapathi calls `expireLeases` on its fallback poll as well as before each claim, so a dead worker's task is back within one lease length plus one poll.
 - **Epics are reconciled, not only notified.** On start and on each poll, Sthapathi completes or flags the containers `tasks.settled()` returns ([Containers](#containers)).
 - **One worker per Kshetra, across machines.** `worker.pid` (`src/cli/pid.ts`) sees one machine only, and with a company database two machines could each start a worker for the same Kshetra. So a worker also takes a session lock in the database, `tg.locks.trySession('worker')`, on the engine's session connection, and refuses to start without it, naming the holder's host. Postgres drops the lock when the connection dies, so a crashed worker never leaves it behind. Running several workers on one Kshetra is an open question.
-- **Phalaka updates live,** replacing the polling and caching in `phalaka/beads-read.ts`.
+- **Phalaka updates live.** It follows each registered Kshetra's events on its long-lived read connection; a batch drops that project's cached reads and sends the browser a `tasks` frame, which re-fetches the board. The short read cache and the browser's polling fallback stay, for a feed that is down; the set of Kshetras followed is brought in line with the registry every 30 s.
 
 ## Tracker-only projects
 

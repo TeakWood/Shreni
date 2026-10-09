@@ -157,6 +157,11 @@ export class SseController {
   state(payload: unknown = {}): Promise<void> {
     return this.emit('state', payload);
   }
+  /** A `tasks` frame — the task graph's events for a Kshetra; rings a board re-fetch. */
+  tasks(payload: unknown = {}): Promise<void> {
+    return this.emit('tasks', payload);
+  }
+
   /** An `activity` frame — a task transitioned; rings a board re-fetch. */
   activity(payload: unknown = {}): Promise<void> {
     return this.emit('activity', payload);

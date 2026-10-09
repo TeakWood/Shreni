@@ -92,6 +92,9 @@ export function useEventStream(token: string, handlers: EventStreamHandlers): St
     es.addEventListener('state', () => refreshBoardSoon());
     // A task transitioned (claimed / done / synced) — re-fetch the affected board.
     es.addEventListener('activity', () => refreshBoardSoon());
+    // The task graph's own events for a Kshetra (claims, moves, filings): the
+    // server already dropped its cached reads, so the re-fetch is fresh.
+    es.addEventListener('tasks', () => refreshBoardSoon());
     es.addEventListener('error', () => {
       // Stream dropped. EventSource auto-reconnects; poll meanwhile so the whole
       // page keeps refreshing until `open` fires again and stops the poll.

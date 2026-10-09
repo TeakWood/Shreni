@@ -345,6 +345,11 @@ export class PhalakaChangeStream {
     }
   }
 
+  /** Sends a frame to every connected client, as the engine's change feed does with `tasks`. */
+  publish(event: string, data: unknown): void {
+    this.broadcast(event, data);
+  }
+
   private broadcast(event: string, data: unknown): void {
     const frame = formatSse(event, data);
     for (const sink of this.clients.values()) {

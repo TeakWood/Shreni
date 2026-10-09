@@ -160,13 +160,26 @@ export function clearBeadsReadCache(): void {
   cache.clear();
 }
 
+/** Drops a project's cached reads, once its events say they changed. */
+export function invalidateProjectReads(project: string): void {
+  const source = `engine:${project}`;
+  generation.set(source, (generation.get(source) ?? 0) + 1);
+  for (const key of cache.keys()) if (key.startsWith(`${source}::`)) cache.delete(key);
+}
+
+/** Bumped per project by each invalidation: a read begun before one is never cached. */
+const generation = new Map<string, number>();
+const projectOf = (key: string) => key.slice(0, key.indexOf('::'));
+
 async function cached<T>(key: string, ttl: number, produce: () => Promise<T>): Promise<T> {
   const hit = cache.get(key);
   if (hit && hit.expires > Date.now()) {
     return hit.value as T;
   }
+  const gen = generation.get(projectOf(key)) ?? 0;
   const value = await produce();
-  cache.set(key, { expires: Date.now() + ttl, value });
+  // Its snapshot may predate the change that invalidated it: return it, but don't keep it.
+  if ((generation.get(projectOf(key)) ?? 0) === gen) cache.set(key, { expires: Date.now() + ttl, value });
   return value;
 }
 

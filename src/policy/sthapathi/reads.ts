@@ -1,5 +1,5 @@
 import { sql } from 'kysely';
-import type { ProjectHandle, Task } from '../../taskgraph';
+import type { ProjectHandle, Task, TaskGraphEvent } from '../../taskgraph';
 import type { ShreniClient } from '../db/client';
 import type { KshetraConfig } from '../../kshetra/config';
 import { registeredStore } from '../../sthapathi/task-store';
@@ -218,18 +218,36 @@ export async function withTrackerReads<T>(
 }
 
 /** Connections a long-lived reader keeps, one per Kshetra and project, for the life of the process. */
-const shared = new Map<string, Promise<{ reads: TrackerReads; close(): Promise<void> }>>();
+const shared = new Map<string, Promise<{ reads: TrackerReads; tg: ProjectHandle; close(): Promise<void> }>>();
 
 async function sharedReads(kshetra: KshetraConfig): Promise<TrackerReads> {
+  return (await sharedEntry(kshetra)).reads;
+}
+
+/**
+ * Follows the project's events on the long-lived reader's connection
+ * (engine spec, "Events and history"): `handler` gets each batch of new
+ * events. Returns the unsubscribe.
+ */
+export async function subscribeTracker(
+  kshetra: KshetraConfig, handler: (events: TaskGraphEvent[]) => void, onError?: (err: unknown) => void,
+): Promise<() => Promise<void>> {
+  requireProject(kshetra);
+  return (await sharedEntry(kshetra)).tg.events.subscribe(handler, { onError });
+}
+
+function sharedEntry(kshetra: KshetraConfig) {
   const key = `${kshetra.id}:${kshetra.project}`;
   let entry = shared.get(key);
   if (!entry) {
-    entry = openKshetraEngine(kshetra, { name: 'shreni-read' })
-      .then(conn => ({ reads: engineReads(conn.shreni, conn.shreni.tg.project(kshetra.project!)), close: conn.close }));
+    entry = openKshetraEngine(kshetra, { name: 'shreni-read' }).then(conn => {
+      const tg = conn.shreni.tg.project(kshetra.project!);
+      return { reads: engineReads(conn.shreni, tg), tg, close: conn.close };
+    });
     // A failed open isn't kept, so the next read tries again.
     entry.catch(() => shared.delete(key));
     shared.set(key, entry);
   }
-  return (await entry).reads;
+  return entry;
 }
 

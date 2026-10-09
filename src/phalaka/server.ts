@@ -2,6 +2,8 @@ import Fastify from 'fastify';
 import { registerPhalakaApi } from './api.js';
 import { PhalakaChangeStream, registerPhalakaStream } from './stream.js';
 import { INDEX_HTML } from './ui.js';
+import { TaskFeed } from './live.js';
+import { loadRegistry } from '../kshetra/registry.js';
 
 export const DEFAULT_PORT = 7348;
 // Loopback only: the dashboard exposes task content across all Kshetras and has
@@ -24,7 +26,14 @@ export async function createPhalakaServer(port = DEFAULT_PORT) {
   // an idle dashboard costs nothing. Torn down with the server.
   const stream = new PhalakaChangeStream();
   registerPhalakaStream(fastify, stream);
-  fastify.addHook('onClose', async () => stream.close());
+  // Each Kshetra's task events ring the browser (and drop the stale reads).
+  const feed = new TaskFeed({
+    kshetras: () => { try { return loadRegistry(); } catch { return []; } },
+    onChange: (kshetraId, taskIds) => stream.publish('tasks', { kshetraId, taskIds }),
+    log: line => console.error(line),
+  });
+  feed.start();
+  fastify.addHook('onClose', async () => { await feed.close(); stream.close(); });
 
   return { fastify, port, stream };
 }
