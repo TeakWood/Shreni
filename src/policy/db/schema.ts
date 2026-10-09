@@ -4,6 +4,14 @@ import type { ColumnType, Generated } from 'kysely';
 
 type Defaulted<T> = ColumnType<T, T | undefined, T>;
 
+/**
+ * attempt_evidence.gates. `acceptance.passed` records whether the task's
+ * acceptance checks all passed on this attempt: auto checks by the test
+ * gate, manual ones on the developer's confirmation (shreni task finish).
+ * finish's checksPassed guard reads it.
+ */
+export type AttemptGates = { acceptance?: { passed: boolean } & Record<string, unknown> } & Record<string, unknown>;
+
 export interface ShreniDatabase {
   'shreni.schema_meta': { only_row: Defaulted<boolean>; version: number; min_writer: number };
   'shreni.projects': {
@@ -36,7 +44,8 @@ export interface ShreniDatabase {
     attempt_id: string;
     diff_ref: string | null;
     pr_url: string | null;
-    gates: Defaulted<Record<string, unknown>>;
+    /** Gate results by gate; `acceptance` is what checksPassed reads. */
+    gates: Defaulted<AttemptGates>;
     /** One entry per review round, oldest first. */
     rounds: Defaulted<Array<{ round: number; verdict: string } & Record<string, unknown>>>;
     adversary: Defaulted<unknown[]>;

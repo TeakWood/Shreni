@@ -190,7 +190,7 @@ Shreni's own tables live in a `shreni` schema beside the engine's `taskgraph` sc
 | `projects` | Shreni's details for each project: `mode` (`kshetra`, worked by Sthapathi, or `tracker`, tracked only), and optional `repo_url` (filled from the origin remote) and `team`. They live here because the engine knows nothing about repos or workers |
 | `intents` | The developer's statement and intent-level checks, one per plan |
 | `acceptance_checks` | Structured given/when/then checks for a task or intent, their mode (auto or manual), and the locked test paths and hashes |
-| `attempt_evidence` | Per-attempt diff reference, PR, gate results, reviewer verdict, adversary findings |
+| `attempt_evidence` | Per-attempt diff reference, PR, gate results, reviewer verdict per review round, adversary findings. The gate results' `acceptance.passed` records whether the task's acceptance checks all passed on that attempt, auto checks by the test gate and manual ones on the developer's confirmation; `checksPassed` reads it from the current attempt |
 | `memories` | Project insights, today's `bd remember` entries |
 
 ## The database
