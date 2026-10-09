@@ -16,6 +16,7 @@ import { loadRegistry } from '../kshetra/registry';
 import { resolveTargetKshetra } from './suthradhara';
 import { parseAcceptanceCriteria } from '../sthapathi/beads';
 import { withTrackerReads } from '../policy/sthapathi/reads';
+import { ledgerPath } from '../kshetra/state-locations';
 import { readLedger, parseLedgerLines } from '../ext/index';
 import type { LedgerEntry } from '../ext/index';
 import type { KshetraConfig } from '../kshetra/config';
@@ -77,7 +78,7 @@ function parseBeadHeader(showJson: string): BeadHeader | null {
 // interprets a raw entry itself. A missing ledger (nothing decision-grade has
 // happened yet) is empty, not an error.
 function loadLedger(kshetra: KshetraConfig): LedgerEntry[] {
-  const path = join(kshetra.beads.path, 'ledger.jsonl');
+  const path = ledgerPath(kshetra);
   try {
     return parseLedgerLines(readFileSync(path, 'utf8'));
   } catch (err) {

@@ -37,6 +37,7 @@ import { ablationGuardError, ablationBanner, activeAblations } from '../kshetra/
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/connect';
+import { ledgerPath } from '../kshetra/state-locations';
 import { EngineQueue, takeWorkerLock, UNAVAILABLE_RETRY_MS, WorkerLockHeld, workerName } from '../policy/sthapathi/leases';
 import { Unavailable, type ActorHandle, type ProjectHandle, type Release } from '../taskgraph';
 import { engineHooks } from '../policy/sthapathi/hooks';
@@ -404,11 +405,11 @@ export function createWorkerRuntime(
     const extensionSeams = extensionSeamsSnapshot();
     const extensionModuleId = process.env.SHRENI_EXT?.trim() || DEFAULT_EXT_MODULE;
     // Register the decision ledger sink beside localFileSink and any sink the
-    // extension just added; it writes decision-grade events to ledger.jsonl in the
-    // beads repo — the only git-tracked, pushed store; syncBeads commits it. A
+    // extension just added; it writes decision-grade events to ledger.jsonl at
+    // ledgerPath (the beads repo, where syncBeads commits it; the runtime dir on the engine). A
     // failing ledger write is isolated by the SinkRegistry.
     extensionCore.addEventSink(
-      makeLedgerSink({ kshetraId: kshetra.id, ledgerPath: join(kshetra.beads.path, 'ledger.jsonl') }),
+      makeLedgerSink({ kshetraId: kshetra.id, ledgerPath: ledgerPath(kshetra) }),
     );
     // Enforce kshetra.yaml budget caps on top of whatever policy is now active.
     // Composed last so the caps always apply; the inner policy keeps its model

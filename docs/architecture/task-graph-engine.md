@@ -488,7 +488,7 @@ client.projects.create({ name, idPrefix, actor }): Promise<Project>   // on the 
 client.projects.import(bundle: ProjectBundle, { actor, name?, idPrefix? },   // name and idPrefix default to the bundle's
                        inTx?: (tx) => Promise<void>): Promise<ImportReport>   // creates and loads in one transaction
 client.projects.get(id); client.projects.list()
-client.projects.export(id): Promise<ProjectBundle>              // every row of the project, events included
+client.projects.export(id, inSnapshot?: (tx) => Promise<void>): Promise<ProjectBundle>   // every row of the project, events included
 client.projects.purge(id, { actor, confirmName }): Promise<PurgeReport>   // the only delete of events
 
 const tg = client.project(projectId);   // the project's uuid, from the repo's Shreni config
@@ -722,7 +722,7 @@ Heartbeats update the task row but write no event; they would swamp the log.
 Three calls work on a whole project: bringing data in, taking a copy out, and removing it.
 
 - **`projects.import(bundle)`** creates a project and loads it in one transaction: plans; tasks with their own ids, states, origins, timestamps, boost, hold and leases; dependencies, through the cycle check; links; attempts; and past events with their original `at` and order, such as notes and close reasons, followed by its own `project.imported`. The project keeps the bundle's id when it has one, so a restore leaves the repo's Shreni config pointing at it; the bundle must be on the importing process's lifecycle version. Tasks keep the bundle's origins, so a restore is exact; Shreni's beads importer gives its tasks origin `imported` when it builds the bundle. It refuses a bundle no engine path could produce: duplicate rows, references to rows it lacks, parent loops, a leased state without its one open attempt as lease, live children under a terminal container, or live tasks waiting on work that can't satisfy them. It bypasses the create rules and moves, since the trigger allows an insert in any declared state while importing (never a state change), and sets each parent's `next_child` past its highest imported child. An optional callback runs inside the same transaction, so the caller can write its own rows with it, as Shreni does for memories. It takes only the engine's own bundle; Shreni's importer turns beads into one first, so the engine never learns the beads format.
-- **`projects.export(id)`** returns the same bundle for one project, every row and event, read in one snapshot; it survives JSON, and keeps times to the millisecond, so a project can be snapshotted, moved to another database, or restored with purge and import.
+- **`projects.export(id)`** returns the same bundle for one project, every row and event, read in one snapshot; an optional callback runs inside that snapshot, so the caller reads its own rows as of the same moment, as Shreni does for its tables. The bundle survives JSON, and keeps times to the millisecond, so a project can be snapshotted, moved to another database, or restored with purge and import.
 - **`projects.purge(id)`** deletes every row of a project, events included, in one transaction, after the caller types the project's name back. It is the only way past the events trigger: it sets a session flag naming the project, and the trigger then allows deletes of that project's rows only. Its record goes to `purges`, since the project's own events go with it.
 
 ## Testing

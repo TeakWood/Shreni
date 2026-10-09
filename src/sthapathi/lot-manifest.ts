@@ -16,6 +16,7 @@ import { effectiveLevel, type GateLevel, type GateName } from './gates.js';
 import { AGENT_ROLES, resolveAgentModel, type KshetraConfig } from '../kshetra/config.js';
 import { activeAblations, isAblated } from '../kshetra/ablation.js';
 import { providerBin } from '../agents/providers/registry.js';
+import { withTrackerReads } from '../policy/sthapathi/reads.js';
 import type { Provider } from '../agents/providers/types.js';
 
 // A single external probe's result: the trimmed first line of output, or null +
@@ -55,6 +56,18 @@ const GATE_NAMES: GateName[] = ['test', 'lint', 'coverage', 'diffSize'];
 
 // Run fn, returning null on any throw. For the git/file probes whose failure must
 // degrade to "unknown", not crash the collector.
+// The engine read opens a connection set, so it gets longer than a probe.
+const ENGINE_READ_TIMEOUT_MS = 5_000;
+
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer from the database within ${ms}ms`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
 async function safe<T>(fn: () => Promise<T> | T): Promise<T | null> {
   try {
     return await fn();
@@ -167,7 +180,18 @@ export function collectConfig(kshetra: KshetraConfig): Record<string, unknown> {
 
 // beads state today: the beads repo HEAD + the last Dolt commit recorded in
 // export-state.json at the beads repo root. B4 (freeze/restore) will add a tag.
-async function collectBeads(kshetra: KshetraConfig): Promise<Record<string, unknown>> {
+export async function collectBeads(kshetra: KshetraConfig): Promise<Record<string, unknown>> {
+  // On the task graph engine the project's last event id is its version. The
+  // read opens the database, so it is bounded, and a failure is recorded as an
+  // error rather than as null, which is an event-less project's id.
+  if (kshetra.project) {
+    try {
+      const lastEventId = await withDeadline(withTrackerReads(kshetra, r => r.lastEventId()), ENGINE_READ_TIMEOUT_MS);
+      return { engine: { projectId: kshetra.project, lastEventId } };
+    } catch (err) {
+      return { engine: { projectId: kshetra.project, lastEventId: null, error: (err as Error).message } };
+    }
+  }
   const headSha = await safe(() => git(kshetra.beads.path).headSha());
   const lastDoltCommit = safeSync(() => {
     const raw = readFileSync(join(kshetra.beads.path, 'export-state.json'), 'utf8');

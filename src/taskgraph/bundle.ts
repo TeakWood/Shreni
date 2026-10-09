@@ -303,8 +303,10 @@ export async function importProject(
 
 type Row = Record<string, any>;
 
-export async function exportProject(db: Kysely<any>, projectId: string): Promise<ProjectBundle> {
-  // One snapshot, so the rows agree with each other.
+export async function exportProject(
+  db: Kysely<any>, projectId: string, inSnapshot?: (tx: { db: Transaction<any> }) => Promise<void>,
+): Promise<ProjectBundle> {
+  // One snapshot, so the rows agree with each other, and with the caller's own.
   return db.transaction().setIsolationLevel('repeatable read').execute(async trx => {
     const q = async <R = Row>(query: ReturnType<typeof sql>) => (await query.execute(trx)).rows as R[];
     const [p] = await q(sql`select * from taskgraph.projects where id = ${projectId}`);
@@ -315,6 +317,7 @@ export async function exportProject(db: Kysely<any>, projectId: string): Promise
     const links = await q(sql`select a, b, kind from taskgraph.task_links where project_id = ${projectId} order by a, b, kind`);
     const attempts = await q(sql`select * from taskgraph.attempts where project_id = ${projectId} order by started_at, id`);
     const events = await q(sql`select * from taskgraph.events where project_id = ${projectId} order by id`);
+    if (inSnapshot) await inSnapshot({ db: trx });
     return {
       format: BUNDLE_FORMAT,
       version: 1,

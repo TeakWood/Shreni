@@ -148,21 +148,21 @@ describe('readFeeds', () => {
 // ── runReport (resolution + wiring) ──────────────────────────────────────────
 
 describe('runReport', () => {
-  it('resolves via @mention and prints the report', () => {
+  it('resolves via @mention and prints the report', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runReport({ args: ['@myapp'], flagKshetra: undefined, cwd: '/tmp', kshetras: [KSHETRA] });
+    await runReport({ args: ['@myapp'], flagKshetra: undefined, cwd: '/tmp', kshetras: [KSHETRA] });
     expect(log).toHaveBeenCalledOnce();
     expect(log.mock.calls[0][0]).toContain('Run metrics: myapp');
     log.mockRestore();
   });
 
-  it('throws for an unknown kshetra id', () => {
-    expect(() =>
+  it('throws for an unknown kshetra id', async () => {
+    await expect(
       runReport({ args: ['@nope'], flagKshetra: undefined, cwd: '/tmp', kshetras: [KSHETRA] }),
-    ).toThrow(/Kshetra not found: nope/);
+    ).rejects.toThrow(/Kshetra not found: nope/);
   });
 
-  it('with turns:true emits the per-turn series as JSONL, not the table (epic 408/A1)', () => {
+  it('with turns:true emits the per-turn series as JSONL, not the table (epic 408/A1)', async () => {
     const turnLine = (turnIndex: number, input: number, sidechain: boolean) => JSON.stringify({
       ...ev({
         type: 'turn_usage', kshetra: K, beadId: 'b1', agent: 'silpi', provider: 'anthropic', model: 'm',
@@ -177,7 +177,7 @@ describe('runReport', () => {
       throw e;
     });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runReport({ args: ['@myapp'], flagKshetra: undefined, cwd: '/tmp', kshetras: [KSHETRA], turns: true });
+    await runReport({ args: ['@myapp'], flagKshetra: undefined, cwd: '/tmp', kshetras: [KSHETRA], turns: true });
     const printed = log.mock.calls.map(c => c[0]);
     log.mockRestore();
     // One JSON row per turn; NOT the terminal table.
@@ -261,7 +261,7 @@ describe('renderReport — drain outcomes (epic 7h3 / Study B3)', () => {
 });
 
 describe('runReport --json (epic hto)', () => {
-  it('emits the full metrics incl. per-lot shreniElapsedMs and breakdown fields', () => {
+  it('emits the full metrics incl. per-lot shreniElapsedMs and breakdown fields', async () => {
     mockLoadRegistry.mockReturnValue([KSHETRA]);
     mockReadFileSync.mockImplementation((path: string) => {
       if (path.endsWith('activity.jsonl')) return LOT_EVENTS.map(e => JSON.stringify(e)).join('\n') + '\n';
@@ -270,7 +270,7 @@ describe('runReport --json (epic hto)', () => {
       throw e;
     });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
+    await runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
     const printed = log.mock.calls.map(c => c[0]).join('\n');
     log.mockRestore();
     const parsed = JSON.parse(printed) as { kshetra: string; lots: Array<{ shreniElapsedMs: number; sessionsMs: number; unexplainedMs: number }> };
@@ -282,7 +282,7 @@ describe('runReport --json (epic hto)', () => {
     expect(parsed.lots[0]).toMatchObject({ concurrentSessionsMs: 0, concurrentSyncMs: 0 });
   });
 
-  it('includes the concurrent fields in --json (Shreni-beads-qqq)', () => {
+  it('includes the concurrent fields in --json (Shreni-beads-qqq)', async () => {
     mockLoadRegistry.mockReturnValue([KSHETRA]);
     mockReadFileSync.mockImplementation((path: string) => {
       if (path.endsWith('activity.jsonl')) return CONCURRENT_EVENTS.map(e => JSON.stringify(e)).join('\n') + '\n';
@@ -291,14 +291,14 @@ describe('runReport --json (epic hto)', () => {
       throw e;
     });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
+    await runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
     const printed = log.mock.calls.map(c => c[0]).join('\n');
     log.mockRestore();
     const parsed = JSON.parse(printed) as { lots: Array<Record<string, number>> };
     expect(parsed.lots[0]).toMatchObject({ sessionsMs: 10000, concurrentSessionsMs: 60000, syncMs: 0, concurrentSyncMs: 5000 });
   });
 
-  it('exposes perSessionContext, one row per agent session of a run (Shreni-beads-6eg)', () => {
+  it('exposes perSessionContext, one row per agent session of a run (Shreni-beads-6eg)', async () => {
     const turnLine = (sessionId: string, agent: string, effective: number): string => JSON.stringify({
       type: 'turn_usage', kshetra: K, beadId: 'b1', agent, provider: 'anthropic', model: 'm', turnIndex: 0,
       messageId: `${sessionId}-0`, inputTokens: effective, cacheReadTokens: 0, cacheCreationTokens: 0,
@@ -312,7 +312,7 @@ describe('runReport --json (epic hto)', () => {
       throw e;
     });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
+    await runReport({ args: [`@${K}`], flagKshetra: undefined, cwd: '/nowhere', kshetras: [KSHETRA], json: true });
     const printed = log.mock.calls.map(c => c[0]).join('\n');
     log.mockRestore();
     const parsed = JSON.parse(printed) as {

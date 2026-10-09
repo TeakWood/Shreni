@@ -5,7 +5,8 @@ import { loadRegistry } from '../kshetra/registry';
 import { readPid, isAlive } from './pid';
 import { parseLabels } from './labels';
 import { loadState } from '../kshetra/state';
-import { kshetraStateLocations } from '../kshetra/state-locations';
+import { kshetraStateLocations, ledgerPath } from '../kshetra/state-locations';
+import { freezeEngine, type EngineSnapshotInfo } from '../policy/sthapathi/snapshot';
 import { git } from '../sthapathi/git';
 import { getBuildIdentity } from '../sthapathi/build-info';
 import {
@@ -15,6 +16,7 @@ import {
   readLastDoltCommit,
   computeSnapshotId,
   MANIFEST_FILENAME,
+  BEADS_SNAPSHOT_SCHEMA_VERSION,
   SNAPSHOT_SCHEMA_VERSION,
   type SnapshotLocationEntry,
   type SnapshotManifest,
@@ -146,6 +148,14 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
   const resolvedOut = resolveFreezeOutDir(out, labels, now);
   mkdirSync(resolvedOut, { recursive: true });
 
+  // On the task graph engine the project's bundle comes first: it holds the
+  // worker lock, so a refusal there leaves nothing half-written.
+  let engineFrozen: Awaited<ReturnType<typeof freezeEngine>> | undefined;
+  if (kshetra.project) {
+    // The worker lock keeps a worker on any host from writing meanwhile; --force freezes regardless.
+    engineFrozen = await freezeEngine(kshetra, resolvedOut, { force });
+  }
+
   const locations = kshetraStateLocations(kshetra);
   const entries: SnapshotLocationEntry[] = [];
 
@@ -200,18 +210,26 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
 
   // beads HEAD is best-effort provenance: a beads dir that is not a git checkout
   // records null rather than failing the freeze.
+  // On the task graph engine the project's bundle and last event id stand in
+  // for the beads directory, its git head and its last Dolt commit.
   let headSha: string | null = null;
-  try {
-    headSha = await git(kshetra.beads.path).headSha();
-  } catch {
-    headSha = null;
+  let engine: EngineSnapshotInfo | undefined;
+  let beadStats;
+  if (engineFrozen) {
+    engine = engineFrozen.info;
+    beadStats = engineFrozen.stats;
+  } else {
+    try {
+      headSha = await git(kshetra.beads.path).headSha();
+    } catch {
+      headSha = null;
+    }
+    beadStats = readBeadStats(kshetra.beads.path);
   }
-
-  const beadStats = readBeadStats(kshetra.beads.path);
   const ragEntry = entries.find(e => e.key === 'rag');
 
   const manifest: SnapshotManifest = {
-    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    schemaVersion: engine ? SNAPSHOT_SCHEMA_VERSION : BEADS_SNAPSHOT_SCHEMA_VERSION,
     snapshotId: '', // filled in below once the rest of the manifest is assembled
     kshetraId: id,
     createdAt: now.toISOString(),
@@ -219,9 +237,10 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
     repoPath: kshetra.repo.path,
     beads: {
       headSha,
-      lastDoltCommit: readLastDoltCommit(kshetra.beads.path),
+      lastDoltCommit: engine ? null : readLastDoltCommit(kshetra.beads.path),
       ...beadStats,
     },
+    ...(engine ? { engine } : {}),
     rag: {
       present: ragEntry?.present ?? false,
       sizeBytes: ragEntry?.sizeBytes ?? 0,
@@ -238,13 +257,14 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
   // never fail the snapshot). The snapshot's own ledger.jsonl was copied before
   // this line, so it records state as-of freeze, not its own state_frozen entry.
   try {
-    appendLedgerEvent(join(kshetra.beads.path, 'ledger.jsonl'), {
+    appendLedgerEvent(ledgerPath(kshetra), {
       type: 'state_frozen',
       kshetra: id,
       snapshotId: manifest.snapshotId,
       beadCount: beadStats.beadCount,
       memoryCount: beadStats.memoryCount,
       beadsSha: headSha,
+      ...(engine ? { lastEventId: engine.lastEventId } : {}),
       labels,
     });
   } catch (err) {

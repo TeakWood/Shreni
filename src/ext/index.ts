@@ -35,7 +35,7 @@ export {
 } from './ledger.js';
 export type { LedgerEntry, LedgerAudience } from './ledger.js';
 // The ledgerSink (4a2.3): the second EventSink that writes decision-grade events
-// to ledger.jsonl in the beads repo. Registered at worker startup beside
+// to ledger.jsonl at ledgerPath. Registered at worker startup beside
 // localFileSink via extensionCore.addEventSink.
 export { makeLedgerSink, appendLedgerEvent } from './ledger-sink.js';
 export type { LedgerSinkOpts } from './ledger-sink.js';

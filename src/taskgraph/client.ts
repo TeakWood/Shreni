@@ -182,11 +182,11 @@ export class TaskGraphClient {
       return importProject(this, bundle, { ...opts, actor: checkActor(opts.actor) }, inTx);
     },
 
-    /** Every row of a project, events included, read in one snapshot. */
-    export: async (id: string): Promise<ProjectBundle> => {
+    /** Every row of a project, events included, read in one snapshot; `inSnapshot` reads the caller's rows in it too. */
+    export: async (id: string, inSnapshot?: Parameters<typeof exportProject>[2]): Promise<ProjectBundle> => {
       await this.need(CORE);
       if (!UUID.test(id)) throw new NotFound('project', id);
-      return exportProject(this.db, id.toLowerCase());
+      return exportProject(this.db, id.toLowerCase(), inSnapshot);
     },
 
     /** Deletes every row of a project, events included, once its name is typed back; the only delete of events. */

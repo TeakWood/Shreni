@@ -1,4 +1,5 @@
 import { describe, it, expect, onTestFinished } from 'vitest';
+import { sql } from 'kysely';
 import { openEngine, type TestEngine } from './test/engine';
 import { createWireTestDb } from './test/pglite';
 import { testLifecycle } from './test/lifecycle';
@@ -53,6 +54,21 @@ describe('export, purge and import', { timeout: 30_000 }, () => {
     const second = await e.client.projects.export(e.tg.id);
     expect(withoutImportEvent(second)).toEqual(first);
     expect(second.events.at(-1)).toMatchObject({ kind: 'project.imported', actor: 'ann' });
+  });
+
+  it('runs the export callback inside the export\'s snapshot', async () => {
+    // Over the postgres.js dialect, which sets the isolation level (PGlite's Kysely dialect ignores it).
+    const w = await createWireTestDb();
+    const client = await openTaskGraph({ sql: w.sql, lifecycle: testLifecycle() });
+    onTestFinished(async () => { await client.close(); await w.close(); });
+    await client.migrate();
+    const p = await client.projects.create({ name: 'web', idPrefix: 'web', actor: ACTOR });
+    let isolation = '';
+    await client.projects.export(p.id, async ({ db }) => {
+      const r = await sql<{ i: string }>`select current_setting('transaction_isolation') as i`.execute(db);
+      isolation = r.rows[0].i;
+    });
+    expect(isolation).toBe('repeatable read');
   });
 
   it('writes nothing when the callback throws', async () => {

@@ -21,8 +21,11 @@ import type { StateLocationKind, StateLocationRole } from './state-locations.js'
 // they live here rather than in either command.
 
 // Bump when the manifest shape or snapshot layout changes incompatibly. restore
-// refuses a snapshot whose schemaVersion it does not understand.
-export const SNAPSHOT_SCHEMA_VERSION = 1;
+// refuses a snapshot whose schemaVersion it does not understand. Version 2 adds
+// a task graph engine snapshot (the `engine` section, no beads location); a
+// beads snapshot is still written as version 1, so older builds restore it.
+export const SNAPSHOT_SCHEMA_VERSION = 2;
+export const BEADS_SNAPSHOT_SCHEMA_VERSION = 1;
 
 // The manifest file at the root of a snapshot directory.
 export const MANIFEST_FILENAME = 'manifest.json';
@@ -85,6 +88,9 @@ export interface SnapshotManifest {
     lastDoltCommit: string | null;
   } & BeadStats;
   rag: { present: boolean; sizeBytes: number };
+  // A Kshetra on the task graph engine: its project's bundle and version (the
+  // last event id). `beads` then carries the bundle's task and memory stats.
+  engine?: { projectId: string; lastEventId: string | null; eventCount: number; snapshotPath: string };
   // One entry per state location (from kshetraStateLocations), in resolver order.
   locations: SnapshotLocationEntry[];
   // Opaque `--label key=value` metadata passed on the command line, verbatim.

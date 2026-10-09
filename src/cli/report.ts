@@ -15,6 +15,7 @@ import { computeMetrics, computeTurnSeries, type Metrics, type BeadInteraction, 
 import { ABLATIONS } from '../kshetra/ablation';
 import type { LoggedEvent } from '../sthapathi/activity-log';
 import type { UsageEntry } from '../ext/types';
+import { withTrackerReads } from '../policy/sthapathi/reads';
 import type { KshetraConfig } from '../kshetra/config';
 
 // Read one JSONL feed into a typed array. Mirrors readNotifications' contract: a
@@ -293,10 +294,27 @@ export interface ReportOpts {
   json?: boolean;
 }
 
-export function runReport(opts: ReportOpts): void {
+/**
+ * The developer's interactions from the engine's events. Only waiting-on-human
+ * needs the database, so without it the rest of the report still prints, and
+ * stderr says that one figure is unknown.
+ */
+async function engineInteractions(kshetra: KshetraConfig) {
+  try {
+    return await withTrackerReads(kshetra, r => r.interactions());
+  } catch (err) {
+    console.error(`warning: waiting-on-human is unknown (the task graph database could not be read: ${(err as Error).message})`);
+    return [];
+  }
+}
+
+export async function runReport(opts: ReportOpts): Promise<void> {
   const kshetras = opts.kshetras ?? loadRegistry();
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
-  const feeds = readFeeds(kshetra.id, kshetra.beads.path);
+  // On the task graph engine the waiting-on-human metric reads events, not interactions.jsonl.
+  const feeds = kshetra.project
+    ? { ...readFeeds(kshetra.id), interactions: await engineInteractions(kshetra) }
+    : readFeeds(kshetra.id, kshetra.beads.path);
   if (opts.turns) {
     // One JSON object per line (JSONL): streams row-by-row into a plotting/
     // analysis pipeline without loading the whole array, and matches the JSONL

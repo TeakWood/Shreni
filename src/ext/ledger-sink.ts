@@ -6,8 +6,8 @@
 //
 // What it does: filter the stream to decision-grade events (isDecisionGrade,
 // 4a2.1), map each to a LedgerEntry (toLedgerEntry), and append one JSON object
-// per line to ledger.jsonl in the BEADS REPO — the only git-tracked, pushed,
-// shareable store in the system. The high-volume run-log tier (agent_text,
+// per line to ledger.jsonl at ledgerPath: the BEADS REPO (git-tracked, pushed,
+// shareable), or the Kshetra's runtime dir on the task graph engine. The high-volume run-log tier (agent_text,
 // agent_tool_call) never lands here; its evidence is referenced by runId into
 // activity.jsonl / usage.jsonl, never inlined.
 //
@@ -50,8 +50,8 @@ export interface LedgerSinkOpts {
   // sink ignore any foreign event defensively (e.g. a future multi-Kshetra
   // process registering several ledger sinks against one registry).
   kshetraId: string;
-  // Absolute path to ledger.jsonl in the beads repo — the worker resolves it as
-  // join(kshetra.beads.path, 'ledger.jsonl') and passes it in, so this module
+  // Absolute path to ledger.jsonl — the worker resolves it with ledgerPath
+  // (kshetra/state-locations) and passes it in, so this module
   // stays decoupled from KshetraConfig.
   ledgerPath: string;
 }

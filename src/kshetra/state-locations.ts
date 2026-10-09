@@ -26,6 +26,13 @@ export function kshetraDir(kshetraId: string): string {
 // this one file under `.kshetras[<id>]` (src/kshetra/state.ts). A restore must
 // therefore rewrite only this Kshetra's slice, never replace the file — see the
 // `json-slice` entry in kshetraStateLocations.
+// The decision ledger. On the task graph engine it sits in the runtime dir,
+// beside activity.jsonl and usage.jsonl (migration plan, "Beyond the bd
+// wrapper"); on beads, in the beads directory, where the beads sync commits it.
+export function ledgerPath(kshetra: Pick<KshetraConfig, 'id' | 'project' | 'beads'>): string {
+  return kshetra.project ? join(kshetraDir(kshetra.id), 'ledger.jsonl') : join(kshetra.beads.path, 'ledger.jsonl');
+}
+
 export function stateFilePath(): string {
   return join(shreniDir(), 'state.json');
 }
@@ -84,16 +91,18 @@ export interface StateLocation {
 // the resolver only enumerates what shreni itself snapshots.
 export function kshetraStateLocations(kshetra: KshetraConfig): StateLocation[] {
   return [
-    {
+    // On the task graph engine the tasks live in the database, which freeze
+    // snapshots through the project's export, and the ledger in the runtime dir.
+    ...(kshetra.project ? [] : [{
       // The whole beads directory — Dolt DB, issues.jsonl, export-state.json,
       // ledger.jsonl. Snapshotted whole (memories round-trip through here, so a
       // partial rebuild by `bd import` would leak them between trials).
       key: 'beads',
       path: kshetra.beads.path,
-      kind: 'dir',
-      role: 'beads',
+      kind: 'dir' as const,
+      role: 'beads' as const,
       required: true,
-    },
+    }]),
     {
       key: 'runtime',
       path: kshetraDir(kshetra.id),

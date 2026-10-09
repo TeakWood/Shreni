@@ -5,6 +5,7 @@ import { loadRegistry } from '../kshetra/registry';
 import { withTrackerReads } from '../policy/sthapathi/reads';
 import { git } from '../sthapathi/git';
 import { readBeadStats, readManifest } from '../kshetra/snapshot';
+import { taskIdHash } from '../policy/sthapathi/snapshot';
 import { loadStaticAgentContext, type StaticAgentContext } from '../sthapathi/dispatch';
 import type { KshetraConfig } from '../kshetra/config';
 
@@ -513,7 +514,8 @@ export interface ExportProvenanceInputs {
 export interface ExportDeps {
   loadBeadsJson(kshetra: KshetraConfig): Promise<string>;
   registry(): KshetraConfig[];
-  loadProvenance(kshetra: KshetraConfig): Promise<ExportProvenanceInputs>;
+  /** `ids`: the exported tasks' ids, which the engine's hash is over, so both describe one read. */
+  loadProvenance(kshetra: KshetraConfig, ids: string[]): Promise<ExportProvenanceInputs>;
   // Read a freeze snapshot's manifest for the --snapshot cross-check. Returns just
   // the two fields the cross-check needs — the snapshot id to cite and the bead-id
   // hash to match against the exported state. Throws if the directory is not a
@@ -528,7 +530,10 @@ export const defaultDeps: ExportDeps = {
   // Every task: on the engine that includes the proposed ones, which bd has no status for.
   loadBeadsJson: kshetra => withTrackerReads(kshetra, r => r.list({ status: kshetra.project ? 'all' : 'open,in_progress,blocked,deferred,closed' })),
   registry: () => loadRegistry(),
-  async loadProvenance(kshetra) {
+  async loadProvenance(kshetra, ids) {
+    // On the task graph engine: no beads head; the id hash over the exported
+    // tasks (every one, as loadBeadsJson reads them), as freeze records it.
+    if (kshetra.project) return { beadsHeadSha: null, beadIdHash: taskIdHash(ids) };
     // Beads HEAD is best-effort (a beads dir that is not a git checkout records
     // null rather than failing the export) — mirrors freeze's own handling.
     let beadsHeadSha: string | null = null;
@@ -591,7 +596,7 @@ export async function runExport(ctx: CommandContext, overrides: Partial<ExportDe
   // --snapshot names a freeze manifest. A named snapshot whose recorded state does
   // NOT match the beads being exported is a provenance falsehood — fail loudly
   // (write nothing) rather than stamp a citation the export doesn't satisfy.
-  const { beadsHeadSha, beadIdHash } = await deps.loadProvenance(kshetra);
+  const { beadsHeadSha, beadIdHash } = await deps.loadProvenance(kshetra, beads.map(b => b.id));
   let snapshotId: string | null = null;
   if (snapshotDir) {
     const m = deps.readSnapshotManifest(snapshotDir);

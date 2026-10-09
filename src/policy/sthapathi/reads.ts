@@ -7,6 +7,7 @@ import { engineStore } from '../../sthapathi/task-store';
 import { openKshetraEngine } from './connect';
 import { PR_NEEDS_FOLLOWUP_LABEL } from '../../sthapathi/pr-followup';
 import { taskLifecycle } from '../lifecycle/lifecycle';
+import { lastEventId } from '../db/bundle';
 
 // Shreni's reads on the task graph engine (engine spec, "API"; migration plan,
 // "Replacing today's bd wrapper"): show, logs, export, status, drain
@@ -24,7 +25,22 @@ export interface TrackerReads {
   show(id: string): Promise<string>;
   /** The task's direct children. */
   children(id: string): Promise<string>;
+  /** The project's last event id, its version for lot manifests and snapshots; null on beads. */
+  lastEventId(): Promise<string | null>;
+  /**
+   * What people did on tasks, oldest first, in the shape of beads'
+   * interactions.jsonl: every event by a developer, and the interactions the
+   * importer kept from beads (BEADS_INTERACTION_EVENT). Empty on beads, where
+   * the report reads the file.
+   */
+  interactions(): Promise<{ created_at: string; issue_id: string; kind: string; actor: string }[]>;
 }
+
+/**
+ * The event kind the beads importer writes for each interaction it keeps from
+ * beads' interactions.jsonl; it counts as a person acting whatever its actor's role.
+ */
+export const BEADS_INTERACTION_EVENT = 'beads.interaction';
 
 /** The label a task waiting on its PR carries, as bd's awaiting-merge label did. */
 const AWAITING_MERGE = 'awaiting-merge';
@@ -164,6 +180,15 @@ export function engineReads(shreni: ShreniClient, tg: ProjectHandle): TrackerRea
     async children(id) {
       return json(await tg.tasks.list({ parent: id, orderBy: 'created' }));
     },
+    lastEventId: () => lastEventId(shreni, tg.id),
+    async interactions() {
+      const r = await sql<{ at: Date; task_id: string; kind: string; actor: string }>`
+        select e.at, e.task_id, e.kind, e.actor from taskgraph.events e
+         where e.project_id = ${tg.id} and e.task_id is not null
+           and (e.actor_role = 'developer' or e.kind = ${BEADS_INTERACTION_EVENT})
+         order by e.id`.execute(shreni.db);
+      return r.rows.map(e => ({ created_at: new Date(e.at).toISOString(), issue_id: e.task_id, kind: e.kind, actor: e.actor }));
+    },
   };
 }
 
@@ -175,6 +200,8 @@ function bdReads(kshetra: KshetraConfig): TrackerReads {
     ready: () => c.ready(),
     show: id => c.show(id),
     children: id => c.children(id),
+    lastEventId: async () => null,
+    interactions: async () => [],
   };
 }
 
