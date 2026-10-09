@@ -251,7 +251,7 @@ describe('schema migrations', { timeout: PGLITE_TIMEOUT }, () => {
   it('a declined migration doesn\'t start, and an up-to-date database needs none', async () => {
     const { shreni, open } = await behind();
     const base = { open, tools: tools(), backupsDir: dir(), print: () => {}, env: {}, interactive: () => true };
-    await expect(ensureMigrated(kshetra, { ...base, ask: async () => 'n' })).rejects.toThrow(/not started; run shreni db migrate first/);
+    await expect(ensureMigrated(kshetra, { ...base, ask: async () => 'n' })).rejects.toThrow(/the migrations weren't run; run shreni db migrate first/);
     await shreni.migrate();
     await ensureMigrated(kshetra, { ...base, ask: async () => { throw new Error('not asked'); } });
     const out: string[] = [];

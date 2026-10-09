@@ -150,8 +150,8 @@ export class TaskGraphClient {
   }
 
   readonly projects = {
-    /** Creates a project on the lifecycle's registered version. */
-    create: async (input: { name: string; idPrefix: string; actor: Actor }): Promise<Project> => {
+    /** Creates a project on the lifecycle's registered version; `inTx` writes the caller's rows in the same transaction. */
+    create: async (input: { name: string; idPrefix: string; actor: Actor }, inTx?: ImportCallback): Promise<Project> => {
       await this.need(TRIGGERS);
       const actor = checkActor(input.actor);
       if (!input.name) throw new TypeError('a project needs a name');
@@ -166,6 +166,7 @@ export class TaskGraphClient {
           projectId: project.id, kind: 'project.created', actor: actor.id, actorRole: actor.role,
           payload: { name: project.name, idPrefix: project.idPrefix },
         });
+        await inTx?.({ db, project });
         return project;
       });
     },

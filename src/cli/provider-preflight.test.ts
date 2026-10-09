@@ -60,7 +60,7 @@ describe('checkProviderInstalled', () => {
     expect(res.message).toContain('npm install -g @google/gemini-cli');
     expect(res.message).toContain('https://');
     expect(res.message).toContain('SHRENI_GEMINI_BIN');
-    expect(res.message).toContain('shreni init-kshetra --provider gemini');
+    expect(res.message).toContain('shreni init --mode kshetra --provider gemini');
   });
 
   it('honours the SHRENI_*_BIN override when probing', () => {

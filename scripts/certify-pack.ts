@@ -4,7 +4,7 @@
  * Usage:  pnpm certify <pack-name>            (requires `pnpm build` first)
  *
  * For one pack: scaffold a throwaway Kshetra from packs/<name>/reference/
- * (the fixture repo, with backlog.sh at its root), run `shreni init-kshetra
+ * (the fixture repo, with backlog.sh at its root), run `shreni init --mode kshetra --on-beads
  * --pack <name>` against it, file the fixture backlog, run the worker until
  * the backlog completes, then assert from the activity log + bd + git that:
  *   - every backlog bead merged (task_done approved + bead-<id> commit on main)
@@ -104,8 +104,8 @@ async function main(): Promise<void> {
     gitRepoWithLocalOrigin(beadsDir, join(work, 'beads-origin.git'));
 
     // 2. Init the Kshetra from the pack (materialization under test too).
-    console.log('▶ shreni init-kshetra --pack', packName);
-    sh('node', [SHRENI, 'init-kshetra',
+    console.log('▶ shreni init --mode kshetra --on-beads --pack', packName);
+    sh('node', [SHRENI, 'init', '--mode', 'kshetra', '--on-beads',
       '--slug', slug, '--path', repoDir, '--pack', packName,
       '--beads-path', beadsDir, '--provider', 'claude',
     ]);

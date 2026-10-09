@@ -67,7 +67,7 @@ function installMessage(provider: Provider, bin: string): string {
     `  Docs:        ${info.docsUrl}`,
     `  Override:    set ${info.binEnvVar}=/path/to/${info.defaultBin} if it is installed elsewhere`,
     ``,
-    `Then re-run:  shreni init-kshetra --provider ${info.cliName} ...`,
+    `Then re-run:  shreni init --mode kshetra --provider ${info.cliName} ...`,
   ].join('\n');
 }
 

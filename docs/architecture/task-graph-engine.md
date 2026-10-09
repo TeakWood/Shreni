@@ -485,7 +485,8 @@ const client = await openTaskGraph({
 // Database and projects: not role-checked; they belong to whoever holds the credentials
 client.migrate(): Promise<MigrationReport>
 client.pendingMigrations(): Promise<string[]>                     // what migrate would apply, oldest first
-client.projects.create({ name, idPrefix, actor }): Promise<Project>   // on the lifecycle's registered version
+client.projects.create({ name, idPrefix, actor },                    // on the lifecycle's registered version
+                       inTx?: (tx) => Promise<void>): Promise<Project>   // the caller's rows in the same transaction
 client.projects.import(bundle: ProjectBundle, { actor, name?, idPrefix? },   // name and idPrefix default to the bundle's
                        inTx?: (tx) => Promise<void>): Promise<ImportReport>   // creates and loads in one transaction
 client.projects.get(id); client.projects.list()

@@ -299,14 +299,15 @@ A project can be tracked without ever being worked: Shreni keeps its task graph,
 | Config | `kshetra.yaml`, conventions, the RAG stub | `tracker.yaml` only (Project config) |
 | Register in `~/.shreni/registry.json` | yes | no: never registered, so no worker can start |
 
-The follow-up questions differ too. A Kshetra keeps today's provider, model and preflight questions. A tracker asks only which agent CLIs people use in the repo, to pick the instruction files; it defaults to Claude and skips the preflight. As today, every phase is idempotent, so a re-run after a failure resumes.
+The follow-up questions differ too. A Kshetra keeps today's provider, model and preflight questions. A tracker asks only which agent CLIs people use in the repo, to pick the instruction files; it defaults to Claude and skips the preflight. As today, every phase is idempotent, so a re-run after a failure resumes. The project is registered once its config file is written, and the config then records its uuid at once, so a run that stops at an earlier phase leaves no project behind, and a re-run finds the one the config names.
 
 **Instructions.** The Instructions phase writes Shreni's block into each provider's instruction file, in the version that matches the mode. The design and both templates are in [Instructions for agent sessions](#instructions-for-agent-sessions).
 
 **Changing mode** is deliberate:
 
 - **Tracker to Kshetra:** `shreni init --mode kshetra` on a tracker repo, confirmed by typing the project's name. It is the only way a tracker repo is ever worked.
-- **Kshetra to tracker:** allowed once no worker is running; it removes the repo from the registry.
+- **Kshetra to tracker:** allowed once no worker is running, after a y/N in a terminal; it removes the repo from the registry and keeps the project. `kshetra.yaml` is gitignored, so its settings are kept aside in `kshetra.yaml.bak`, not deleted.
+- **`shreni start`** refuses a Kshetra whose repo holds a `tracker.yaml`, and, run from a tracker repo, refuses when there is nothing else to start or it names the tracker.
 - **Init again in the same mode** refreshes the project and resumes any phase left unfinished.
 
 ## Project config

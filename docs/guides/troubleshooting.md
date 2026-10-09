@@ -10,7 +10,7 @@ unblocking so Sthapathi can retry.
 Error: ~/.shreni/registry.json not found
 ```
 
-No Kshetras are registered. Either run `shreni init-kshetra` for a new project or `shreni register /path/to/project` for an existing one.
+No Kshetras are registered. Either run `shreni init --mode kshetra` for a new project or `shreni register /path/to/project` for an existing one.
 
 ---
 

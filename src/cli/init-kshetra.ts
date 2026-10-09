@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import {
   writeFileSync, appendFileSync, symlinkSync,
-  existsSync, mkdirSync, readFileSync, readlinkSync, chmodSync,
+  existsSync, mkdirSync, readFileSync, readlinkSync, chmodSync, rmSync,
 } from 'fs';
 import { resolve, join, dirname, basename } from 'path';
 import * as yaml from 'js-yaml';
@@ -59,6 +59,40 @@ export interface InitKshetraOpts {
   pack?: string;
   noPack?: boolean;
   upgrade?: boolean;
+  // The task graph engine (policy spec, "Init"): the Database phase, and the
+  // Project phase that registers the project and returns its uuid. Without it
+  // the Kshetra is set up as before, on beads.
+  engine?: InitEngine;
+  // A tracker config this Kshetra replaces (tracker to Kshetra): removed once
+  // kshetra.yaml carries its project.
+  replaces?: string;
+}
+
+export interface InitEngine {
+  /** Reaches the server, creates the database if missing, and applies or offers migrations. */
+  database(database: string): Promise<void>;
+  /** Registers the project, or finds the one `existing` names; returns its uuid. */
+  project(input: { database: string; existing?: string; repoUrl: string }): Promise<string>;
+}
+
+/** The project and database an existing config names, kept across a re-run. */
+export function readProjectFields(configPath: string): { project?: string; database?: string } {
+  if (!existsSync(configPath)) return {};
+  const doc = yaml.load(readFileSync(configPath, 'utf8')) as Record<string, unknown> | null;
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  return { project: str(doc?.project), database: str(doc?.database) };
+}
+
+/** Writes `project: <uuid>` into a config, in place: the rest of the file, comments too, stays as it is. */
+export function recordProjectId(configPath: string, id: string): void {
+  const text = readFileSync(configPath, 'utf8');
+  const line = `project: ${id}`;
+  const next = /^project:.*$/m.test(text)
+    ? text.replace(/^project:.*$/m, line)
+    : /^name:.*$/m.test(text)
+      ? text.replace(/^(name:.*)$/m, `$1\n${line}`)
+      : `${line}\n${text}`;
+  if (next !== text) writeFileSync(configPath, next, 'utf8');
 }
 
 // Resolve the selected provider + model from init opts (§3.5). Validates the
@@ -637,6 +671,9 @@ export function generateKshetraYaml(opts: {
   // levels, or a preserved block from a prior config) so enforcement is
   // visible in the file rather than inherited silently from the schema.
   gates?: Record<string, unknown> | GatesConfig;
+  // The database entry and the project's uuid (policy spec, "Project config").
+  database?: string;
+  project?: string;
 }): string {
   const stack: DetectedStack = opts.stack ?? { language: opts.language ?? 'typescript', unknown: false };
   const conventions: Record<string, string> = {};
@@ -646,6 +683,8 @@ export function generateKshetraYaml(opts: {
   const config: Record<string, unknown> = {
     id: opts.slug,
     name: toName(opts.slug),
+    ...(opts.project ? { project: opts.project } : {}),
+    ...(opts.database ? { database: opts.database } : {}),
     repo: {
       path: opts.repoPath,
       remote: opts.repoRemote,
@@ -809,7 +848,7 @@ interface InitPhase {
 // Reconstruct the exact command to re-run init, so a failure message can tell the
 // operator precisely how to resume (completed phases will no-op).
 function buildReRunCommand(opts: InitKshetraOpts): string {
-  const parts = ['shreni init-kshetra', `--slug ${opts.slug}`, `--path ${opts.path}`];
+  const parts = ['shreni init --mode kshetra', `--slug ${opts.slug}`, `--path ${opts.path}`];
   if (opts.org) parts.push(`--org ${opts.org}`);
   if (opts.provider) parts.push(`--provider ${opts.provider}`);
   if (opts.model) parts.push(`--model ${opts.model}`);
@@ -819,6 +858,7 @@ function buildReRunCommand(opts: InitKshetraOpts): string {
   if (opts.pack) parts.push(`--pack ${opts.pack}`);
   if (opts.noPack) parts.push('--no-pack');
   if (opts.upgrade) parts.push('--upgrade');
+  if (!opts.engine) parts.push('--on-beads');
   return parts.join(' ');
 }
 
@@ -889,7 +929,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   if (opts.upgrade && pack && packStack) {
     const configPath = join(repoPath, SHRENI_DIR, 'kshetra.yaml');
     if (!existsSync(configPath)) {
-      throw new Error(`Nothing to upgrade: no config at ${configPath}. Run \`shreni init --pack ${pack.name}\` first.`);
+      throw new Error(`Nothing to upgrade: no config at ${configPath}. Run \`shreni init --mode kshetra --pack ${pack.name}\` first.`);
     }
     upgradeKshetraStack(configPath, packStack, `${pack.name}@${pack.version}`);
     console.log(`✓ stack values updated to ${pack.name}@${pack.version} in ${configPath} (other config blocks untouched).`);
@@ -1018,6 +1058,14 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   // repo.mainBranch (uvu.3): resolved in the Base branch phase (after origin
   // exists), consumed by generateKshetraYaml in the Config phase.
   let mainBranch = 'main';
+  // On the engine: the database and project the config names, kept on a re-run;
+  // a tracker's when this Kshetra replaces one.
+  const own = readProjectFields(configTarget);
+  const replaced = opts.replaces ? readProjectFields(opts.replaces) : {};
+  const kept = { project: own.project ?? replaced.project, database: own.database ?? replaced.database };
+  const database = kept.database ?? 'local';
+  let repoRemote = '';
+  const engine = opts.engine;
 
   const phases: InitPhase[] = [
     {
@@ -1040,6 +1088,11 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         });
       },
     },
+    ...(engine ? [{
+      name: 'Database',
+      recovery: `run shreni db check to see what the database needs.`,
+      run: () => engine.database(database),
+    }] : []),
     {
       name: 'Beads repo',
       recovery:
@@ -1095,7 +1148,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         `ensure the repo at ${repoPath} has an 'origin' remote ` +
         `(git -C ${repoPath} remote get-url origin).`,
       run: async () => {
-        const repoRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
+        repoRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
         // repoPath/beadsPath are already absolute; the loader does NOT expand ~ or
         // resolve relatives, so init bakes absolute paths in.
         // A pack materializes its own conventions templates (skip-and-warn);
@@ -1117,12 +1170,27 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           agents,
           mergePolicy,
           gates,
+          // Kept whenever the config names them, so a run without the engine never unlinks it.
+          ...(engine || kept.project ? { database, project: kept.project } : {}),
         });
         configPath = writeKshetraConfig(repoPath, yamlContent);
         appendShreniIntegration(repoPath);
         createRagIndexStub(opts.slug);
       },
     },
+    ...(engine ? [{
+      name: 'Project',
+      recovery: `run shreni db check; if the config names a project this database lacks, fix database: or delete project:.`,
+      run: async () => {
+        const id = await engine.project({ database, existing: kept.project, repoUrl: repoRemote });
+        recordProjectId(configPath, id);
+        // The repo is one kind of project or the other, never both.
+        if (opts.replaces && existsSync(opts.replaces)) {
+          rmSync(opts.replaces);
+          console.log(`  removed ${opts.replaces}; commit its removal`);
+        }
+      },
+    }] : []),
     {
       name: 'Register',
       recovery: `check that ~/.shreni/registry.json is writable.`,

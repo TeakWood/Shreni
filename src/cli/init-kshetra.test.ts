@@ -31,6 +31,7 @@ const mockReadlinkSync = vi.fn<(p: string) => string>().mockImplementation(() =>
   throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
 });
 const mockChmodSync = vi.fn();
+const mockRmSync = vi.fn();
 vi.mock('fs', () => ({
   writeFileSync: mockWriteFileSync,
   appendFileSync: mockAppendFileSync,
@@ -40,6 +41,7 @@ vi.mock('fs', () => ({
   readFileSync: mockReadFileSync,
   readlinkSync: mockReadlinkSync,
   chmodSync: mockChmodSync,
+  rmSync: mockRmSync,
 }));
 
 const mockRegisterKshetra = vi.fn();
@@ -114,6 +116,7 @@ const {
   resolveMergePolicy,
   resolveInitMainBranch,
   SHRENI_SECTION,
+  recordProjectId,
 } = await import('./init-kshetra');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1163,6 +1166,73 @@ describe('initKshetra', () => {
     expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], beadsCwd);
   });
 
+  describe('on the task graph engine (policy spec, "Init")', () => {
+    const ID = '00000000-0000-4000-8000-000000000001';
+    /** Files written, read back as the real fs would. */
+    function disk(initial: Record<string, string> = {}) {
+      const files = new Map(Object.entries(initial));
+      mockWriteFileSync.mockImplementation(((p: string, c: string) => { files.set(p, c); }) as never);
+      mockReadFileSync.mockImplementation(((p: string) => {
+        if (!files.has(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        return files.get(p)!;
+      }) as never);
+      mockExistsSync.mockImplementation((p: string) => p.endsWith('.git') || files.has(p));
+      return files;
+    }
+    function engine(order: string[]) {
+      return {
+        database: vi.fn(async (db: string) => { order.push(`database ${db}`); }),
+        project: vi.fn(async (input: { existing?: string }) => { order.push('project'); return input.existing ?? ID; }),
+      };
+    }
+
+    it('reaches the database before the beads repo, and registers the project once the config is written', async () => {
+      const files = disk();
+      const order: string[] = [];
+      const log = vi.spyOn(console, 'log').mockImplementation((l: unknown) => { if (typeof l === 'string' && l.startsWith('▶')) order.push(l); });
+      const e = engine(order);
+      await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
+      log.mockRestore();
+      expect(order).toEqual(['▶ App repo …', '▶ Base branch …', '▶ Database …', 'database local', '▶ Beads repo …', '▶ Repo wiring …', '▶ Config …', '▶ Project …', 'project', '▶ Register …']);
+      expect(e.project).toHaveBeenCalledWith({ database: 'local', existing: undefined, repoUrl: expect.any(String) });
+      const config = files.get('/repos/myapp/.shreni/kshetra.yaml')!;
+      expect(config).toMatch(new RegExp(`^name: Myapp\nproject: ${ID}\ndatabase: local\n`, 'm'));
+    });
+
+    it('a re-run keeps the project and database the config names', async () => {
+      const files = disk({ '/repos/myapp/.shreni/kshetra.yaml': `id: myapp\nname: Myapp\nproject: ${ID}\ndatabase: acme\n` });
+      const e = engine([]);
+      await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
+      expect(e.database).toHaveBeenCalledWith('acme');
+      expect(e.project).toHaveBeenCalledWith(expect.objectContaining({ database: 'acme', existing: ID }));
+      expect(files.get('/repos/myapp/.shreni/kshetra.yaml')!.match(/^project:/gm)).toHaveLength(1);
+    });
+
+    it('a re-run without the engine (--on-beads) keeps the project the config names', async () => {
+      const files = disk({ '/repos/myapp/.shreni/kshetra.yaml': `id: myapp\nname: Myapp\nproject: ${ID}\ndatabase: acme\n` });
+      await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+      expect(files.get('/repos/myapp/.shreni/kshetra.yaml')).toMatch(new RegExp(`project: ${ID}\\ndatabase: acme`));
+    });
+
+    it('a Kshetra replacing a tracker takes its project and database, then removes tracker.yaml', async () => {
+      const tracker = '/repos/myapp/.shreni/tracker.yaml';
+      const files = disk({ [tracker]: `name: myapp\nproject: ${ID}\ndatabase: acme\nproviders: [claude]\n` });
+      const e = engine([]);
+      await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e, replaces: tracker });
+      expect(e.project).toHaveBeenCalledWith(expect.objectContaining({ database: 'acme', existing: ID }));
+      expect(files.get('/repos/myapp/.shreni/kshetra.yaml')).toContain(`project: ${ID}`);
+      expect(mockRmSync).toHaveBeenCalledWith(tracker);
+    });
+
+    it('records the project id in place, keeping the rest of the file', () => {
+      const files = disk({ '/c.yaml': '# mine\nname: web # the name\nrepo: {}\n' });
+      recordProjectId('/c.yaml', ID);
+      expect(files.get('/c.yaml')).toBe(`# mine\nname: web # the name\nproject: ${ID}\nrepo: {}\n`);
+      recordProjectId('/c.yaml', ID.replace(/1$/, '2'));
+      expect(files.get('/c.yaml')!.match(/^project: .*2$/gm)).toHaveLength(1);
+    });
+  });
+
   it('writes an explicit gates block with the schema defaults into a fresh config', async () => {
     await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
     const configWrite = mockWriteFileSync.mock.calls.find(
@@ -1276,7 +1346,7 @@ describe('initKshetra', () => {
     const err = errSpy.mock.calls.map(c => c.join(' ')).join('\n');
     expect(err).toContain('App repo failed');
     expect(err).toContain('To recover');
-    expect(err).toContain('shreni init-kshetra --slug myapp --path /repos/myapp --org Acme');
+    expect(err).toContain('shreni init --mode kshetra --slug myapp --path /repos/myapp --org Acme');
     errSpy.mockRestore();
   });
 

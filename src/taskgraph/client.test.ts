@@ -110,6 +110,16 @@ describe('projects', { timeout: PGLITE_TIMEOUT }, () => {
     expect((await client.projects.list()).map(p => p.id)).toEqual([a.id, b.id]);
   });
 
+  it('write the caller\'s rows in the same transaction, and roll back with them', async () => {
+    const { client } = await openClient();
+    await client.migrate();
+    const seen: string[] = [];
+    const p = await client.projects.create({ name: 'web', idPrefix: 'web', actor: ann }, async ({ project }) => { seen.push(project.id); });
+    expect(seen).toEqual([p.id]);
+    await expect(client.projects.create({ name: 'api', idPrefix: 'api', actor: ann }, async () => { throw new Error('no'); })).rejects.toThrow('no');
+    expect((await client.projects.list()).map(x => x.name)).toEqual(['web']);
+  });
+
   it('throw NotFound for an unknown id', async () => {
     const { client } = await openClient();
     await client.migrate();

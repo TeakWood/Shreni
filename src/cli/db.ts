@@ -293,7 +293,7 @@ export async function migrateDatabase(
  * refuses, printing the command (policy spec, "Schema migrations in practice").
  */
 export async function ensureMigrated(
-  kshetra: KshetraConfig,
+  kshetra: Pick<KshetraConfig, 'id' | 'database'>,
   deps: Pick<DbDeps, 'open' | 'tools' | 'backupsDir' | 'print' | 'interactive' | 'ask' | 'env'>,
 ): Promise<void> {
   const conn = await deps.open(kshetra);
@@ -309,7 +309,7 @@ export async function ensureMigrated(
   }
   deps.print(`${kshetra.id}: the database has pending migrations: ${pending.join(', ')}`);
   if (!/^y(es)?$/i.test((await deps.ask('Run shreni db migrate now? [y/N] ')).trim())) {
-    throw new Error(`${kshetra.id}: not started; run shreni db migrate first`);
+    throw new Error(`${kshetra.id}: the migrations weren't run; run shreni db migrate first`);
   }
   await migrateDatabase(resolveDatabase(kshetra, loadUserConfig(), deps.env), kshetra, deps);
 }

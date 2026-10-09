@@ -146,11 +146,10 @@ Register a project (a **Kshetra**) and file your first task:
 ```bash
 # Your project repo must already exist with a GitHub remote configured.
 cd /projects/myapp
-shreni init               # prompts for slug/path (defaults: cwd + its name), then scaffolds
+shreni init               # asks: will Shreni work tasks here (kshetra), or only track them (tracker)?
 
-# Non-interactive / scripted equivalent:
-#   shreni init --slug myapp --path /projects/myapp
-# `init-kshetra` is the same flow with all options required as flags.
+# Non-interactive / scripted equivalent (--mode is required without a terminal):
+#   shreni init --mode kshetra --slug myapp --path /projects/myapp
 
 bd create "Add user authentication" -p 2 \
   --description "Email + password login with JWT sessions"
@@ -262,8 +261,8 @@ architectural seam reference is
 
 ## Setting up a Project (Kshetra) in detail
 
-Before running `shreni init-kshetra`, the project git repo must already exist and
-have a GitHub remote configured. `init-kshetra` reads the remote URL from the repo
+Before running `shreni init --mode kshetra`, the project git repo must already exist and
+have a GitHub remote configured. Init reads the remote URL from the repo
 (`git remote get-url origin`) to populate `kshetra.yaml` — it does not create the
 project repo for you.
 
@@ -277,7 +276,7 @@ git remote -v   # confirm origin is set
 Then register the project. This is a one-time setup per project:
 
 ```bash
-shreni init-kshetra --slug myapp --path /projects/myapp
+shreni init --mode kshetra --slug myapp --path /projects/myapp
 ```
 
 This command runs 10 steps automatically:
@@ -312,7 +311,7 @@ agents:
 > default provider. Adapters for **OpenAI** (Codex, CLI `codex`) and **Gemini**
 > (`gemini`) are wired but **experimental** — draft and not verified end-to-end —
 > and ship with no default model, so they require an explicit `model`.
-> `shreni init-kshetra` warns you if you pick one. If you want a reliable first
+> `shreni init` warns you if you pick one. If you want a reliable first
 > run, use Claude. (The `provider` value is the internal name — `anthropic`,
 > `openai`, or `gemini` — while the CLI it drives is `claude` / `codex` / `gemini`.)
 
@@ -399,7 +398,7 @@ its round) and the Phalaka banner (a `PR follow-up` chip).
 Set it at init or in `kshetra.yaml`, and override per run with an env var:
 
 ```bash
-shreni init-kshetra --slug myapp --path /projects/myapp --merge-policy pr
+shreni init --mode kshetra --slug myapp --path /projects/myapp --merge-policy pr
 ```
 
 ```yaml

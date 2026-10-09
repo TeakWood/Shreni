@@ -22,7 +22,6 @@ import { runExport } from './export';
 import { runRestore } from './restore';
 import { runSnapshots } from './snapshots';
 import { runSync } from './sync';
-import { initKshetra } from './init-kshetra';
 import { runRegister } from './register';
 import { runMigrate } from './migrate';
 import { verifyHooks } from './verify-hooks';
@@ -33,7 +32,7 @@ import { runSuthradhara } from './suthradhara';
 import { runTail } from './tail';
 import { runReport } from './report';
 import { runShow } from './show';
-import { runInit } from './init';
+import { runInit, startRefusal } from './init';
 import { runTelemetry } from './telemetry';
 import { runTask, TASK_USAGE } from './task';
 import { runPlan, PLAN_USAGE } from './plan';
@@ -101,6 +100,9 @@ export const COMMANDS: Command[] = [
       const allowAblation = ctx.has('--allow-ablation');
       const registry = loadRegistry();
       const targets = id ? registry.filter(k => k.id === id) : registry;
+      // A tracker project is never worked (policy spec, "Tracker-only projects").
+      const refusal = startRefusal(process.cwd(), targets, !!id && targets.length === 0);
+      if (refusal) throw new Error(refusal);
       if (registry.length === 0) {
         throw new Error('No kshetras registered. Run `shreni register` first.');
       }
@@ -337,56 +339,26 @@ export const COMMANDS: Command[] = [
   },
   {
     name: 'init',
-    summary: 'Onboard a repo in one step (prompts for slug/path, then scaffolds the kshetra)',
-    usage: '[--slug <id>] [--path <repo-path>] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--dry-run]',
+    summary: 'Set up a repo: a Kshetra Shreni works, or a tracker project worked by hand',
+    usage: '--mode kshetra|tracker [--slug <id>] [--path <repo-path>] [--providers claude,codex,gemini] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--on-beads] [--dry-run]',
     run(ctx) {
       const mergePolicy = ctx.flag('--merge-policy');
       if (mergePolicy && mergePolicy !== 'push' && mergePolicy !== 'pr') {
         throw new Error(`Invalid --merge-policy "${mergePolicy}": expected "push" or "pr".`);
       }
       return runInit({
-        slug: ctx.flag('--slug'),
-        path: ctx.flag('--path'),
-        org: ctx.flag('--org'),
-        language: ctx.flag('--language'),
-        beadsPath: ctx.flag('--beads-path'),
-        provider: ctx.flag('--provider'),
-        model: ctx.flag('--model'),
+        onBeads: ctx.has('--on-beads'),
+        mode: ctx.flag('--mode') ?? undefined,
+        providers: ctx.flag('--providers') ?? undefined,
+        slug: ctx.flag('--slug') ?? undefined,
+        path: ctx.flag('--path') ?? undefined,
+        org: ctx.flag('--org') ?? undefined,
+        language: ctx.flag('--language') ?? undefined,
+        beadsPath: ctx.flag('--beads-path') ?? undefined,
+        provider: ctx.flag('--provider') ?? undefined,
+        model: ctx.flag('--model') ?? undefined,
         mergePolicy: (mergePolicy as 'push' | 'pr' | undefined) ?? undefined,
         dryRun: ctx.has('--dry-run'),
-        pack: ctx.flag('--pack') ?? undefined,
-        noPack: ctx.has('--no-pack'),
-        upgrade: ctx.has('--upgrade'),
-      });
-    },
-  },
-  {
-    name: 'init-kshetra',
-    summary: 'Scaffold and register a new kshetra from a repo path',
-    usage: '--slug <id> --path <repo-path> [--org <org>] [--language <lang>] [--beads-path <path>] [--provider claude|codex|gemini] [--model <id>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--dry-run]',
-    run(ctx) {
-      const slug = ctx.flag('--slug');
-      const path = ctx.flag('--path');
-      const org = ctx.flag('--org');
-      const language = ctx.flag('--language');
-      const beadsPath = ctx.flag('--beads-path');
-      const provider = ctx.flag('--provider');
-      const model = ctx.flag('--model');
-      const mergePolicy = ctx.flag('--merge-policy');
-      const dryRun = ctx.has('--dry-run');
-      if (!slug || !path) {
-        throw new Error('Usage: shreni init-kshetra --slug <id> --path <repo-path> [--org <org>] [--language <lang>] [--beads-path <path>] [--provider claude|codex|gemini] [--model <id>] [--merge-policy push|pr] [--dry-run]');
-      }
-      if (mergePolicy && mergePolicy !== 'push' && mergePolicy !== 'pr') {
-        throw new Error(`Invalid --merge-policy "${mergePolicy}": expected "push" or "pr".`);
-      }
-      return initKshetra({
-        slug, path, org, language,
-        beadsPath: beadsPath ?? undefined,
-        provider: provider ?? undefined,
-        model: model ?? undefined,
-        mergePolicy: (mergePolicy as 'push' | 'pr' | null) ?? undefined,
-        dryRun,
         pack: ctx.flag('--pack') ?? undefined,
         noPack: ctx.has('--no-pack'),
         upgrade: ctx.has('--upgrade'),

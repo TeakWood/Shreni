@@ -62,7 +62,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise(res => setTimeout(res, ms));
 }
 
-// A local bare repo standing in for GitHub: init-kshetra requires an origin
+// A local bare repo standing in for GitHub: init requires an origin
 // remote and the merge path pushes main — the smoke must not touch a real forge.
 function gitRepoWithLocalOrigin(dir: string, bareDir: string): void {
   mkdirSync(dir, { recursive: true });
@@ -110,8 +110,8 @@ async function main(): Promise<void> {
     //    build/test/lint command, so the gates skip-and-pass and the run turns
     //    purely on the provider landing the diff. The local beads origin means
     //    init reuses it instead of creating a GitHub repo.
-    console.log('▶ shreni init-kshetra --provider claude');
-    sh('node', [SHRENI, 'init-kshetra',
+    console.log('▶ shreni init --mode kshetra --on-beads --provider claude');
+    sh('node', [SHRENI, 'init', '--mode', 'kshetra', '--on-beads',
       '--slug', slug, '--path', repoDir, '--no-pack', '--language', 'unknown',
       '--beads-path', beadsDir, '--provider', 'claude',
     ]);

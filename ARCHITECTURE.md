@@ -56,7 +56,7 @@ Runtime state (worker phase, pause/stuck flags, stall counters) lives under
 under `~/.shreni/`, so one Kshetra hanging or crashing never takes the others
 down. The CLI ([`src/cli/index.ts`](src/cli/index.ts)) is the entry point for all
 commands (`start`, `stop`, `status`, `pause`, `resume`, `run`, `sync`,
-`init-kshetra`, `register`, `phalaka`, …).
+`init`, `register`, `phalaka`, …).
 
 ## The worker lifecycle
 
