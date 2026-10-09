@@ -149,7 +149,12 @@ export function lifecycleViolations(def: Lifecycle): LifecycleViolation[] {
       if (allowed !== true) for (const s of allowed) unknown(`permissions.${call}.${role}`, s);
     }
   }
-  for (const [from, to] of Object.entries(def.migrate ?? {})) unknown(`migrate.${from}`, to);
+  for (const [from, to] of Object.entries(def.migrate ?? {})) {
+    unknown(`migrate.${from}`, to);
+    // Only a state this version dropped needs a home, and no mapped task holds a lease.
+    if (isState(from)) fail('migrate-map', `migrate names ${from}, which this version still has`);
+    if (def.states[to]?.leased) fail('migrate-map', `migrate sends ${from} to the leased state ${to}; a moved task holds no lease`);
+  }
 
   const moves = new Map<string, Move>();
   for (const m of def.moves) {

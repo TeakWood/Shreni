@@ -380,12 +380,12 @@ Four version numbers are in play, and three are checked:
 A release that adds no breaking migration and leaves the lifecycle alone runs beside an older one, and neither is fenced out.
 
 - **Versioned in code.** `defineLifecycle` takes a name and a version number, and the engine stores each version it sees with its hash. A changed definition without a version bump fails to register; reordering moves or the states and roles a move lists is not a change. The hash covers guard names, not their code; Shreni's snapshot test covers the code ([Lifecycle upgrades in practice](task-lifecycle.md#lifecycle-upgrades-in-practice)).
-- **Mapped by its author.** A new version says where tasks in a removed or renamed state go, for example `migrate: { parked: 'open' }`. Activation refuses a state that disappears without one.
-- **Previewed, then activated.** `lifecycles.diff(version)` returns the states and moves added or removed, roles changed, guards changed by name, the tasks the mapping moves, and any live leases. `lifecycles.activate(version)` applies it. Until then, a process on the newer version can read but refuses writes. A new project starts on the version it is created with.
-- **What activation does,** in one transaction: checks that no schema migration is pending, moves those tasks, makes the new version active, and writes a `lifecycle.upgraded` event naming who ran it. Schema migrations are separate, below.
-- **Live leases.** Activation refuses while any lease is live and names the workers holding them. `force: true` goes ahead, and those workers lose their attempts as if their leases had lapsed.
-- **Older processes are fenced out.** Every write sets its engine and lifecycle versions with `set local`. The trigger refuses a lifecycle version other than the project's active one, or an engine older than the schema's `min_writer`, with `VersionMismatch`.
-- **Rolling back** is activating an older version, refused if any task is in a state that version doesn't have.
+- **Mapped by its author.** A new version says where tasks in a removed or renamed state go, for example `migrate: { parked: 'open' }`. Registration refuses a map that names a state the version still has, or sends tasks to the leased state. Activation refuses while tasks sit in a state that disappears without one, and names them; the trigger lets activation's mapped state changes through, since they are no declared move.
+- **Previewed, then activated.** `lifecycles.diff(version)` returns the states and moves added or removed, roles changed, guards changed by name, kept states whose flags change, kept moves whose from, to or boost flags change, hooks, permissions and create rules that change, the tasks the mapping moves, tasks in a removed state with no mapping, what the result would break (a container closed over live children, a task waiting on work that can't satisfy it, a task left in the leased state without a lease), and every lease. Activation refuses while anything is unmapped or broken, and writes `children.settled` for a container the mapping settles. `lifecycles.activate(version)` applies it. Until then, a process on the newer version can read but refuses writes. A new project starts on the version it is created with.
+- **What activation does,** in one transaction: checks that no schema migration is pending, makes the new version active, ends leases, moves those tasks, and writes a `lifecycle.upgraded` event on each task it moves and one for the project, naming who ran it. A process activates only the version it runs, since its code holds that version's guards; a rollback runs from a process on the older version. Schema migrations are separate, below.
+- **Live leases.** Activation refuses while any lease is live (`InvalidRequest`) and names the workers holding them. `force: true` goes ahead, and those workers lose their attempts as if their leases had lapsed: each attempt ends with the `onLeaseExpiry` move as its outcome, and the task goes where that move goes. A lease that has already lapsed ends the same way without `force`.
+- **Older processes are fenced out.** Every write sets its engine and lifecycle versions with `set local`. The trigger refuses a lifecycle version other than the project's active one, or an engine older than the schema's `min_writer`, with `VersionMismatch`. It reads the project row with a share lock, which activation's update lock excludes, so an old write commits before activation or is refused after it.
+- **Rolling back** is activating an older version, refused if any task is in a state that version doesn't have; the older version's migrate map, written for its own predecessor, isn't applied.
 
 **The engine never upgrades on its own.** An upgrade can move real tasks, and whether a change is safe can't be checked mechanically, because a guard can get stricter while no state changes. Why Shreni makes it a human step is in [Lifecycle upgrades in practice](task-lifecycle.md#lifecycle-upgrades-in-practice).
 
@@ -703,7 +703,7 @@ Events record changes to the task graph, not what workers do during an attempt; 
 | `dep.added`, `dep.removed`, `link.added` | The graph changes |
 | `note` | A note is added |
 | `children.settled` | Every child of a container has reached a terminal state |
-| `lifecycle.upgraded` | A lifecycle version is activated, with who ran it |
+| `lifecycle.upgraded` | A lifecycle version is activated, with who ran it; also on each task it moves, with `from_state` and `to_state` |
 
 Heartbeats update the task row but write no event; they would swamp the log.
 

@@ -8,6 +8,7 @@ import { tasksApi } from './tasks';
 import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi } from './moves';
 import { readsApi } from './reads';
+import { activateApi, diffApi } from './upgrade';
 import { exportProject, importProject, purgeProject, type ImportCallback, type ImportReport, type ProjectBundle, type PurgeReport } from './bundle';
 
 type ReadsApi = ReturnType<typeof readsApi>;
@@ -189,6 +190,7 @@ export class ProjectHandle {
   readonly events: ReadsApi['events'];
   /** Ready work, in claim order: what a claim would pick next. */
   readonly ready: ReadsApi['ready'];
+  readonly lifecycles: ReturnType<typeof diffApi>;
 
   /** @internal Use client.project(id). */
   constructor(/** @internal */ readonly client: TaskGraphClient, readonly id: string) {
@@ -199,6 +201,7 @@ export class ProjectHandle {
     this.attempts = reads.attempts;
     this.events = reads.events;
     this.ready = reads.ready;
+    this.lifecycles = diffApi(this);
   }
 
   /** The same project, acting as `actor`: every write goes through one. */
@@ -214,6 +217,7 @@ export class ActorHandle {
   readonly notes: ReturnType<typeof notesApi>;
   /** Makes a declared move; throws MoveRefused. */
   readonly move: ReturnType<typeof movesApi>;
+  readonly lifecycles: ReturnType<typeof activateApi>;
 
   /** @internal Use tg.as(actor). */
   constructor(/** @internal */ readonly project: ProjectHandle, readonly actor: Actor) {
@@ -224,6 +228,7 @@ export class ActorHandle {
     this.links = linksApi(this);
     this.notes = notesApi(this);
     this.move = movesApi(this);
+    this.lifecycles = activateApi(this);
   }
 
   /**

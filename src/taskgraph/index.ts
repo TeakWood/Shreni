@@ -14,6 +14,7 @@ export type { MigrationReport } from './migrate';
 export type { Actor, Task, TaskDetail, TaskFilter, Plan, PlanFilter, Attempt, TaskGraphEvent } from './types';
 export type { NewTask, TaskPatch, WriteOptions } from './tasks';
 export type { MoveOptions } from './moves';
+export type { LifecycleDiff } from './upgrade';
 export { BUNDLE_FORMAT } from './bundle';
 export type { ProjectBundle, BundleTask, BundlePlan, BundleEvent, ImportReport, ImportCallback, PurgeReport } from './bundle';
 export * from './errors';
