@@ -155,7 +155,7 @@ export function triageEntryForKshetra(k: {
       blocked +
       (blocked === 1 ? ' bead blocked' : ' beads blocked') +
       ' — review the blockers; some may need manual unblocking',
-    remediation: 'cd <repo> && shreni task list --state blocked   # see what is blocking, then unblock',
+    remediation: 'cd <repo> && shreni task list --state blocked   # see what is blocking, then shreni task unblock <id> --reason "…"',
   };
 }
 

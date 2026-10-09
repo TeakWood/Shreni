@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import { describe, it, expect, vi, onTestFinished } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { sql } from 'kysely';
@@ -520,6 +521,41 @@ describe('shreni task confirm', { timeout: PGLITE_TIMEOUT }, () => {
     await expect(run('ready')).rejects.toThrow(/on shreni\.task@1; this process runs shreni\.task@2; run shreni task upgrade in a terminal/);
     deps.interactive = () => true;
     expect(await run('upgrade')).toMatch(/already on shreni\.task@\d+/);
+  });
+});
+
+describe('shreni task unblock', { timeout: PGLITE_TIMEOUT }, () => {
+  it('given a blocked task, when the developer unblocks it in a terminal, then it is open again and ready', async () => {
+    const { tg, run, deps, shreni } = await setup('kshetra');
+    const t = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'flagged' });
+    const worker = tg.as({ id: 'sthapathi', role: 'orchestrator' });
+    const claim = (await worker.claim({ worker: 'host/1', leaseMs: 3_600_000 }))!;
+    await worker.moveClaimed(claim, 'flag', { reason: 'PR closed without merging' });
+
+    await expect(run('unblock', t.id, '--reason', 'fixed')).rejects.toThrow(/needs an interactive terminal/);
+    deps.interactive = () => true;
+    await expect(run('unblock', t.id)).rejects.toThrow(/Usage: shreni task unblock <id> --reason/);
+    expect(await run('unblock', t.id, '--reason', 'rebased onto main')).toBe(`unblocked ${t.id}: open again`);
+    expect((await tg.tasks.get(t.id)).state).toBe('open');
+    expect((await tg.ready()).map(x => x.id)).toEqual([t.id]);
+    const [ev] = await e(shreni, `select actor, actor_role, payload from taskgraph.events where task_id = '${t.id}' and kind = 'move:unblock'`);
+    expect(ev).toMatchObject({ actor: ME, actor_role: 'developer', payload: { reason: 'rebased onto main' } });
+    await expect(run('unblock', t.id, '--reason', 'again')).rejects.toThrow(/is open, not blocked/);
+  });
+
+  it('names a branch a declined PR left behind, with the command that deletes it, and keeps it', async () => {
+    const { tg, run, deps, repo } = await setup('kshetra');
+    const t = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'Add login' });
+    const worker = tg.as({ id: 'sthapathi', role: 'orchestrator' });
+    await worker.moveClaimed((await worker.claim({ worker: 'host/1', leaseMs: 3_600_000 }))!, 'flag', { reason: 'PR closed without merging' });
+    const git = (...a: string[]) => execFileSync('git', ['-C', repo, ...a], { env: { ...process.env, PATH: process.env.PATH }, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '--allow-empty', '-m', 'init');
+    git('branch', `bead-${t.id}/add-login`);
+    deps.interactive = () => true;
+    const out = await run('unblock', t.id, '--reason', 'reviewer was wrong');
+    expect(out).toContain(`bead-${t.id}/add-login is still there, so the worker won't start ${t.id} afresh; delete it first: git -C ${repo} branch -D bead-${t.id}/add-login`);
+    expect(git('branch', '--list', `bead-${t.id}/*`).toString()).toContain(`bead-${t.id}/add-login`);
   });
 });
 

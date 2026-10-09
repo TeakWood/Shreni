@@ -4,12 +4,17 @@ Common failure modes when running the Shreni harness, and how to recover. Most
 issues resolve by reading the blocked task's round notes (`shreni task show <id>`)
 and the harness logs, fixing the cause, and giving the work back to Sthapathi.
 
-> A blocked task is moved back to `open` by the lifecycle's `unblock` move, which
-> only a developer may make. `shreni task` has no `unblock` subcommand yet, so the
-> recovery steps below re-file the work instead: `shreni task cancel <id>` the
-> blocked task and `shreni task create` a fresh one (then `shreni task approve` it).
-> A task blocked only on its *manual* acceptance checks, whose code already landed,
-> is finished with `shreni task confirm <id>`.
+> A blocked task goes back to `open` with `shreni task unblock <id> --reason "…"`,
+> run in a terminal once you've fixed the cause. The worker then starts it afresh,
+> but not while its old `bead-<id>/<slug>` branch is still there: `unblock` names
+> the branch and the `git branch -D` that removes it (it never deletes it itself,
+> since it may hold work you did by hand).
+>
+> Two cases are not unblocks. A task blocked only on its *manual* acceptance
+> checks, whose code already landed, is finished with `shreni task confirm <id>`.
+> A task whose flag says its work is already on main ("merged … but finish
+> failed", "opened … but could not record it") is finished by hand: `shreni pause`
+> the Kshetra, then `shreni task unblock`, `claim` and `finish` it, and resume.
 
 ## Harness won't start — `registry.json` missing
 
@@ -94,21 +99,23 @@ git push origin main
 shreni resume --kshetra <slug>
 ```
 
-Then re-file the blocked task (see the note at the top) if its work didn't land.
+Then, if its work didn't land, delete its branch and unblock the task (see the note at the top).
 
 ---
 
 ## Merge conflict outside task scope
 
-Silpi touched files it wasn't supposed to. The task is flagged (blocked) and the Kshetra is paused for human review.
+Silpi touched files it wasn't supposed to, and the task was flagged (blocked) for human review.
 
 ```bash
 shreni task show <id>             # see which files conflicted
 git diff bead-<id>/<slug>         # inspect Silpi's changes
-# Resolve the conflict manually, or cancel the task and file a cleaner one:
-shreni task cancel <id> --reason "conflicted outside its scope; re-filed"
-shreni task create --title "…" --description "…"
-shreni resume --kshetra <slug>
+# To have it redone from main: drop the branch and give the task back.
+git branch -D bead-<id>/<slug>
+shreni task unblock <id> --reason "conflict outside its scope; redo"
+# Or cancel it and file a narrower one:
+#   shreni task cancel <id> --reason "conflicted outside its scope; re-filed"
+#   shreni task create --title "…" --description "…"
 ```
 
 ---

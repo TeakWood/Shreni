@@ -36,7 +36,7 @@ test('the Copy button copies the entry remediation verbatim', async ({ page }) =
   await expect(feed.getByRole('button', { name: 'Copied!' })).toBeVisible();
 
   const clip = await page.evaluate(() => navigator.clipboard.readText());
-  expect(clip).toBe('cd <repo> && shreni task list --state blocked   # see what is blocking, then unblock');
+  expect(clip).toBe('cd <repo> && shreni task list --state blocked   # see what is blocking, then shreni task unblock <id> --reason "…"');
 });
 
 test('a stuck worker renders with the stuck severity pill above the blocked entry', async ({ page }) => {

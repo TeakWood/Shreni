@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { sql } from 'kysely';
@@ -35,11 +36,11 @@ import { hostname } from 'os';
 // a Claude Code shell isn't, so a session can't approve by accident.
 
 export const TASK_SUBCOMMANDS = [
-  'ready', 'show', 'list', 'create', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'confirm', 'upgrade',
+  'ready', 'show', 'list', 'create', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'confirm', 'unblock', 'upgrade',
   'setup', 'prime',
 ] as const;
 /** The developer's own calls, refused without an interactive terminal (an accident guard, not a security boundary). */
-const TERMINAL_ONLY = new Set(['approve', 'confirm', 'upgrade']);
+const TERMINAL_ONLY = new Set(['approve', 'confirm', 'unblock', 'upgrade']);
 /** Calls that work a Kshetra's tasks, which its worker owns: by hand only while it is paused (assertHandsOnKshetra). */
 const HANDS_ON = new Set(['claim', 'finish', 'release', 'cancel', 'upgrade']);
 export const TASK_USAGE = `<${TASK_SUBCOMMANDS.join('|')}> …`;
@@ -58,6 +59,7 @@ const HELP = [
   'shreni task cancel <id> --reason "…" [--with-children] [--drop-deps]',
   'shreni task approve <id>                      approve a plan or a lone task (terminal only)',
   'shreni task confirm <id> [--reason "…"]        confirm a flagged task\'s acceptance checks hold, and finish it (terminal only)',
+  'shreni task unblock <id> --reason "…"         give a blocked task back to open, once its cause is dealt with (terminal only)',
   'shreni task upgrade [--force]                 move the project to this Shreni\'s lifecycle (terminal only)',
   'shreni task setup                             rewrite Shreni\'s block in the repo\'s instruction files, and the prime hooks',
   'shreni task prime                             the block\'s rules and the project\'s memories, for an agent session',
@@ -263,6 +265,16 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
     await SUBCOMMANDS[sub as keyof typeof SUBCOMMANDS]({ ctx, deps, tg, me, shreni: conn.shreni, found, user });
   } finally {
     await conn.close().catch(() => {});
+  }
+}
+
+/** The task's local branches (bead-<id>/<slug>) in the repo; none when git can't say. */
+function leftBranches(repo: string, id: string): string[] {
+  try {
+    return execFileSync('git', ['-C', repo, 'branch', '--list', `bead-${id}/*`, '--format=%(refname:short)'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\n').map(l => l.trim()).filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
@@ -501,6 +513,24 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
     if (!/^y(es)?$/i.test((await deps.ask('Do all of these hold? [y/N] ')).trim())) throw new Error('not confirmed');
     await confirmByHand(shreni, tg, me, id, { reason: a.values['--reason']?.trim() || `acceptance checks confirmed by ${user}` });
     deps.print(`confirmed and finished ${id}`);
+  },
+
+  async unblock({ ctx, deps, tg, me, found }) {
+    const a = parseArgs(ctx.args, { valued: ['--reason'], positionals: 1 });
+    const id = oneId(a, 'unblock <id> --reason "…"');
+    const reason = a.values['--reason']?.trim();
+    if (!reason) throw new Error('Usage: shreni task unblock <id> --reason "…" (what was dealt with)');
+    const t = await tg.tasks.get(id);
+    if (t.state !== 'blocked') throw new Error(`${id} is ${t.state}, not blocked`);
+    await me.move(id, 'unblock', { reason });
+    deps.print(`unblocked ${id}: open again`);
+    // A branch a declined PR or a failed push left behind stops the worker's
+    // preflight; it may hold work done by hand, so it's named, never deleted.
+    const repo = found.kind === 'kshetra' ? (found.config as KshetraConfig).repo?.path : undefined;
+    const left = repo && !t.boosted ? leftBranches(repo, id) : [];
+    for (const b of left) {
+      deps.print(`  ${b} is still there, so the worker won't start ${id} afresh; delete it first: git -C ${repo} branch -D ${b}`);
+    }
   },
 
   async release({ ctx, deps, me }) {
