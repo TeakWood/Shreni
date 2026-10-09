@@ -8,6 +8,7 @@ import { tasksApi } from './tasks';
 import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi } from './moves';
 import { readsApi } from './reads';
+import { exportProject, importProject, purgeProject, type ImportCallback, type ImportReport, type ProjectBundle, type PurgeReport } from './bundle';
 
 type ReadsApi = ReturnType<typeof readsApi>;
 import { runTransaction, type EngineTx } from './tx';
@@ -136,6 +137,29 @@ export class TaskGraphClient {
       const r = await raw<ProjectRow>`select * from taskgraph.projects where id = ${id}`.execute(this.db);
       if (!r.rows[0]) throw new NotFound('project', id);
       return toProject(r.rows[0]);
+    },
+
+    /**
+     * Creates a project from a bundle and loads it in one transaction; `inTx`
+     * runs inside it, so the caller's own rows land with the project or not at all.
+     */
+    import: async (bundle: ProjectBundle, opts: { actor: Actor; name?: string; idPrefix?: string }, inTx?: ImportCallback): Promise<ImportReport> => {
+      await this.need(TRIGGERS);
+      return importProject(this, bundle, { ...opts, actor: checkActor(opts.actor) }, inTx);
+    },
+
+    /** Every row of a project, events included, read in one snapshot. */
+    export: async (id: string): Promise<ProjectBundle> => {
+      await this.need(CORE);
+      if (!UUID.test(id)) throw new NotFound('project', id);
+      return exportProject(this.db, id.toLowerCase());
+    },
+
+    /** Deletes every row of a project, events included, once its name is typed back; the only delete of events. */
+    purge: async (id: string, opts: { actor: Actor; confirmName: string }): Promise<PurgeReport> => {
+      await this.need(TRIGGERS);
+      if (!UUID.test(id)) throw new NotFound('project', id);
+      return purgeProject(this.db, id.toLowerCase(), { ...opts, actor: checkActor(opts.actor) });
     },
 
     /** Every project in the database, oldest first. */

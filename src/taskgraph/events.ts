@@ -1,6 +1,6 @@
 import { sql, type Transaction } from 'kysely';
 import { LOCK_NAMESPACE } from './locks';
-import { jsonb } from './sql-values';
+import { jsonb, timestamp } from './sql-values';
 
 // Event writes (engine spec, "Events and history"). A transaction buffers its
 // events and writes them last, under each project's events lock held until
@@ -57,7 +57,7 @@ export async function writeEvents(tx: Transaction<any>, events: readonly NewEven
         to_state: e.toState ?? null,
         payload: jsonb(e.payload ?? {}),
         request_id: e.requestId ?? null,
-        at: e.at ?? sql`taskgraph.now()`,
+        at: e.at ? timestamp(e.at) : sql`taskgraph.now()`,
       })))
       .returning('id')
       .execute();
