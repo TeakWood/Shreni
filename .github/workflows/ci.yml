@@ -54,6 +54,15 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # pg_dump and pg_restore at least as new as the test server (postgres:17),
+      # for the backups test; the runner's own client is older.
+      - name: Install the Postgres 17 client
+        run: |
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-17
+          # pg_wrapper picks the runner's own 16 cluster for pg_dump; put 17's tools first.
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
       - run: pnpm test:integration
 
   # Tier 1 — hermetic bd+git integration (Shreni-beads-k3n.3). Runs the harness

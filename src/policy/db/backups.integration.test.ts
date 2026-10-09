@@ -12,20 +12,35 @@ import { pgTools, takeDump } from './backups';
 // A dump and a restore with the real pg_dump and pg_restore, over both schemas:
 // work done after the dump is gone once it is restored.
 
-const hasTools = (() => {
+/** pg_dump's major version, or null when the client tools aren't all installed. */
+const dumpMajor = (() => {
   try {
-    execFileSync('pg_dump', ['--version']);
     execFileSync('pg_restore', ['--version']);
     execFileSync('psql', ['--version']);
-    return true;
+    const m = /(\d+)(?:\.\d+)?/.exec(execFileSync('pg_dump', ['--version']).toString());
+    return m ? Number(m[1]) : null;
   } catch {
-    return false;
+    return null;
   }
 })();
+const hasTools = dumpMajor !== null;
+
+/** pg_dump refuses a server newer than itself: such a run says so and skips. */
+async function needsTools(url: string, skip: (why: string) => void): Promise<void> {
+  const sql = postgres(url, { max: 1, onnotice: () => {} });
+  try {
+    const [{ server_version_num: v }] = await sql<{ server_version_num: string }[]>`show server_version_num`;
+    const server = Math.floor(Number(v) / 10000);
+    if (dumpMajor! < server) skip(`pg_dump ${dumpMajor} is older than the server (${server})`);
+  } finally {
+    await sql.end({ timeout: 1 });
+  }
+}
 
 describe.skipIf(!hasTools)('backups on real Postgres', () => {
-  it('restores a dump over later work, both schemas', async () => {
+  it('restores a dump over later work, both schemas', async ctx => {
     const url = await freshDatabase();
+    await needsTools(url, why => ctx.skip(why));
     const sql = postgres(url, { max: 4, onnotice: () => {} });
     const shreni = await openShreni({ sql, lifecycle: taskLifecycle });
     onTestFinished(async () => { await shreni.close(); await sql.end({ timeout: 1 }); });
@@ -58,8 +73,9 @@ describe.skipIf(!hasTools)('backups on real Postgres', () => {
     expect((await again`select to_regclass('taskgraph.added')::text as t`)[0].t).toBeNull();
   });
 
-  it('a dump of a database without Shreni\'s schemas restores to one without them', async () => {
+  it('a dump of a database without Shreni\'s schemas restores to one without them', async ctx => {
     const url = await freshDatabase();
+    await needsTools(url, why => ctx.skip(why));
     const sql = postgres(url, { max: 2, onnotice: () => {} });
     onTestFinished(async () => { await sql.end({ timeout: 1 }); });
     const target = { name: 'test', url };
@@ -70,8 +86,9 @@ describe.skipIf(!hasTools)('backups on real Postgres', () => {
     expect((await sql`select to_regnamespace('taskgraph')::text as s`)[0].s).toBeNull();
   });
 
-  it('a restore that fails leaves the database as it was', async () => {
+  it('a restore that fails leaves the database as it was', async ctx => {
     const url = await freshDatabase();
+    await needsTools(url, why => ctx.skip(why));
     const sql = postgres(url, { max: 2, onnotice: () => {} });
     onTestFinished(async () => { await sql.end({ timeout: 1 }); });
     await sql`create schema taskgraph`;

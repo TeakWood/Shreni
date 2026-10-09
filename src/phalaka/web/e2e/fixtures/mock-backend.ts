@@ -51,6 +51,9 @@ export async function routeRestApi(page: Page, data: BackendData): Promise<void>
       body = data.kshetras;
     } else if (path === '/api/processes') {
       body = data.processes;
+    } else if (path === '/api/planning-sessions') {
+      // A list, like every collection: the panel maps over it.
+      body = data.planningSessions ?? [];
     } else if ((taskList = path.match(/^\/api\/kshetras\/([^/]+)\/tasks$/))) {
       const kshetraId = decodeURIComponent(taskList[1]);
       // Honour ?status=closed exactly like the backend: the card fires a second

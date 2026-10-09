@@ -10,6 +10,7 @@ import type {
   BeadDetail,
   BeadSummary,
   KshetraSummary,
+  PlanningSession,
   ProcessSnapshot,
 } from '../../src/lib/types';
 
@@ -120,6 +121,8 @@ export interface BackendData {
   closedTasksByKshetra?: Record<string, BeadSummary[]>;
   /** Bead details keyed by bead id (GET /api/kshetras/:id/tasks/:beadId). */
   detailsByBead: Record<string, BeadDetail>;
+  /** Live planning sessions (GET /api/planning-sessions); none unless a spec gives some. */
+  planningSessions?: PlanningSession[];
 }
 
 export function defaultBackendData(): BackendData {
