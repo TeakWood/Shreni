@@ -33,7 +33,7 @@ const pid = await import('./pid');
 const KSHETRA = {
   id: 'myapp',
   repo: { path: TMP_ROOT, remote: 'git@github.com:me/myapp.git', mainBranch: 'main' },
-  beads: { path: '/projects/myapp-beads/.beads', remote: 'git@github.com:me/myapp-beads.git' },
+  project: '00000000-0000-4000-8000-000000000001',
   agents: { model: 'claude-opus-4-8' },
   mcp: { servers: {} },
 } as unknown as KshetraConfig;
@@ -64,7 +64,7 @@ afterEach(() => {
 describe('startSession — fresh planning unit', () => {
   it('creates a worktree, persists ids, and launches an interactive claude', async () => {
     const sp = recordingSpawn();
-    const result = await startSession(KSHETRA, { spawn: sp.seam, uuid: () => 'fixed-uuid-0000' });
+    const result = await startSession(KSHETRA, { planId: 'plan-1', spawn: sp.seam, uuid: () => 'fixed-uuid-0000' });
 
     expect(result.status).toBe('launched');
     if (result.status !== 'launched') return;
@@ -87,7 +87,7 @@ describe('startSession — fresh planning unit', () => {
 
   it('clears the pid when the session exits (wait resolves)', async () => {
     const sp = recordingSpawn();
-    const result = await startSession(KSHETRA, { spawn: sp.seam, uuid: () => 'u' });
+    const result = await startSession(KSHETRA, { planId: 'plan-1', spawn: sp.seam, uuid: () => 'u' });
     if (result.status !== 'launched') throw new Error('expected launch');
     const waited = result.wait();
     sp.endSession(0);
@@ -99,7 +99,7 @@ describe('startSession — fresh planning unit', () => {
     const sp = recordingSpawn();
     const reuse = mkdtempSync(join(tmpdir(), 'reuse-wt-'));
     const result = await startSession(KSHETRA, {
-      spawn: sp.seam, uuid: () => 'u2',
+      planId: 'plan-1', spawn: sp.seam, uuid: () => 'u2',
       reuseWorktree: reuse, extendDocRelPath: '.shreni/design/sso.md',
     });
     if (result.status !== 'launched') throw new Error('expected launch');
@@ -114,7 +114,7 @@ describe('startSession — fresh planning unit', () => {
   it('refuses to launch when a live session already holds the pid', async () => {
     pid.writeSuthradharaPid(KSHETRA.id, process.pid); // a definitely-alive pid
     const sp = recordingSpawn();
-    const result = await startSession(KSHETRA, { spawn: sp.seam, uuid: () => 'u3' });
+    const result = await startSession(KSHETRA, { planId: 'plan-1', spawn: sp.seam, uuid: () => 'u3' });
     expect(result.status).toBe('already_running');
     expect(sp.calls.length).toBe(0);
   });
@@ -125,7 +125,7 @@ describe('resumeSession', () => {
     const id = 'myapp-20260101T000000-0001';
     saveSession({ ...newSessionState(id, 'myapp'), claudeSessionId: 'prior-uuid' });
     const sp = recordingSpawn();
-    const result = await resumeSession(KSHETRA, id, { spawn: sp.seam });
+    const result = await resumeSession(KSHETRA, id, { planId: 'plan-1', spawn: sp.seam });
     if (result.status !== 'launched') throw new Error('expected launch');
     expect(sp.calls[0].spec.args).toContain('--resume');
     expect(sp.calls[0].spec.args).toContain('prior-uuid');
@@ -136,7 +136,7 @@ describe('resumeSession', () => {
     const id = 'myapp-20260101T000000-0002';
     saveSession(newSessionState(id, 'myapp'));
     const sp = recordingSpawn();
-    const result = await resumeSession(KSHETRA, id, { spawn: sp.seam, uuid: () => 'new-uuid' });
+    const result = await resumeSession(KSHETRA, id, { planId: 'plan-1', spawn: sp.seam, uuid: () => 'new-uuid' });
     if (result.status !== 'launched') throw new Error('expected launch');
     expect(sp.calls[0].spec.args).toContain('--session-id');
     expect(sp.calls[0].spec.args).toContain('new-uuid');

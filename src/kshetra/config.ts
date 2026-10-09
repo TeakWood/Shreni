@@ -51,12 +51,6 @@ const RepoConfigSchema = z.object({
   prFollowupSelfLogins: z.array(z.string()).default([]),
 });
 
-const BeadsConfigSchema = z.object({
-  path: z.string(),
-  remote: z.string(),
-  mode: z.literal('embedded').default('embedded'),
-});
-
 export const StackConfigSchema = z.object({
   language: z.string(),
   framework: z.string().optional(),
@@ -257,12 +251,13 @@ const GatesConfigSchema = z.object({
   diffSize: DiffSizeGateSchema.default(GATES_DEFAULTS.diffSize),
 });
 
-// Optional per-Kshetra overrides for the stuck-watchdog and recovery budget.
-// Any omitted field falls back to the defaults in watchdog.ts / recover.ts.
+// Optional per-Kshetra overrides for the stuck-watchdog. Any omitted field
+// falls back to the defaults in watchdog.ts. Interrupted work comes back
+// through the engine's lease expiry, which blocks a task after its third
+// lapse in a row, so there is no recovery budget to set here.
 const WatchdogConfigSchema = z.object({
   stuckThresholdMs: z.number().int().positive().optional(),
   maxOutcomeRepeat: z.number().int().min(1).optional(),
-  maxRecoverAttempts: z.number().int().min(1).optional(),
 });
 
 // Spend caps (epic ho4). Optional USD ceilings a budget policy (ho4.3) enforces on
@@ -278,11 +273,11 @@ const BudgetConfigSchema = z.object({
 
 // The shared base (project-config.ts) holds name, description, project,
 // database and plan.validators; a Kshetra adds everything a worker needs.
-// beads stays until the migration release removes it (T4.13).
+// The schema isn't strict: an old config's `beads:` block is stripped on load,
+// and legacyBeadsPath reads it from the file for `shreni migrate`.
 export const KshetraConfigSchema = ProjectConfigBase.extend({
   id: z.string().regex(/^[a-z0-9-]+$/, 'id must be lowercase alphanumeric with hyphens'),
   repo: RepoConfigSchema,
-  beads: BeadsConfigSchema,
   stack: StackConfigSchema,
   // Provenance only ("<name>@<version>", e.g. nextjs-vitest@1): records which
   // stack pack init materialized this config from. Nothing resolves through it
@@ -394,4 +389,33 @@ export function loadKshetraConfig(configPath: string): KshetraConfig {
   }
 
   return result.data;
+}
+
+/** A Kshetra with no task graph project: it is still on beads and can't run until it is migrated. */
+export class NotMigratedError extends Error {
+  constructor(public readonly kshetraId: string) {
+    super(`${kshetraId} has no task graph project: run shreni migrate ${kshetraId}`);
+    this.name = 'NotMigratedError';
+  }
+}
+
+/** The Kshetra's project id; throws NotMigratedError when it has none. */
+export function requireProject(kshetra: Pick<KshetraConfig, 'id' | 'project'>): string {
+  if (!kshetra.project) throw new NotMigratedError(kshetra.id);
+  return kshetra.project;
+}
+
+/**
+ * The legacy `beads.path` an old kshetra.yaml names, read straight from the
+ * file (the schema no longer has it). Undefined when the file can't be read or
+ * names none.
+ */
+export function legacyBeadsPath(configPath: string): string | undefined {
+  try {
+    const doc = yaml.load(readFileSync(resolve(configPath), 'utf8')) as { beads?: { path?: unknown } } | null;
+    const path = doc?.beads?.path;
+    return typeof path === 'string' && path ? path : undefined;
+  } catch {
+    return undefined;
+  }
 }

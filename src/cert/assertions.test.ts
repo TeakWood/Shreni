@@ -5,8 +5,6 @@ import {
   checkBuildGateObserved,
   checkReviewerRejectionObserved,
   checkParikshakaDiscovery,
-  parseBeadIds,
-  parseBeadStatus,
 } from './assertions.js';
 import type { LoggedEvent } from '../sthapathi/activity-log.js';
 
@@ -143,33 +141,5 @@ describe('checkParikshakaDiscovery', () => {
       type: 'agent_text', kshetra: K, beadId: 'b1', agent: 'silpi', text: 'src/a.test.ts', ...env,
     };
     expect(checkParikshakaDiscovery([silpiText], ['src/a.test.ts'])[0].check).toBe('parikshaka-discovery');
-  });
-});
-
-describe('parseBeadIds', () => {
-  it('extracts ids from bd list lines', () => {
-    const out = [
-      '○ chitti-abc ● P1 [feature] Add the entity',
-      '◐ chitti-def.2 ● P2 Wire the route',
-      '',
-      '--------------------',
-      'Ready: 2 issues with no active blockers',
-    ].join('\n');
-    expect(parseBeadIds(out)).toEqual(['chitti-abc', 'chitti-def.2']);
-  });
-
-  it('returns [] for empty output', () => {
-    expect(parseBeadIds('')).toEqual([]);
-  });
-});
-
-describe('parseBeadStatus', () => {
-  it('extracts the status token from bd show output', () => {
-    expect(parseBeadStatus('○ chitti-abc · Add the entity   [● P1 · OPEN]')).toBe('OPEN');
-    expect(parseBeadStatus('✓ chitti-abc · Add the entity   [● P1 · CLOSED]')).toBe('CLOSED');
-  });
-
-  it('returns null when no status is present', () => {
-    expect(parseBeadStatus('gibberish')).toBeNull();
   });
 });

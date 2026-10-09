@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from './types';
-import { shouldSelfHeal, selfHeal, type ActiveRun, type PauseSnapshot } from './self-heal';
+import { shouldSelfHeal, type ActiveRun, type PauseSnapshot } from './self-heal';
 import { createScheduler, type Phase } from './index';
 import { evaluateStuck } from './watchdog';
 import { AgentAbortedError } from './errors';
@@ -53,41 +53,10 @@ describe('shouldSelfHeal', () => {
   });
 });
 
-// ── selfHeal (orchestration + ordering) ───────────────────────────────────────
-
-describe('selfHeal', () => {
-  it('refreshes heartbeat, aborts, awaits unwind, RECOVERs, then refreshes again — in order', async () => {
-    const events: string[] = [];
-    const run = makeRun();
-    // The hung run "unwinds" a tick after abort (as the real loop does).
-    let doneResolved = false;
-    run.controller.signal.addEventListener('abort', () => {
-      events.push('abort');
-      setTimeout(() => { doneResolved = true; run.resolveDone(); }, 5);
-    });
-
-    const recordProgress = vi.fn(() => { events.push('progress'); });
-    const recover = vi.fn(async () => {
-      // Proves selfHeal awaited run.done BEFORE reconciling git.
-      expect(doneResolved).toBe(true);
-      events.push('recover');
-      return [];
-    });
-
-    await selfHeal(KSHETRA, run, { recover, recordProgress, touchHeartbeat: () => {} });
-
-    expect(run.controller.signal.aborted).toBe(true);
-    expect(recover).toHaveBeenCalledWith(KSHETRA);
-    expect(recordProgress).toHaveBeenCalledTimes(2);
-    // heartbeat first (before abort), then abort, then recover, then heartbeat.
-    expect(events).toEqual(['progress', 'abort', 'recover', 'progress']);
-  });
-});
-
 // ── acceptance: a stuck live worker returns to IDLE on resume, no re-trip ──────
 
 describe('self-heal end-to-end (scheduler)', () => {
-  it('drives a hung WORKING cycle back to IDLE via abort + recover, and does not re-trip', async () => {
+  it('drives a hung WORKING cycle back to IDLE via abort + work-tree reset, and does not re-trip', async () => {
     const scheduler = createScheduler();
     let activeRun: ActiveRun | undefined;
     let selected = false;
@@ -114,7 +83,7 @@ describe('self-heal end-to-end (scheduler)', () => {
           });
         } catch (err) {
           if (!(err instanceof AgentAbortedError)) throw err;
-          // swallowed — recoverKshetra reconciles the bead
+          // swallowed — the work tree is reset and the claim given back
         } finally {
           activeRun = undefined;
           resolveDone();
@@ -127,13 +96,12 @@ describe('self-heal end-to-end (scheduler)', () => {
     await vi.waitFor(() => expect(scheduler.getPhase(KSHETRA.id)).toBe('WORKING'));
     expect(activeRun).toBeDefined();
 
-    // Simulate `shreni resume`: the worker's watcher runs selfHeal.
-    const recover = vi.fn(async () => []);
-    const recordProgress = vi.fn();
-    await Promise.all([
-      selfHeal(KSHETRA, activeRun!, { recover, recordProgress, touchHeartbeat: () => {} }),
-      cycle,
-    ]);
+    // Simulate `shreni resume`: the worker's watcher aborts the run, awaits its
+    // unwind, then resets the work tree (the claim is given back by the run's end).
+    const recover = vi.fn(async (_k: KshetraConfig) => {});
+    const run = activeRun!;
+    run.controller.abort(new AgentAbortedError('self-heal'));
+    await Promise.all([run.done.then(() => recover(KSHETRA)), cycle]);
 
     expect(recover).toHaveBeenCalledWith(KSHETRA);
     expect(scheduler.getPhase(KSHETRA.id)).toBe('IDLE');

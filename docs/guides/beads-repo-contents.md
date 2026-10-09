@@ -1,70 +1,42 @@
-# What the beads repo tracks
+# What a beads repo holds, and what migration reads
 
-Each Kshetra's beads repo (`<slug>-beads`, symlinked as `.beads/` in the project
-repo) is the only **git-tracked, pushed, shareable** store in the system.
-Everything under `~/.shreni/kshetra/<id>/` is machine-local and dies with the
-laptop. Three feeds live in the beads repo and travel with it:
+Kshetras used to keep their tasks in a separate, git-synced **beads repo**
+(`<slug>-beads`, symlinked as `.beads/` in the project repo) driven by the `bd` CLI.
+Every Kshetra now runs on the task graph engine (Postgres), and Shreni no longer
+runs `bd`, writes to a beads repo, or syncs one. A Kshetra whose config still has
+`beads:` and no `project:` can't run until it is moved with `shreni migrate <kshetra>`.
 
-| File | Written by | What it is | How it lands in git |
-|------|-----------|------------|---------------------|
-| `issues.jsonl` | bd export pipeline | The **plan**: the dependency graph, acceptance criteria, notes, close reasons. | bd's export + `syncBeads` (`git add -A`) |
-| `ledger.jsonl` | Shreni's `ledgerSink` (epic 4a2) | Shreni's **decisions**: claim, rounds + verdicts, gate results, policy decisions, per-run usage, merge, close. Evidence is referenced by `runId`, never inlined. | `syncBeads` (`git add -A`), one commit per sync |
-| `interactions.jsonl` | bd | bd's **model of field changes**: an append-only log of status transitions and other field edits, with actor, timestamp, and old/new value. | `syncBeads` (`git add -A`), once the ignore entry is removed (below) |
+## What the importer reads
 
-`ledger.jsonl` and `interactions.jsonl` are **different records and are not merged**:
-the ledger is Shreni's model of decisions; interactions is bd's model of field
-changes. interactions entries are never folded into `ledger.jsonl`. For the full
-audit trail, read `ledger.jsonl` (or `shreni show <bead>`, which joins the plan and
-the ledger into one timeline). interactions is a useful supplementary signal, not
-the audit trail.
+`shreni migrate <kshetra>` (and init's Import phase, for a tracker repo with a
+`.beads` directory) reads the files committed in the beads directory and never
+runs `bd`:
 
-## The interactions.jsonl gitignore (epic 4a2.7)
+| File | What it is | Imported as |
+|------|-----------|-------------|
+| `issues.jsonl` | The plan: tasks, the dependency graph, acceptance criteria, notes, close reasons, and `bd remember` memories | Tasks with their own ids, states, dependencies and notes (origin `imported`), and Shreni memories |
+| `interactions.jsonl` | bd's append-only log of field changes, when the beads repo tracks it | Past events on those tasks |
 
-bd writes the beads repo's `.gitignore` at `bd init` and lists `interactions.jsonl`
-among the runtime files to ignore — and bd's export pipeline does **not** carry it
-into git (export-state tracks only issues + memories). So by default this real
-provenance is thrown away.
+The beads repo's `ledger.jsonl` (Shreni's decision ledger from the beads days) is
+not imported; it stays in the beads repo's history. New ledger entries go to
+`~/.shreni/kshetra/<id>/ledger.jsonl`.
 
-Shreni removes that one ignore entry so `git add -A` (in `syncBeads`) starts
-tracking the file:
+The export is only as fresh as its last commit. **If `bd` is still installed, run
+`bd export -o <beads dir>/issues.jsonl` first** so the import sees the latest
+state; migrate's preflight says which file it read.
 
-- **New Kshetras** track it from day one: `shreni init` removes the entry right
-  after `bd init`, before the initial beads-repo commit.
-- **Existing Kshetras**: remove the `interactions.jsonl` line from the beads
-  repo's `.gitignore` by hand, leaving the rest of bd's `.gitignore` intact.
-  `shreni migrate <kshetra>` moves a Kshetra off beads altogether, and its importer
-  reads `interactions.jsonl` when the beads repo has one.
-  It never adds a negation pattern (`!interactions.jsonl`) — bd's `.gitignore`
-  warns that negations override the fork protection in `.git/info/exclude`.
+Imported tasks keep their bead ids, so existing `bead-<id>/<slug>` branches and
+open PRs still resolve after the move. `shreni migrate <kshetra> --undo` puts the
+Kshetra back on its beads config until the first new write on the engine.
 
-The file appears in `git ls-files` after the first sync that follows a bd field
-change (bd creates `interactions.jsonl` on the first field change, not at init).
+## Where things live after the move
 
-## Concurrency: ledger writes during a sync (accepted risk)
+| Record | Where |
+|--------|-------|
+| Tasks, dependencies, claims, notes, history | The task graph, in the database `kshetra.yaml` names (`database:`, or `SHRENI_DATABASE_URL`) |
+| Memories (`bd remember` entries) | Shreni's `memories` table; read with `shreni task prime` |
+| Decision ledger | `~/.shreni/kshetra/<id>/ledger.jsonl` |
+| Run telemetry | `~/.shreni/kshetra/<id>/activity.jsonl`, `usage.jsonl` |
 
-`ledgerSink` appends to `ledger.jsonl` in the beads working tree while `syncBeads`
-runs `git add -A` / commit / `git pull --rebase` on the same tree, with no
-cross-lock between them. This is a **deliberately accepted risk** (bead 4a2.11),
-not an oversight:
-
-- `syncBeads` commits **before** it pulls, so an append that lands during the
-  rebase is an uncommitted change that survives to the next sync (deferred, not
-  lost) in every case except a sub-millisecond OS-level unlinked-inode edge.
-- If the append dirties the tree mid-rebase, the rebase aborts with a non-benign
-  error, which `syncBeads` logs and retries next cycle — the entry stays in the
-  tree.
-- `parseLedgerLines` drops a torn/corrupt line on read.
-- The worst case is **one** deferred/lost ledger entry — never `issues.jsonl`
-  corruption — and the same event is also in the machine-local `activity.jsonl`.
-
-A cross-module async lock around the pull window was judged disproportionate to
-this narrow, self-healing window for a low-volume (O(rounds)) feed. The reasoning
-is recorded at the write site (`src/ext/ledger-sink.ts`) and the sync site
-(`src/sthapathi/beads.ts`).
-
-### If a bd upgrade re-adds the ignore
-
-bd owns this `.gitignore`, so a future bd version could regenerate it and re-add
-the `interactions.jsonl` line. That is expected and not fought: if you notice
-`interactions.jsonl` has stopped being tracked after a bd upgrade, remove the
-line again by hand.
+The database is backed up by Shreni's own dumps (`~/.shreni/backups/`), taken
+before every import; see [Backups](../architecture/task-lifecycle.md#backups).

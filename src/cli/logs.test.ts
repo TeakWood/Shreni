@@ -8,8 +8,11 @@ vi.mock('../kshetra/registry', () => ({ loadRegistry: mockLoadRegistry }));
 
 const mockBdList = vi.fn<(f: { status?: string }) => Promise<string>>();
 const mockBdShow = vi.fn<(id: string) => Promise<string>>();
+// The engine's reads, as withTrackerReads hands them over; mockBd records which Kshetra was read.
 const mockBd = vi.fn((_k: KshetraConfig) => ({ list: mockBdList, show: mockBdShow }));
-vi.mock('../sthapathi/beads', () => ({ bd: mockBd }));
+vi.mock('../policy/sthapathi/reads', () => ({
+  withTrackerReads: (k: KshetraConfig, fn: (r: unknown) => Promise<unknown>) => fn(mockBd(k)),
+}));
 
 // ── imports after mocks ───────────────────────────────────────────────────────
 
@@ -20,7 +23,6 @@ const { parseNotesToBeadLog, formatBeadLog, runLogs } = await import('./logs');
 const KSHETRA = {
   id: 'myapp', name: 'Myapp',
   repo: { path: '/p/myapp', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/p/myapp-beads', remote: '', mode: 'embedded' },
   stack: { language: 'typescript' }, conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },

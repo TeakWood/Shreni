@@ -229,10 +229,10 @@ describe('runViharapala', () => {
       expect(testIdx).toBeGreaterThan(buildIdx);
     });
 
-    it('ROLE BOUNDARY prohibits bd calls', async () => {
+    it('ROLE BOUNDARY prohibits shreni task calls', async () => {
       await runViharapala(CONTEXT, SILPI_OUTPUT, 1, '');
       const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
-      expect(opts.systemPrompt.toLowerCase()).toContain('bd');
+      expect(opts.systemPrompt).toContain('Do NOT call shreni task commands');
     });
 
     it('includes PROJECT MEMORY section when set', async () => {

@@ -11,10 +11,9 @@
 // never interpreted directly.
 
 import { readFileSync } from 'fs';
-import { join } from 'path';
 import { loadRegistry } from '../kshetra/registry';
 import { resolveTargetKshetra } from './suthradhara';
-import { parseAcceptanceCriteria } from '../sthapathi/beads';
+import { parseAcceptanceCriteria } from '../sthapathi/task-json';
 import { withTrackerReads } from '../policy/sthapathi/reads';
 import { ledgerPath } from '../kshetra/state-locations';
 import { readLedger, parseLedgerLines } from '../ext/index';
@@ -289,11 +288,6 @@ function fmtProviders(providers: unknown): string {
   return parts.length ? parts.join(' ') : '?';
 }
 
-function fmtTool(tool: unknown): string {
-  const o = obj(tool);
-  return o.version != null ? text(o.version) : '(unknown)';
-}
-
 function fmtExtension(extension: unknown): string {
   const e = obj(extension);
   if (e.loaded !== true) return 'none';
@@ -326,7 +320,7 @@ function fmtLotManifest(lotId: string | null, m: LedgerEntry | undefined): strin
     `  Lot ${short} · ${fmtTs(m.ts)} · ${text(p.entrypoint) || '?'} · labels: ${labelStr}`,
     `    base: ${shortSha(repo.baseSha)} (${clean})   config: ${shortHash(config.resolvedConfigHash)}   gates: ${fmtGates(config.gates)}`,
     `    models: ${fmtRoles(config.roles)}`,
-    `    shreni: ${fmtShreni(proc.shreni)}   providers: ${fmtProviders(proc.providers)}   bd: ${fmtTool(tools.bd)}   node: ${text(tools.node) || '?'}`,
+    `    shreni: ${fmtShreni(proc.shreni)}   providers: ${fmtProviders(proc.providers)}   node: ${text(tools.node) || '?'}`,
     `    extension: ${fmtExtension(proc.extension)}`,
   ];
 }

@@ -90,14 +90,7 @@ vi.mock('../sthapathi/base-branch', () => ({
 
 const {
   ensureAppRepo,
-  createGitHubRepo,
-  cloneBeadsRepo,
-  initBeadsDb,
-  hardenBeadsRepo,
-  pushBeadsRepo,
-  createBeadsSymlink,
   addToGitignore,
-  setupClaudeHooks,
   generateKshetraYaml,
   writeKshetraConfig,
   scaffoldConventions,
@@ -107,7 +100,6 @@ const {
   smokeCheckToolchain,
   readExistingGates,
   formatGatesSummary,
-  appendShreniIntegration,
   createRagIndexStub,
   registerWithSthapathi,
   resolveAgents,
@@ -115,7 +107,6 @@ const {
   promptMergePolicy,
   resolveMergePolicy,
   resolveInitMainBranch,
-  SHRENI_SECTION,
   recordProjectId,
 } = await import('./init-kshetra');
 
@@ -231,193 +222,15 @@ describe('ensureAppRepo', () => {
   });
 });
 
-// ── Step 1: createGitHubRepo ──────────────────────────────────────────────────
-
-describe('createGitHubRepo', () => {
-  it('calls gh repo create when the remote repo does not yet exist', async () => {
-    mockExecFile
-      .mockRejectedValueOnce(Object.assign(new Error('not found'), { exitCode: 1 }))
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });
-    const url = await createGitHubRepo(async () => 'TeakWood', 'myapp');
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
-      ['repo', 'create', 'TeakWood/myapp-beads', '--private', '--confirm'],
-      expect.any(Object),
-    );
-    expect(url).toBe('git@github.com:TeakWood/myapp-beads.git');
-  });
-
-  it('skips gh repo create and returns URL when remote repo already exists', async () => {
-    resolveExec('');
-    const url = await createGitHubRepo(async () => 'TeakWood', 'myapp');
-    expect(mockExecFile).toHaveBeenCalledTimes(1);
-    expect(mockExecFile).not.toHaveBeenCalledWith(
-      'gh', expect.arrayContaining(['create']), expect.any(Object),
-    );
-    expect(url).toBe('git@github.com:TeakWood/myapp-beads.git');
-  });
-});
-
-// ── Step 2: cloneBeadsRepo ────────────────────────────────────────────────────
-
-describe('cloneBeadsRepo', () => {
-  it('calls git clone with the remote URL and local path', async () => {
-    resolveExec('');
-    await cloneBeadsRepo('git@github.com:TeakWood/myapp-beads.git', '/repos/myapp-beads');
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'git',
-      ['clone', 'git@github.com:TeakWood/myapp-beads.git', '/repos/myapp-beads'],
-      expect.any(Object),
-    );
-  });
-
-  it('skips git clone when local path already exists', async () => {
-    mockExistsSync.mockReturnValue(true);
-    await cloneBeadsRepo('git@github.com:TeakWood/myapp-beads.git', '/repos/myapp-beads');
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-});
-
-// ── Step 3: initBeadsDb ───────────────────────────────────────────────────────
-
-describe('initBeadsDb', () => {
-  it('calls bd init --stealth with BEADS_DIR env and cwd set', async () => {
-    resolveExec('');
-    await initBeadsDb('/repos/myapp-beads');
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'bd',
-      ['init', '--stealth'],
-      expect.objectContaining({
-        cwd: '/repos/myapp-beads',
-        env: expect.objectContaining({ BEADS_DIR: '/repos/myapp-beads' }),
-      }),
-    );
-  });
-
-  it('skips bd init when .dolt directory already exists', async () => {
-    mockExistsSync.mockImplementation((p: string) => p.endsWith('.dolt'));
-    await initBeadsDb('/repos/myapp-beads');
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-});
-
-// ── Step 3.6: hardenBeadsRepo (nao) ──────────────────────────────────────────
-
-describe('hardenBeadsRepo', () => {
-  it('chmods the beads dir to 0700 and configures beads.role=maintainer', async () => {
-    mockExistsSync.mockReturnValue(true);
-    resolveExec('');
-    await hardenBeadsRepo('/repos/myapp-beads');
-    expect(mockChmodSync).toHaveBeenCalledWith('/repos/myapp-beads', 0o700);
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'git', ['config', 'beads.role', 'maintainer'],
-      expect.objectContaining({ cwd: '/repos/myapp-beads' }),
-    );
-  });
-
-  it('honors an overridden role value', async () => {
-    mockExistsSync.mockReturnValue(true);
-    resolveExec('');
-    await hardenBeadsRepo('/repos/myapp-beads', 'contributor');
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'git', ['config', 'beads.role', 'contributor'],
-      expect.objectContaining({ cwd: '/repos/myapp-beads' }),
-    );
-  });
-
-  it('is a no-op when the beads dir does not exist', async () => {
-    mockExistsSync.mockReturnValue(false);
-    await hardenBeadsRepo('/repos/myapp-beads');
-    expect(mockChmodSync).not.toHaveBeenCalled();
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-
-  it('fails soft (warns, does not throw) when git config errors', async () => {
-    mockExistsSync.mockReturnValue(true);
-    resolveExecByCommand({ 'git config beads.role': null });
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await expect(hardenBeadsRepo('/repos/myapp-beads')).resolves.toBeUndefined();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('could not harden beads repo'));
-    log.mockRestore();
-  });
-});
-
-// ── Step 3.5: pushBeadsRepo (yds.13) ─────────────────────────────────────────
-
-describe('pushBeadsRepo', () => {
-  const cwd = expect.objectContaining({ cwd: '/repos/myapp-beads' });
-
-  it('commits and pushes when the tree is dirty', async () => {
-    resolveExecByCommand({ 'git status --porcelain': ' M issues.jsonl\n' });
-    await pushBeadsRepo('/repos/myapp-beads');
-    expect(mockExecFile).toHaveBeenCalledWith('git', ['add', '-A'], cwd);
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'git', ['commit', '-m', 'chore: init beads db (shreni init)'], cwd,
-    );
-    expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], cwd);
-  });
-
-  it('skips the commit but still pushes when the tree is clean', async () => {
-    resolveExecByCommand();
-    await pushBeadsRepo('/repos/myapp-beads');
-    expect(mockExecFile).not.toHaveBeenCalledWith('git', ['add', '-A'], expect.anything());
-    expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], cwd);
-  });
-
-  it('skips the push when there is no origin remote', async () => {
-    resolveExecByCommand({ 'git remote get-url origin': null });
-    await pushBeadsRepo('/repos/myapp-beads');
-    const push = mockExecFile.mock.calls.find(
-      c => c[0] === 'git' && (c[1] as string[]).includes('push'),
-    );
-    expect(push).toBeUndefined();
-  });
-
-  it('skips the push on an unborn HEAD with nothing to commit', async () => {
-    resolveExecByCommand({ 'git rev-parse HEAD': null });
-    await pushBeadsRepo('/repos/myapp-beads');
-    const push = mockExecFile.mock.calls.find(
-      c => c[0] === 'git' && (c[1] as string[]).includes('push'),
-    );
-    expect(push).toBeUndefined();
-  });
-});
-
-// ── Step 4: createBeadsSymlink ────────────────────────────────────────────────
-
-describe('createBeadsSymlink', () => {
-  it('creates a symlink at <repoPath>/.beads pointing to the absolute beads path', () => {
-    createBeadsSymlink('/repos/myapp', '/repos/myapp-beads');
-    expect(mockSymlinkSync).toHaveBeenCalledWith(
-      '/repos/myapp-beads',
-      join('/repos/myapp', '.beads'),
-    );
-  });
-
-  it('skips symlinkSync when symlink already points to the correct target', () => {
-    mockReadlinkSync.mockReturnValue('/repos/myapp-beads');
-    createBeadsSymlink('/repos/myapp', '/repos/myapp-beads');
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
-  });
-
-  it('throws when symlink exists but points to a different path', () => {
-    mockReadlinkSync.mockReturnValue('/repos/other-beads');
-    expect(() => createBeadsSymlink('/repos/myapp', '/repos/myapp-beads')).toThrow(
-      /\.beads symlink exists but points to/,
-    );
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
-  });
-});
-
 // ── Step 5: addToGitignore ────────────────────────────────────────────────────
 
 describe('addToGitignore', () => {
-  it('creates .gitignore with .beads and the machine-specific config when absent', () => {
+  it('creates .gitignore with the machine-specific config and the repo map when absent (no .beads)', () => {
     mockExistsSync.mockReturnValue(false);
     addToGitignore('/repos/myapp');
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       join('/repos/myapp', '.gitignore'),
-      '.beads\n.shreni/kshetra.yaml\n.shreni/repo-map.md\n',
+      '.shreni/kshetra.yaml\n.shreni/repo-map.md\n',
       'utf8',
     );
   });
@@ -455,25 +268,8 @@ describe('addToGitignore', () => {
     addToGitignore('/repos/myapp');
     expect(mockAppendFileSync).toHaveBeenCalledWith(
       join('/repos/myapp', '.gitignore'),
-      '\n.beads\n.shreni/kshetra.yaml\n.shreni/repo-map.md\n',
+      '\n.shreni/kshetra.yaml\n.shreni/repo-map.md\n',
       'utf8',
-    );
-  });
-});
-
-// ── Step 6: setupClaudeHooks ──────────────────────────────────────────────────
-
-describe('setupClaudeHooks', () => {
-  it('calls bd setup claude with cwd=repoPath and BEADS_DIR env', async () => {
-    resolveExec('');
-    await setupClaudeHooks('/repos/myapp', '/repos/myapp-beads');
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'bd',
-      ['setup', 'claude'],
-      expect.objectContaining({
-        cwd: '/repos/myapp',
-        env: expect.objectContaining({ BEADS_DIR: '/repos/myapp-beads' }),
-      }),
     );
   });
 });
@@ -485,8 +281,6 @@ describe('generateKshetraYaml', () => {
     slug: 'my-app',
     repoPath: '/repos/my-app',
     repoRemote: 'git@github.com:TeakWood/my-app.git',
-    beadsPath: '/repos/my-app-beads',
-    beadsRemote: 'git@github.com:TeakWood/my-app-beads.git',
     language: 'typescript',
   };
 
@@ -504,10 +298,15 @@ describe('generateKshetraYaml', () => {
     expect(out).toContain('git@github.com:TeakWood/my-app.git');
   });
 
-  it('includes beads path, remote, and mode: embedded', () => {
+  it('writes no beads block', () => {
     const out = generateKshetraYaml(OPTS);
-    expect(out).toContain('/repos/my-app-beads');
-    expect(out).toContain('mode: embedded');
+    expect(out).not.toContain('beads');
+    expect(out).not.toContain('mode: embedded');
+  });
+
+  it('writes the database and the project when given', () => {
+    const out = generateKshetraYaml({ ...OPTS, database: 'local', project: '00000000-0000-4000-8000-000000000001' });
+    expect(out).toMatch(/^name: My App\nproject: 00000000-0000-4000-8000-000000000001\ndatabase: local\n/m);
   });
 
   it('sets the default model and maxRoundsPerBead', () => {
@@ -799,8 +598,6 @@ describe('generateKshetraYaml with a pack', () => {
     slug: 'my-app',
     repoPath: '/repos/my-app',
     repoRemote: 'git@github.com:TeakWood/my-app.git',
-    beadsPath: '/repos/my-app-beads',
-    beadsRemote: 'git@github.com:TeakWood/my-app-beads.git',
     packStack: FAKE_PACK.stack,
     pack: 'nextjs-vitest@1',
     conventions: {
@@ -962,78 +759,6 @@ describe('resolveAgents', () => {
   });
 });
 
-// ── Step 8: appendShreniIntegration ──────────────────────────────────────────
-
-describe('SHRENI_SECTION content', () => {
-  it('states the task-producer-only role boundary', () => {
-    expect(SHRENI_SECTION).toContain('task producer only');
-  });
-
-  // Native execution (sw8.6) loads this file into the unattended agents too, so
-  // the block must carve them out of the interactive-only prohibitions.
-  it('carves out the Sthapathi-dispatched agents from the interactive rules', () => {
-    expect(SHRENI_SECTION).toContain('does NOT apply to you');
-    expect(SHRENI_SECTION).toMatch(/Silpi\/Viharapala\/Parikshaka/);
-    expect(SHRENI_SECTION).toContain('Interactive sessions: task producer only');
-  });
-
-  it('lists bd update --claim as prohibited', () => {
-    expect(SHRENI_SECTION).toContain('bd update --claim');
-  });
-
-  it('lists bd close as prohibited', () => {
-    expect(SHRENI_SECTION).toContain('bd close');
-  });
-
-  it('lists git branch operations as prohibited', () => {
-    expect(SHRENI_SECTION).toMatch(/git checkout.*-b|git branch/);
-  });
-
-  // sw8.5(b): the block must tell devs/agents to keep the config pointers in sync
-  // with the real toolchain files.
-  it('has a Toolchain config sync subsection naming .shreni/kshetra.yaml', () => {
-    expect(SHRENI_SECTION).toContain('Toolchain config sync');
-    expect(SHRENI_SECTION).toContain('.shreni/kshetra.yaml');
-  });
-
-  it('names the buildCommand/testRunner/lintCommand pointer fields', () => {
-    expect(SHRENI_SECTION).toContain('stack.buildCommand');
-    expect(SHRENI_SECTION).toContain('stack.testRunner');
-    expect(SHRENI_SECTION).toContain('stack.lintCommand');
-  });
-
-  it('prefers project scripts over duplicated globs (escape hatches last)', () => {
-    expect(SHRENI_SECTION).toMatch(/testFileGlobs|failCountPattern/);
-    expect(SHRENI_SECTION).toContain('project script');
-  });
-});
-
-describe('appendShreniIntegration', () => {
-  it('appends the SHRENI INTEGRATION section to CLAUDE.md', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('# Existing content\n');
-    appendShreniIntegration('/repos/myapp');
-    expect(mockAppendFileSync).toHaveBeenCalledWith(
-      join('/repos/myapp', 'CLAUDE.md'),
-      expect.stringContaining('SHRENI INTEGRATION'),
-      'utf8',
-    );
-  });
-
-  it('creates CLAUDE.md if it does not exist', () => {
-    mockExistsSync.mockReturnValue(false);
-    appendShreniIntegration('/repos/myapp');
-    expect(mockAppendFileSync).toHaveBeenCalled();
-  });
-
-  it('skips if SHRENI INTEGRATION already present', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('## SHRENI INTEGRATION\nalready here\n');
-    appendShreniIntegration('/repos/myapp');
-    expect(mockAppendFileSync).not.toHaveBeenCalled();
-  });
-});
-
 // ── Step 9: createRagIndexStub ────────────────────────────────────────────────
 
 describe('createRagIndexStub', () => {
@@ -1069,170 +794,166 @@ describe('registerWithSthapathi', () => {
 // ── initKshetra orchestrator ──────────────────────────────────────────────────
 
 describe('initKshetra', () => {
+  const ID = '00000000-0000-4000-8000-000000000001';
+  const CONFIG = '/repos/myapp/.shreni/kshetra.yaml';
+  /** Files written, read back as the real fs would. */
+  function disk(initial: Record<string, string> = {}) {
+    const files = new Map(Object.entries(initial));
+    mockWriteFileSync.mockImplementation(((p: string, c: string) => { files.set(p, c); }) as never);
+    mockReadFileSync.mockImplementation(((p: string) => {
+      // A pack's templates live in its own dir.
+      if (p.startsWith('/packs/')) return `# ${p}\n`;
+      if (!files.has(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return files.get(p)!;
+    }) as never);
+    mockExistsSync.mockImplementation((p: string) => p.endsWith('.git') || files.has(p));
+    return files;
+  }
+  function engine(order: string[] = []) {
+    return {
+      database: vi.fn(async (db: string) => { order.push(`database ${db}`); }),
+      project: vi.fn(async (input: { existing?: string }) => { order.push('project'); return input.existing ?? ID; }),
+    };
+  }
+  /** initKshetra with a stub engine: the Database and Project phases are always on. */
+  const init = (o: Omit<Parameters<typeof initKshetra>[0], 'engine'> & { engine?: ReturnType<typeof engine> }) =>
+    initKshetra({ engine: engine(), ...o });
+  let files: Map<string, string>;
+
   beforeEach(() => {
     // App repo phase no-ops: .git exists and origin resolves. Exec calls are
     // dispatched by command (resolveExecByCommand defaults): origin resolves,
     // gh api user yields the login, everything else succeeds with ''.
-    mockExistsSync.mockImplementation((p: string) => p.endsWith('.git'));
+    files = disk();
     resolveExecByCommand();
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
-  it('runs all 10 steps and registers the kshetra', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', expect.stringContaining('kshetra.yaml'));
+  it('runs every phase and registers the kshetra', async () => {
+    await init({ slug: 'myapp', path: '/repos/myapp' });
+    expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', CONFIG);
   });
 
-  it('creates the .beads symlink', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    expect(mockSymlinkSync).toHaveBeenCalled();
+  it('writes kshetra.yaml with the project and database, and no beads block', async () => {
+    await init({ slug: 'myapp', path: '/repos/myapp' });
+    const config = files.get(CONFIG)!;
+    expect(config).toContain('id: myapp');
+    expect(config).toMatch(new RegExp(`^name: Myapp\nproject: ${ID}\ndatabase: local\n`, 'm'));
+    expect(config).not.toContain('beads');
   });
 
-  it('writes kshetra.yaml', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      expect.stringContaining('kshetra.yaml'),
-      expect.stringContaining('myapp'),
-      'utf8',
-    );
+  it('never runs bd, makes no beads repo and no .beads link, and gitignores no .beads', async () => {
+    await init({ slug: 'myapp', path: '/repos/myapp' });
+    expect(mockExecFile.mock.calls.filter(c => c[0] === 'bd')).toEqual([]);
+    expect(mockExecFile.mock.calls.find(c => c[0] === 'gh' && (c[1] as string[]).includes('create'))).toBeUndefined();
+    expect(mockExecFile.mock.calls.find(c => c[0] === 'git' && (c[1] as string[]).includes('clone'))).toBeUndefined();
+    expect(mockSymlinkSync).not.toHaveBeenCalled();
+    const gitignore = files.get('/repos/myapp/.gitignore')!;
+    expect(gitignore).toContain('.shreni/kshetra.yaml');
+    expect(gitignore).toContain('.shreni/repo-map.md');
+    expect(gitignore).not.toMatch(/^\.beads$/m);
   });
 
-  it('resolves the owner from the gh login when --org is omitted', async () => {
-    resolveExecByCommand({ 'gh api user': 'navakanth\n' });
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    const ghCall = mockExecFile.mock.calls.find(
-      c => c[0] === 'gh' && (c[1] as string[]).includes('view'),
-    );
-    expect(ghCall?.[1]).toContain('navakanth/myapp-beads');
+  /** An app repo with no origin yet: the first `git remote get-url origin` fails, later ones resolve. */
+  function noOriginYet(login: string | null = 'TeakWood') {
+    let originAsked = 0;
+    mockExecFile.mockImplementation((cmd: unknown, args: unknown) => {
+      const key = `${cmd} ${(args as string[]).join(' ')}`;
+      if (key.startsWith('git remote get-url origin')) {
+        return originAsked++ === 0 ? Promise.reject(new Error('no origin'))
+          : Promise.resolve({ stdout: 'git@github.com:x/myapp.git\n', stderr: '' });
+      }
+      if (key.startsWith('gh api user')) return login === null ? Promise.reject(new Error('not logged in')) : Promise.resolve({ stdout: `${login}\n`, stderr: '' });
+      if (key.startsWith('git rev-parse --abbrev-ref HEAD')) return Promise.resolve({ stdout: 'main\n', stderr: '' });
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+  }
+
+  it('resolves the owner of a created app repo from the gh login when --org is omitted', async () => {
+    noOriginYet('navakanth');
+    await init({ slug: 'myapp', path: '/repos/myapp' });
+    const ghCall = mockExecFile.mock.calls.find(c => c[0] === 'gh' && (c[1] as string[]).includes('view'));
+    expect(ghCall?.[1]).toContain('navakanth/myapp');
   });
 
   it('uses custom org when provided, without consulting gh', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp', org: 'Acme' });
-    const ghCall = mockExecFile.mock.calls.find(
-      c => c[0] === 'gh' && (c[1] as string[]).includes('view'),
-    );
-    expect(ghCall?.[1]).toContain('Acme/myapp-beads');
-    const loginCall = mockExecFile.mock.calls.find(
-      c => c[0] === 'gh' && (c[1] as string[]).includes('user'),
-    );
-    expect(loginCall).toBeUndefined();
+    noOriginYet();
+    await init({ slug: 'myapp', path: '/repos/myapp', org: 'Acme' });
+    const ghCall = mockExecFile.mock.calls.find(c => c[0] === 'gh' && (c[1] as string[]).includes('view'));
+    expect(ghCall?.[1]).toContain('Acme/myapp');
+    expect(mockExecFile.mock.calls.find(c => c[0] === 'gh' && (c[1] as string[]).includes('user'))).toBeUndefined();
   });
 
   it('errors with --org guidance when no org is given and the gh login cannot be resolved', async () => {
-    resolveExecByCommand({ 'gh api user': null });
-    await expect(initKshetra({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow('--org');
+    noOriginYet(null);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(init({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow('--org');
     expect(mockRegisterKshetra).not.toHaveBeenCalled();
   });
 
-  it('skips clone, bd init, and symlink creation when beads already fully initialized', async () => {
-    mockExistsSync.mockImplementation((p: string) => {
-      if (p === '/repos/myapp-beads') return true;
-      if (p.endsWith('.git')) return true;
-      if (p.endsWith('.dolt')) return true;
-      if (p.endsWith('.gitignore')) return true;
-      if (p.endsWith('CLAUDE.md')) return true;
-      if (p.endsWith('index.json')) return true;
-      return false;
-    });
-    mockReadFileSync.mockImplementation((p: unknown) => {
-      const s = p as string;
-      if (s.endsWith('.gitignore')) return '.beads\nnode_modules\n';
-      if (s.endsWith('CLAUDE.md')) return '## SHRENI INTEGRATION\nalready here\n';
-      return '';
-    });
-    mockReadlinkSync.mockReturnValue('/repos/myapp-beads');
-
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-
-    const cloned = mockExecFile.mock.calls.find(
-      c => c[0] === 'git' && (c[1] as string[]).includes('clone'),
-    );
-    expect(cloned).toBeUndefined();
-    const bdInit = mockExecFile.mock.calls.find(
-      c => c[0] === 'bd' && (c[1] as string[]).includes('init'),
-    );
-    expect(bdInit).toBeUndefined();
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
-    expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', expect.stringContaining('kshetra.yaml'));
+  it('a repo that already has an origin never needs an owner', async () => {
+    resolveExecByCommand({ 'gh api user': null });
+    await init({ slug: 'myapp', path: '/repos/myapp' });
+    expect(mockRegisterKshetra).toHaveBeenCalled();
   });
 
-  it('pushes the beads repo after bd init so the embedded db reaches the remote', async () => {
-    resolveExecByCommand({ 'git status --porcelain': ' M issues.jsonl\n' });
-    const beadsCwd = expect.objectContaining({ cwd: '/repos/myapp-beads' });
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    expect(mockExecFile).toHaveBeenCalledWith(
-      'git', ['commit', '-m', 'chore: init beads db (shreni init)'], beadsCwd,
-    );
-    expect(mockExecFile).toHaveBeenCalledWith('git', ['push', '-u', 'origin', 'main'], beadsCwd);
-  });
-
-  describe('on the task graph engine (policy spec, "Init")', () => {
-    const ID = '00000000-0000-4000-8000-000000000001';
-    /** Files written, read back as the real fs would. */
-    function disk(initial: Record<string, string> = {}) {
-      const files = new Map(Object.entries(initial));
-      mockWriteFileSync.mockImplementation(((p: string, c: string) => { files.set(p, c); }) as never);
-      mockReadFileSync.mockImplementation(((p: string) => {
-        if (!files.has(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-        return files.get(p)!;
-      }) as never);
-      mockExistsSync.mockImplementation((p: string) => p.endsWith('.git') || files.has(p));
-      return files;
-    }
-    function engine(order: string[]) {
-      return {
-        database: vi.fn(async (db: string) => { order.push(`database ${db}`); }),
-        project: vi.fn(async (input: { existing?: string }) => { order.push('project'); return input.existing ?? ID; }),
-      };
-    }
-
-    it('reaches the database before the beads repo, and registers the project once the config is written', async () => {
-      const files = disk();
+  describe('the engine phases (policy spec, "Init")', () => {
+    it('reaches the database before the config, and registers the project once the config is written', async () => {
       const order: string[] = [];
       const log = vi.spyOn(console, 'log').mockImplementation((l: unknown) => { if (typeof l === 'string' && l.startsWith('▶')) order.push(l); });
       const e = engine(order);
       await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
       log.mockRestore();
-      expect(order).toEqual(['▶ App repo …', '▶ Base branch …', '▶ Database …', 'database local', '▶ Beads repo …', '▶ Repo wiring …', '▶ Config …', '▶ Project …', 'project', '▶ Register …']);
-      expect(e.project).toHaveBeenCalledWith({
-        database: 'local', existing: undefined, repoUrl: expect.any(String),
-        beads: { dir: '/repos/myapp-beads', repo: '/repos/myapp', configPath: '/repos/myapp/.shreni/kshetra.yaml' },
-      });
-      // The Kshetra block replaces the old section, and the prime hooks replace bd setup claude's.
+      expect(order).toEqual(['▶ App repo …', '▶ Base branch …', '▶ Database …', 'database local', '▶ Config …', '▶ Project …', 'project', '▶ Register …']);
+      // A Kshetra imports no beads at init: the beads argument is the tracker path's.
+      expect(e.project).toHaveBeenCalledWith({ database: 'local', existing: undefined, repoUrl: expect.any(String) });
+      // The Kshetra block and the prime hooks, always.
       expect(files.get('/repos/myapp/CLAUDE.md')).toMatch(/^<!-- shreni:begin kshetra v1 -->/);
       expect(files.get('/repos/myapp/.claude/settings.json')).toContain('shreni task prime');
-      expect(mockExecFile.mock.calls.find(c => c[0] === 'bd' && (c[1] as string[]).includes('setup'))).toBeUndefined();
-      const config = files.get('/repos/myapp/.shreni/kshetra.yaml')!;
-      expect(config).toMatch(new RegExp(`^name: Myapp\nproject: ${ID}\ndatabase: local\n`, 'm'));
+      expect(files.get('/repos/myapp/.claude/settings.json')).not.toContain('bd prime');
+    });
+
+    it('the Config phase replaces an old SHRENI INTEGRATION section with the block', async () => {
+      const { LEGACY_SECTION } = await import('../policy/init/instructions');
+      files.set('/repos/myapp/CLAUDE.md', `# Mine\n${LEGACY_SECTION}`);
+      await init({ slug: 'myapp', path: '/repos/myapp' });
+      const text = files.get('/repos/myapp/CLAUDE.md')!;
+      expect(text).toMatch(/^# Mine\n\n<!-- shreni:begin kshetra v1 -->/);
+      expect(text).not.toContain('SHRENI INTEGRATION');
+    });
+
+    it('refuses a Kshetra still on beads, pointing at shreni migrate, before any phase runs', async () => {
+      disk({
+        '/repos/myapp/.shreni/kshetra.yaml': 'id: myapp\nname: Myapp\nbeads: { path: /repos/myapp-beads, remote: x }\n',
+        '/repos/myapp-beads/issues.jsonl': '{"_type":"issue","id":"myapp-1"}\n',
+      });
+      const e = engine([]);
+      await expect(initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e })).rejects.toThrow(/myapp is still on beads; run shreni migrate myapp/);
+      expect(e.database).not.toHaveBeenCalled();
+      expect(e.project).not.toHaveBeenCalled();
     });
 
     it('a re-run keeps the project and database the config names', async () => {
-      const files = disk({ '/repos/myapp/.shreni/kshetra.yaml': `id: myapp\nname: Myapp\nproject: ${ID}\ndatabase: acme\n` });
+      files.set(CONFIG, `id: myapp\nname: Myapp\nproject: ${ID}\ndatabase: acme\n`);
       const e = engine([]);
       await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
       expect(e.database).toHaveBeenCalledWith('acme');
       expect(e.project).toHaveBeenCalledWith(expect.objectContaining({ database: 'acme', existing: ID }));
-      expect(files.get('/repos/myapp/.shreni/kshetra.yaml')!.match(/^project:/gm)).toHaveLength(1);
-    });
-
-    it('a re-run without the engine (--on-beads) keeps the project the config names', async () => {
-      const files = disk({ '/repos/myapp/.shreni/kshetra.yaml': `id: myapp\nname: Myapp\nproject: ${ID}\ndatabase: acme\n` });
-      await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-      expect(files.get('/repos/myapp/.shreni/kshetra.yaml')).toMatch(new RegExp(`project: ${ID}\\ndatabase: acme`));
+      expect(files.get(CONFIG)!.match(/^project:/gm)).toHaveLength(1);
     });
 
     it('a Kshetra replacing a tracker takes its project and database, then removes tracker.yaml', async () => {
       const tracker = '/repos/myapp/.shreni/tracker.yaml';
-      const files = disk({ [tracker]: `name: myapp\nproject: ${ID}\ndatabase: acme\nproviders: [claude]\n` });
+      files.set(tracker, `name: myapp\nproject: ${ID}\ndatabase: acme\nproviders: [claude]\n`);
       const e = engine([]);
       await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e, replaces: tracker });
       expect(e.project).toHaveBeenCalledWith(expect.objectContaining({ database: 'acme', existing: ID }));
-      expect(files.get('/repos/myapp/.shreni/kshetra.yaml')).toContain(`project: ${ID}`);
+      expect(files.get(CONFIG)).toContain(`project: ${ID}`);
       expect(mockRmSync).toHaveBeenCalledWith(tracker);
     });
 
     it('records the project id in place, keeping the rest of the file', () => {
-      const files = disk({ '/c.yaml': '# mine\nname: web # the name\nrepo: {}\n' });
+      files.set('/c.yaml', '# mine\nname: web # the name\nrepo: {}\n');
       recordProjectId('/c.yaml', ID);
       expect(files.get('/c.yaml')).toBe(`# mine\nname: web # the name\nproject: ${ID}\nrepo: {}\n`);
       recordProjectId('/c.yaml', ID.replace(/1$/, '2'));
@@ -1241,11 +962,8 @@ describe('initKshetra', () => {
   });
 
   it('writes an explicit gates block with the schema defaults into a fresh config', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    const configWrite = mockWriteFileSync.mock.calls.find(
-      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
-    );
-    const yamlOut = configWrite?.[1] as string;
+    await init({ slug: 'myapp', path: '/repos/myapp' });
+    const yamlOut = files.get(CONFIG)!;
     expect(yamlOut).toContain('gates:');
     expect(yamlOut).toMatch(/test:\s*\n\s*level: block/);
     expect(yamlOut).toMatch(/coverage:\s*\n\s*level: warn/);
@@ -1254,84 +972,49 @@ describe('initKshetra', () => {
   });
 
   it('preserves an existing gates block on re-init instead of resetting to defaults', async () => {
-    mockExistsSync.mockImplementation(
-      (p: string) => p.endsWith('.git') || p.endsWith('kshetra.yaml'),
-    );
-    mockReadFileSync.mockImplementation((p: unknown) =>
-      (p as string).endsWith('kshetra.yaml')
-        ? 'id: myapp\ngates:\n  coverage:\n    level: block\n'
-        : '',
-    );
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    const configWrite = mockWriteFileSync.mock.calls.find(
-      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
-    );
-    expect(configWrite?.[1]).toMatch(/coverage:\s*\n\s*level: block/);
+    files.set(CONFIG, 'id: myapp\ngates:\n  coverage:\n    level: block\n');
+    await init({ slug: 'myapp', path: '/repos/myapp' });
+    expect(files.get(CONFIG)).toMatch(/coverage:\s*\n\s*level: block/);
   });
 
   it('ends with the ready-to-work message', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
+    await init({ slug: 'myapp', path: '/repos/myapp' });
     const out = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
     expect(out).toContain('Initialization done — Shreni is now ready to work on "myapp"');
     expect(out).toContain('Run `shreni start` to begin.');
-  });
-
-  it('derives default beads path as sibling <repo>-beads when --beads-path is omitted', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-    expect(mockSymlinkSync).toHaveBeenCalledWith(
-      '/repos/myapp-beads',
-      expect.stringContaining('.beads'),
-    );
-  });
-
-  it('uses custom beads path when beadsPath option is provided', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp', beadsPath: '/custom/beads-store' });
-    expect(mockSymlinkSync).toHaveBeenCalledWith(
-      '/custom/beads-store',
-      expect.stringContaining('.beads'),
-    );
-    const bdInitCall = mockExecFile.mock.calls.find(
-      (c) => c[0] === 'bd' && (c[1] as string[]).includes('init'),
-    );
-    expect(bdInitCall?.[2]).toMatchObject({
-      cwd: '/custom/beads-store',
-      env: expect.objectContaining({ BEADS_DIR: '/custom/beads-store' }),
-    });
+    expect(out).not.toContain('beads repo');
   });
 
   it('writes the resolved provider/model into the config', async () => {
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp', provider: 'codex', model: 'gpt-x' });
+    await init({ slug: 'myapp', path: '/repos/myapp', provider: 'codex', model: 'gpt-x' });
     expect(mockCheckProviderInstalled).toHaveBeenCalledWith('openai');
-    const configWrite = mockWriteFileSync.mock.calls.find(
-      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
-    );
-    expect(configWrite?.[1]).toContain('provider: openai');
-    expect(configWrite?.[1]).toContain('model: gpt-x');
+    expect(files.get(CONFIG)).toContain('provider: openai');
+    expect(files.get(CONFIG)).toContain('model: gpt-x');
   });
 
   it('hard-gates on a missing provider CLI: exits without writing config or registering', async () => {
     mockCheckProviderInstalled.mockReturnValueOnce({ ok: false, bin: 'claude', message: 'install claude' } as never);
-    await expect(initKshetra({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow('install claude');
-    // Nothing written: no config, no symlink, no registration, no network calls.
+    await expect(init({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow('install claude');
+    // Nothing written: no config, no registration, no network calls.
     expect(mockExecFile).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
     expect(mockRegisterKshetra).not.toHaveBeenCalled();
   });
 
   it('--dry-run prints the plan and mutates nothing', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp', dryRun: true });
-    // No network, no writes, no symlink, no registration.
+    const e = engine();
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', dryRun: true, engine: e });
+    // No network, no writes, no database, no registration.
     expect(mockExecFile).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
+    expect(e.database).not.toHaveBeenCalled();
     expect(mockRegisterKshetra).not.toHaveBeenCalled();
-    // Plan mentions the config target and the dry-run banner.
     const out = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
     expect(out).toContain('dry-run');
     expect(out).toContain(join('/repos/myapp', '.shreni', 'kshetra.yaml'));
+    expect(out).not.toContain('beads');
     logSpy.mockRestore();
   });
 
@@ -1340,35 +1023,28 @@ describe('initKshetra', () => {
     // Fail the very first mutating phase (App repo): every git/gh call rejects.
     mockExecFile.mockReset().mockRejectedValue(new Error('gh: not authenticated'));
     await expect(
-      initKshetra({ slug: 'myapp', path: '/repos/myapp', org: 'Acme' }),
+      init({ slug: 'myapp', path: '/repos/myapp', org: 'Acme' }),
     ).rejects.toThrow('gh: not authenticated');
-    // Later phases never ran: no wiring, no config, no registration.
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
+    // Later phases never ran: no config, no registration.
     expect(mockRegisterKshetra).not.toHaveBeenCalled();
-    const configWrite = mockWriteFileSync.mock.calls.find(
-      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
-    );
-    expect(configWrite).toBeUndefined();
-    // Recovery guidance + the exact re-run command (with flags) were printed.
+    expect(files.has(CONFIG)).toBe(false);
     const err = errSpy.mock.calls.map(c => c.join(' ')).join('\n');
     expect(err).toContain('App repo failed');
     expect(err).toContain('To recover');
     expect(err).toContain('shreni init --mode kshetra --slug myapp --path /repos/myapp --org Acme');
+    expect(err).not.toContain('--on-beads');
     errSpy.mockRestore();
   });
 
   it('--pack materializes stack values, provenance, and templates', async () => {
     mockLoadPackByName.mockReturnValue(FAKE_PACK);
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest' });
-
+    await init({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest' });
     expect(mockLoadPackByName).toHaveBeenCalledWith('nextjs-vitest');
-    const configWrite = mockWriteFileSync.mock.calls.find(
-      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
-    );
-    expect(configWrite?.[1]).toContain('pack: nextjs-vitest@1');
-    expect(configWrite?.[1]).toContain('framework: nextjs');
-    expect(configWrite?.[1]).toContain('buildCommand: pnpm build');
-    expect(configWrite?.[1]).toContain('reviewGuide:');
+    const config = files.get(CONFIG)!;
+    expect(config).toContain('pack: nextjs-vitest@1');
+    expect(config).toContain('framework: nextjs');
+    expect(config).toContain('buildCommand: pnpm build');
+    expect(config).toContain('reviewGuide:');
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       join('/repos/myapp', '.shreni', 'review-guide.md'), expect.anything(), 'utf8',
     );
@@ -1376,17 +1052,14 @@ describe('initKshetra', () => {
 
   it('--language (explicit user value) wins over the pack value', async () => {
     mockLoadPackByName.mockReturnValue(FAKE_PACK);
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', language: 'javascript' });
-    const configWrite = mockWriteFileSync.mock.calls.find(
-      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
-    );
-    expect(configWrite?.[1]).toContain('language: javascript');
-    expect(configWrite?.[1]).toContain('testRunner: pnpm test');
+    await init({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', language: 'javascript' });
+    expect(files.get(CONFIG)).toContain('language: javascript');
+    expect(files.get(CONFIG)).toContain('testRunner: pnpm test');
   });
 
   it('rejects --pack combined with --no-pack before mutating anything', async () => {
     await expect(
-      initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'x', noPack: true }),
+      init({ slug: 'myapp', path: '/repos/myapp', pack: 'x', noPack: true }),
     ).rejects.toThrow('mutually exclusive');
     expect(mockLoadPackByName).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
@@ -1394,37 +1067,32 @@ describe('initKshetra', () => {
 
   it('rejects --upgrade without --pack', async () => {
     await expect(
-      initKshetra({ slug: 'myapp', path: '/repos/myapp', upgrade: true }),
+      init({ slug: 'myapp', path: '/repos/myapp', upgrade: true }),
     ).rejects.toThrow('--upgrade requires --pack');
   });
 
   it('--upgrade updates stack values only, prints template diffs, and runs no init phases', async () => {
     mockLoadPackByName.mockReturnValue({ ...FAKE_PACK, version: 2 });
+    files.set(CONFIG, 'id: myapp\nagents:\n  provider: anthropic\nstack:\n  language: typescript\n  testRunner: old-runner\n');
     mockExistsSync.mockImplementation(
       (p: string) => p.endsWith('kshetra.yaml') || p.endsWith('.md') || p.endsWith('.git'),
-    );
-    mockReadFileSync.mockReturnValue(
-      'id: myapp\nagents:\n  provider: anthropic\nstack:\n  language: typescript\n  testRunner: old-runner\n',
     );
     mockExecFile.mockReset().mockRejectedValue(
       Object.assign(new Error('differs'), { stdout: '--- current\n+++ pristine' }),
     );
-
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', upgrade: true });
-
-    const configWrite = mockWriteFileSync.mock.calls.find(
-      c => typeof c[0] === 'string' && (c[0] as string).endsWith('kshetra.yaml'),
-    );
-    expect(configWrite?.[1]).toContain('pack: nextjs-vitest@2');
-    expect(configWrite?.[1]).toContain('testRunner: pnpm test');
-    expect(configWrite?.[1]).toContain('provider: anthropic');
+    const e = engine();
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', upgrade: true, engine: e });
+    const config = files.get(CONFIG)!;
+    expect(config).toContain('pack: nextjs-vitest@2');
+    expect(config).toContain('testRunner: pnpm test');
+    expect(config).toContain('provider: anthropic');
     // Docs untouched; a diff was printed instead.
     expect(mockWriteFileSync).not.toHaveBeenCalledWith(
       expect.stringContaining('review-guide.md'), expect.anything(), 'utf8',
     );
     expect(mockExecFile).toHaveBeenCalledWith('diff', expect.anything(), expect.any(Object));
-    // No repo/beads/register phases.
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
+    // No repo/database/register phases.
+    expect(e.database).not.toHaveBeenCalled();
     expect(mockRegisterKshetra).not.toHaveBeenCalled();
   });
 
@@ -1432,35 +1100,23 @@ describe('initKshetra', () => {
     mockLoadPackByName.mockReturnValue(FAKE_PACK);
     mockExistsSync.mockReturnValue(false);
     await expect(
-      initKshetra({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', upgrade: true }),
+      init({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', upgrade: true }),
     ).rejects.toThrow('Nothing to upgrade');
   });
 
-  it('resumes without duplicating GitHub repo/symlink/config when outputs already exist', async () => {
-    // Everything from a prior partial run is present: beads repo cloned + db
-    // initialised, symlink correct, config dir populated.
-    mockExistsSync.mockImplementation((p: string) => {
-      if (p === '/repos/myapp-beads') return true;
-      if (p.endsWith('.git')) return true;
-      if (p.endsWith('.dolt')) return true;
-      return false;
-    });
-    mockReadlinkSync.mockReturnValue('/repos/myapp-beads');
-
-    await initKshetra({ slug: 'myapp', path: '/repos/myapp' });
-
-    // No `gh repo create`, no `git clone`, no `bd init`, no new symlink.
-    const created = mockExecFile.mock.calls.find(
-      c => c[0] === 'gh' && (c[1] as string[]).includes('create'),
-    );
-    expect(created).toBeUndefined();
-    const cloned = mockExecFile.mock.calls.find(c => c[0] === 'git' && (c[1] as string[]).includes('clone'));
-    expect(cloned).toBeUndefined();
-    expect(mockSymlinkSync).not.toHaveBeenCalled();
-    // Config re-written and re-registered (idempotent, single source of truth).
-    expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', expect.stringContaining('kshetra.yaml'));
+  it('a re-run resumes without duplicating the app repo, the config or the project', async () => {
+    const e = engine();
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
+    mockExecFile.mockClear();
+    await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
+    expect(mockExecFile.mock.calls.find(c => c[0] === 'gh' && (c[1] as string[]).includes('create'))).toBeUndefined();
+    expect(e.project).toHaveBeenLastCalledWith(expect.objectContaining({ existing: ID }));
+    expect(files.get(CONFIG)!.match(/^project:/gm)).toHaveLength(1);
+    expect(files.get('/repos/myapp/CLAUDE.md')!.match(/shreni:begin/g)).toHaveLength(1);
+    expect(mockRegisterKshetra).toHaveBeenCalledTimes(2);
   });
 });
+
 describe('promptMergePolicy (wax)', () => {
   const answer = (a: string) => mockQuestion.mockImplementation((_q, cb) => cb(a));
 

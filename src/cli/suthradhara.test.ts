@@ -30,6 +30,21 @@ vi.mock('../suthradhara/persistence', () => ({
   listSessions: mockListSessions,
 }));
 
+// Every Kshetra is on the engine: each launch gets a plan from the plan store.
+const plans = vi.hoisted(() => ({
+  create: vi.fn(async () => 'plan-1'),
+  isOpen: vi.fn(async () => true),
+  dropIfEmpty: vi.fn(async () => {}),
+}));
+vi.mock('../policy/suthradhara/filing', async orig => ({
+  ...(await orig<object>()),
+  planStore: () => plans,
+}));
+vi.mock('../kshetra/user-config', async orig => ({
+  ...(await orig<object>()),
+  loadUserConfig: () => ({ user: 'ann@example.com' }),
+}));
+
 vi.mock('../kshetra/registry', () => ({
   loadRegistry: vi.fn(() => []),
 }));
@@ -60,11 +75,13 @@ const { writeHandoff } = await import('../suthradhara/handoff');
 const AGENTS = { provider: 'anthropic', model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 } as const;
 const KSHETRA_A = {
   id: 'alpha',
+  project: '00000000-0000-4000-8000-00000000000a',
   repo: { path: '/projects/alpha', remote: '', mainBranch: 'main', branchPattern: '' },
   agents: AGENTS,
 } as unknown as KshetraConfig;
 const KSHETRA_B = {
   id: 'beta',
+  project: '00000000-0000-4000-8000-00000000000b',
   repo: { path: '/projects/beta', remote: '', mainBranch: 'main', branchPattern: '' },
   agents: AGENTS,
 } as unknown as KshetraConfig;
@@ -156,7 +173,7 @@ describe('runSuthradhara — dispatch that does not enter the loop', () => {
     mockResumeSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 100 });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await runSuthradhara('resume', { args: [ALPHA_SESSION], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A] });
-    expect(mockResumeSession).toHaveBeenCalledWith(KSHETRA_A, ALPHA_SESSION);
+    expect(mockResumeSession).toHaveBeenCalledWith(KSHETRA_A, ALPHA_SESSION, { planId: 'plan-1' });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('already running (pid 100)'));
     logSpy.mockRestore();
 
@@ -602,7 +619,9 @@ describe('base-branch preflight wired into the launch paths (uvu.6)', () => {
     mockStartSession.mockResolvedValue({ status: 'already_running', kshetraId: 'alpha', pid: 1 });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await runSuthradhara('start', { args: ['@alpha'], flagKshetra: undefined, cwd: '/x', kshetras: [KSHETRA_A] });
-    expect(mockStartSession).toHaveBeenCalledWith(KSHETRA_A);
+    expect(mockStartSession).toHaveBeenCalledWith(KSHETRA_A, { planId: 'plan-1' });
+    // The launch didn't happen, so its unused plan is dropped.
+    expect(plans.dropIfEmpty).toHaveBeenCalledWith('plan-1');
     logSpy.mockRestore();
   });
 

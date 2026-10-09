@@ -63,9 +63,8 @@ const runtime = createWorkerRuntime(kshetra, { labels, allowAblation, entrypoint
 let stop: (() => void) | undefined;
 let stopTimers: (() => void) | undefined;
 
-// Startup: sync + RECOVER crash drift + RESUME reopened WIP, and only THEN arm
-// the poll loop — resuming before the loop is armed keeps resume (which runs
-// WORKING outside the scheduler's phase machine) from racing a poll tick.
+// Startup: open the engine (taking the worker lock), reset the work tree and
+// reconcile PRs, and only THEN arm the poll loop.
 runtime.startup()
   .then(() => {
     stop = runtime.scheduler.scheduleLoop(runtime.kshetra, runtime.hooks);
@@ -78,12 +77,12 @@ runtime.startup()
       releaseOwnership();
       process.exit(1);
     }
-    // Arm the poll loop anyway so a recovery/resume hiccup doesn't leave the
+    // Arm the poll loop anyway so a startup hiccup doesn't leave the
     // worker permanently idle — the normal gated pickup path is the safe fallback.
     stop ??= runtime.scheduler.scheduleLoop(runtime.kshetra, runtime.hooks);
   });
 
-// The background timers (bead sync, PR reconcile, watchdog, heartbeat, resume
+// The background timers (PR reconcile, watchdog, heartbeat, resume
 // watcher) run independently of startup — arm them immediately.
 stopTimers = runtime.startTimers();
 

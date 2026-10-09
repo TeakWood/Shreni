@@ -3,7 +3,6 @@ import { promisify } from 'util';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import { git } from './git.js';
-import { bd } from './beads.js';
 import { engineStore } from './task-store.js';
 import { getHealthBaseline } from '../kshetra/state.js';
 import { resolveTestCommand, splitCommand } from '../kshetra/toolchain.js';
@@ -136,33 +135,6 @@ export async function ensureHealthBead(
   failCount: number,
 ): Promise<boolean> {
   const countLabel = failCount >= 0 ? `${failCount}` : 'an unknown number of';
-  const store = engineStore(kshetra);
-  // On the engine: filed by system (so it lands open), and only while none is open.
-  if (store) return store.ensureHealthTask(`${HEALTH_BEAD_TITLE} (${countLabel} failing)`, 0);
-  const bdClient = bd(kshetra);
-  for (const status of ['open', 'in_progress', 'blocked']) {
-    const raw = await bdClient.list({ status });
-    if (rawHasHealthBead(raw)) return false;
-  }
-  await bdClient.create(
-    `${HEALTH_BEAD_TITLE} (${countLabel} failing)`,
-    0,
-    'bug',
-  );
-  return true;
-}
-
-function rawHasHealthBead(raw: string): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return false;
-  }
-  if (!Array.isArray(parsed)) return false;
-  return parsed.some(
-    item =>
-      typeof (item as { title?: unknown }).title === 'string' &&
-      (item as { title: string }).title.startsWith(HEALTH_BEAD_PREFIX),
-  );
+  // Filed by system (so it lands open), and only while none is open.
+  return engineStore(kshetra).ensureHealthTask(`${HEALTH_BEAD_TITLE} (${countLabel} failing)`, 0);
 }

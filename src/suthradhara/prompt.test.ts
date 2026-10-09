@@ -6,12 +6,12 @@ import { handoffRelPath } from './handoff';
 const KSHETRA = {
   id: 'myapp',
   repo: { path: '/projects/myapp', remote: 'git@github.com:me/myapp.git', mainBranch: 'main' },
-  beads: { path: '/projects/myapp-beads/.beads', remote: 'git@github.com:me/myapp-beads.git' },
+  project: '00000000-0000-4000-8000-000000000001',
   agents: { model: 'claude-opus-4-8' },
 } as unknown as KshetraConfig;
 
 describe('buildPlanningPrompt', () => {
-  const prompt = buildPlanningPrompt(KSHETRA);
+  const prompt = buildPlanningPrompt(KSHETRA, { planId: 'plan-1' });
 
   it('names the Kshetra and repo it is planning against', () => {
     expect(prompt).toContain('Active Kshetra: myapp');
@@ -29,20 +29,21 @@ describe('buildPlanningPrompt', () => {
     expect(prompt).toContain('GATE ②');
   });
 
-  it('files the epic as --type epic and links children with --parent (Shreni-beads-q08)', () => {
-    // GATE ① step a names the epic type explicitly: Suthradhara once filed parents
+  it('files the epic as an epic and links children with --parent (Shreni-beads-q08)', () => {
+    // GATE ① step a names the epic explicitly: Suthradhara once filed parents
     // as `feature`, which Sthapathi then claimed and worked as a task.
     const gate1 = prompt.slice(prompt.indexOf('GATE ①'), prompt.indexOf('GATE ②'));
-    expect(gate1).toContain('--type epic');
+    expect(gate1).toContain('--epic');
     expect(gate1).toContain('--parent <epic id>');
     // The proposal shape no longer offers "epic or feature" for the parent.
     expect(prompt).not.toContain('type epic or feature');
     expect(prompt).toContain('Epic — a parent bead (title, type epic,');
   });
 
-  it('grounds the beads-sync and doc-push in the real remotes/paths', () => {
-    expect(prompt).toContain(KSHETRA.beads.remote);
-    expect(prompt).toContain('bd export -o "$BEADS_DIR/issues.jsonl"');
+  it('files into its plan with shreni plan, never bd, and grounds the doc-push in the real remotes/paths', () => {
+    expect(prompt).toContain('File the plan into plan plan-1');
+    expect(prompt).toContain('shreni plan validate');
+    expect(prompt).not.toMatch(/\bbd\b|BEADS_DIR/);
     expect(prompt).toContain(`${DESIGN_DIR}/<YYYY-MM-DD>-<slug>.md`);
     expect(prompt).toContain('git switch -c suthradhara/<slug>');
     expect(prompt).toContain(`NEVER merge to ${KSHETRA.repo.mainBranch}`);
@@ -77,7 +78,7 @@ describe('buildPlanningPrompt', () => {
 
   it('adds the extend block only when a prior doc is seeded', () => {
     expect(prompt).not.toContain('EXTENDING AN EXISTING PLAN');
-    const extended = buildPlanningPrompt(KSHETRA, { extendDocRelPath: '.shreni/design/2026-09-16-sso.md' });
+    const extended = buildPlanningPrompt(KSHETRA, { planId: 'plan-1', extendDocRelPath: '.shreni/design/2026-09-16-sso.md' });
     expect(extended).toContain('EXTENDING AN EXISTING PLAN');
     expect(extended).toContain('.shreni/design/2026-09-16-sso.md');
     // Extending a decision writes a new superseding ADR, not an in-place rewrite.
@@ -138,7 +139,7 @@ describe('buildPlanningPrompt', () => {
         ...KSHETRA,
         gates: { diffSize: { level: 'block', maxFiles: 12, maxLines: 400 } },
         agents: { ...KSHETRA.agents, maxRoundsPerBead: 5 },
-      } as unknown as KshetraConfig);
+      } as unknown as KshetraConfig, { planId: 'plan-1' });
       // The file smell never exceeds the real gate.
       expect(flat(tuned)).toContain('more than ~12 files');
       expect(flat(tuned)).toContain('(more than 12 files or 400 changed lines');
@@ -147,7 +148,7 @@ describe('buildPlanningPrompt', () => {
       const partial = buildPlanningPrompt({
         ...KSHETRA,
         gates: { diffSize: { maxFiles: 12 } },
-      } as unknown as KshetraConfig);
+      } as unknown as KshetraConfig, { planId: 'plan-1' });
       expect(flat(partial)).toContain('(more than 12 files or 1500 changed lines');
       expect(partial).not.toContain('undefined');
     });

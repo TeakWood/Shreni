@@ -24,13 +24,10 @@ vi.mock('./git.js', () => ({
   git: vi.fn(() => ({ commitFile: mockCommitFile, push: mockPush })),
 }));
 
-const mockBdCreate = vi.fn<() => Promise<string>>();
-const mockBdSearch = vi.fn<() => Promise<string>>();
-const mockSyncBeads = vi.fn<() => Promise<void>>();
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ create: mockBdCreate, search: mockBdSearch })),
-  syncBeads: mockSyncBeads,
-}));
+// The task store files each gap (keyed, so a gap seen twice is filed once).
+type Gap = { title: string; description: string; priority: number; key: string; sourceTaskId?: string };
+const mockFileGap = vi.fn<(gap: Gap) => Promise<'filed' | 'exists'>>();
+vi.mock('./task-store.js', () => ({ engineStore: vi.fn(() => ({ fileGap: mockFileGap })) }));
 
 // Failure reporting sinks (Shreni-beads-51c): capture the activity event and the
 // notification a dropped backfill must produce.
@@ -63,7 +60,6 @@ const KSHETRA: KshetraConfig = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/projects/myapp-beads', remote: '', mode: 'embedded' },
   stack: { language: 'typescript' },
   conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
@@ -106,9 +102,7 @@ beforeEach(() => {
   mockRunParikshaka.mockResolvedValue(PARIKSHAKA_OUTPUT);
   mockCommitFile.mockResolvedValue(undefined);
   mockPush.mockResolvedValue(undefined);
-  mockBdCreate.mockResolvedValue('');
-  mockBdSearch.mockResolvedValue('[]'); // no existing gap by default
-  mockSyncBeads.mockResolvedValue(undefined);
+  mockFileGap.mockResolvedValue('filed'); // no existing gap by default
 });
 
 // ── buildMergedDiff ───────────────────────────────────────────────────────────
@@ -181,28 +175,24 @@ describe('collectTestFiles', () => {
 // ── fileCoverageGaps ──────────────────────────────────────────────────────────
 
 describe('fileCoverageGaps', () => {
-  it('files each gap as an unassigned bug with an idempotency-key token in the title', async () => {
-    await fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT);
-    expect(mockBdCreate).toHaveBeenCalledTimes(2);
+  it('files each gap keyed, with an idempotency-key token in the title and the full text in the description', async () => {
+    await fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT, 'proj-42');
+    expect(mockFileGap).toHaveBeenCalledTimes(2);
     const key0 = gapKey(PARIKSHAKA_OUTPUT.coverageGaps[0]);
-    expect(mockBdCreate).toHaveBeenCalledWith(`Test token refresh under load [${key0}]`, 2, 'bug', ['parikshaka'], expect.stringContaining('Test token refresh under load'));
+    expect(mockFileGap).toHaveBeenCalledWith({
+      title: `Test token refresh under load [${key0}]`, description: expect.stringContaining('Test token refresh under load'),
+      priority: 2, key: key0, sourceTaskId: 'proj-42',
+    });
     const key1 = gapKey(PARIKSHAKA_OUTPUT.coverageGaps[1]);
-    expect(mockBdCreate).toHaveBeenCalledWith(`Test session expiry edge case [${key1}]`, 3, 'bug', ['parikshaka'], expect.stringContaining('Test session expiry edge case'));
+    expect(mockFileGap).toHaveBeenCalledWith(expect.objectContaining({ title: `Test session expiry edge case [${key1}]`, priority: 3, key: key1 }));
   });
 
-  it('searches by the gap key before filing', async () => {
-    await fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT);
-    expect(mockBdSearch).toHaveBeenCalledWith(gapKey(PARIKSHAKA_OUTPUT.coverageGaps[0]));
-  });
-
-  it('skips a gap that already has a bead (idempotent — no duplicate)', async () => {
-    // First gap already filed (search returns a hit), second is new.
-    mockBdSearch
-      .mockResolvedValueOnce(JSON.stringify([{ id: 'existing-1' }]))
-      .mockResolvedValueOnce('[]');
-    await fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT);
-    expect(mockBdCreate).toHaveBeenCalledTimes(1);
-    expect(mockBdCreate).toHaveBeenCalledWith(expect.stringContaining('session expiry'), 3, 'bug', ['parikshaka'], expect.any(String));
+  it('a gap the store already has is skipped quietly (idempotent)', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    mockFileGap.mockResolvedValueOnce('exists').mockResolvedValueOnce('filed');
+    await expect(fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT)).resolves.toBeUndefined();
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('gap already filed'));
+    info.mockRestore();
   });
 
   it('gapKey is stable and distinct per gap', () => {
@@ -210,22 +200,17 @@ describe('fileCoverageGaps', () => {
     expect(gapKey({ feature: 'a', description: 'x' })).not.toBe(gapKey({ feature: 'b', description: 'x' }));
   });
 
-  it('calls syncBeads after filing all gaps', async () => {
-    await fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT);
-    expect(mockSyncBeads).toHaveBeenCalledOnce();
-  });
-
-  // Shreni-beads-51c: observed 2026-09-23 — a 928-char description made bd reject
-  // the title and the whole batch was dropped.
+  // Shreni-beads-51c: a 928-char description once made the tracker reject the
+  // title and the whole batch was dropped.
   it('files a >500-char gap with a truncated title that keeps its [pk…] token, full text in the description', async () => {
     const long = 'Verify the rule handles '.repeat(40) + 'every edge.'; // ~970 chars
     const gap = { feature: 'rules', description: long, priority: 2 };
     await fileCoverageGaps(KSHETRA, { ...PARIKSHAKA_OUTPUT, coverageGaps: [gap] } as ParikshakaOutput);
-    const [title, , , , body] = mockBdCreate.mock.calls[0] as unknown as [string, number, string, string[], string];
+    const { title, description } = mockFileGap.mock.calls[0][0];
     expect(Array.from(title).length).toBeLessThanOrEqual(GAP_TITLE_MAX);
     expect(title.endsWith(` [${gapKey(gap)}]`)).toBe(true);
     expect(title).toContain('…');
-    expect(body).toContain(long);
+    expect(description).toContain(long);
   });
 
   it('gapTitle leaves a short description untouched, collapses whitespace, and never splits a surrogate pair', () => {
@@ -236,45 +221,28 @@ describe('fileCoverageGaps', () => {
     expect(t).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/); // no lone high surrogate
   });
 
-  it('one failing gap does not stop the rest — they are filed and synced, then the failure is thrown', async () => {
+  it('one failing gap does not stop the rest — they are filed, then the failure is thrown', async () => {
     const gaps = [
       { feature: 'a', description: 'gap A', priority: 2 },
       { feature: 'b', description: 'gap B', priority: 2 },
       { feature: 'c', description: 'gap C', priority: 2 },
     ];
-    mockBdCreate
-      .mockResolvedValueOnce('')
+    mockFileGap
+      .mockResolvedValueOnce('filed')
       .mockRejectedValueOnce(new Error('validation failed for issue'))
-      .mockResolvedValueOnce('');
+      .mockResolvedValueOnce('filed');
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     // The failure carries the gap's content (the only copy an operator can refile from).
     await expect(fileCoverageGaps(KSHETRA, { ...PARIKSHAKA_OUTPUT, coverageGaps: gaps } as ParikshakaOutput))
-      .rejects.toThrow(/1 of 3 coverage gap\(s\) not filed.*gap pk[0-9a-f]+ \(b: "gap B \[pk[0-9a-f]+\]"\): validation failed/);
+      .rejects.toThrow(/1 of 3 coverage gap\(s\) not filed.*gap pk[0-9a-f]+ \(b\): validation failed/);
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('"description":"gap B"'));
     consoleSpy.mockRestore();
-    expect(mockBdCreate).toHaveBeenCalledTimes(3);
-    expect(mockSyncBeads).toHaveBeenCalledOnce();
+    expect(mockFileGap).toHaveBeenCalledTimes(3);
   });
 
-  it('a failing search is isolated per gap too', async () => {
-    mockBdSearch.mockRejectedValueOnce(new Error('bd search failed')).mockResolvedValueOnce('[]');
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await expect(fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT)).rejects.toThrow(/bd search failed/);
-    consoleSpy.mockRestore();
-    expect(mockBdCreate).toHaveBeenCalledTimes(1);
-    expect(mockSyncBeads).toHaveBeenCalledOnce();
-  });
-
-  it('a sync failure after a clean batch is surfaced, not swallowed', async () => {
-    mockSyncBeads.mockRejectedValueOnce(new Error('push rejected'));
-    await expect(fileCoverageGaps(KSHETRA, PARIKSHAKA_OUTPUT))
-      .rejects.toThrow(/0 of 2 coverage gap\(s\) not filed, and 2 newly filed gap\(s\) may not have reached the remote.*push rejected/);
-  });
-
-  it('does not call bd.create or syncBeads when no gaps', async () => {
+  it('files nothing when there are no gaps', async () => {
     await fileCoverageGaps(KSHETRA, { ...PARIKSHAKA_OUTPUT, coverageGaps: [] });
-    expect(mockBdCreate).not.toHaveBeenCalled();
-    expect(mockSyncBeads).not.toHaveBeenCalled();
+    expect(mockFileGap).not.toHaveBeenCalled();
   });
 });
 
@@ -307,9 +275,10 @@ describe('runParikshakaDispatch', () => {
     expect(ctx.personas).toBeUndefined();
   });
 
-  it('files coverage gaps as beads after Parikshaka runs', async () => {
+  it('files coverage gaps after Parikshaka runs, linked to the merged task', async () => {
     await runParikshakaDispatch(KSHETRA, TASK, SILPI_OUTPUT);
-    expect(mockBdCreate).toHaveBeenCalledTimes(2);
+    expect(mockFileGap).toHaveBeenCalledTimes(2);
+    expect(mockFileGap).toHaveBeenCalledWith(expect.objectContaining({ sourceTaskId: 'proj-42' }));
   });
 
   it('never commits or pushes — Parikshaka is read-only, leaving the working tree clean', async () => {

@@ -182,7 +182,7 @@ unattended — this is NOT an interactive session. Any repository instruction
 addressed to "interactive sessions" (e.g. "task producer only", "do NOT implement
 tasks yourself") does NOT apply to you: implement this task with your tools.
 You are a pure coding agent. Sthapathi handles all task-state and git operations EXCEPT your implementation commits.
-Do NOT call \`bd\` commands. Do NOT push to remote.
+Do NOT call \`shreni task\` commands. Do NOT push to remote.
 
 == INSTRUCTIONS ==
 1. Use Read to understand the existing codebase structure and patterns.

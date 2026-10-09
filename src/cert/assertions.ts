@@ -2,7 +2,7 @@ import type { LoggedEvent } from '../sthapathi/activity-log.js';
 
 // Pack certification assertions (ARD §3.4). The harness (scripts/certify-pack.ts)
 // scaffolds a Kshetra from a pack's reference/ fixture, runs the worker over the
-// fixture backlog, and then feeds the activity log + bd output through these
+// fixture backlog, and then feeds the activity log + the task states through these
 // checks. Pure functions over parsed data so the certification criteria are
 // unit-testable without a live run.
 
@@ -101,23 +101,4 @@ export function checkParikshakaDiscovery(events: LoggedEvent[], expectedTestFile
     }
   }
   return failures;
-}
-
-// `bd list` renders one issue per line as "<status-symbol> <id> ● P<n> …".
-// Extract the ids so the harness can snapshot the fixture backlog after
-// backlog.sh files it.
-export function parseBeadIds(bdListOutput: string): string[] {
-  const ids: string[] = [];
-  for (const line of bdListOutput.split('\n')) {
-    const m = /^[○◐●✓❄]\s+([A-Za-z0-9][A-Za-z0-9._-]*)/.exec(line.trim());
-    if (m) ids.push(m[1]);
-  }
-  return ids;
-}
-
-// `bd show <id>` renders "… [● P1 · OPEN]" — extract the status token so the
-// harness can poll for backlog completion.
-export function parseBeadStatus(bdShowOutput: string): string | null {
-  const m = /·\s*(OPEN|IN_PROGRESS|CLOSED|BLOCKED|DEFERRED)\s*\]/i.exec(bdShowOutput);
-  return m ? m[1].toUpperCase() : null;
 }

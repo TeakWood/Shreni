@@ -3,8 +3,7 @@ import { dirname, join } from 'path';
 import type { CommandContext } from './registry';
 import { loadRegistry } from '../kshetra/registry';
 import { withTrackerReads } from '../policy/sthapathi/reads';
-import { git } from '../sthapathi/git';
-import { readBeadStats, readManifest } from '../kshetra/snapshot';
+import { readManifest } from '../kshetra/snapshot';
 import { taskIdHash } from '../policy/sthapathi/snapshot';
 import { loadStaticAgentContext, type StaticAgentContext } from '../sthapathi/dispatch';
 import type { KshetraConfig } from '../kshetra/config';
@@ -527,22 +526,13 @@ export interface ExportDeps {
 }
 
 export const defaultDeps: ExportDeps = {
-  // Every task: on the engine that includes the proposed ones, which bd has no status for.
-  loadBeadsJson: kshetra => withTrackerReads(kshetra, r => r.list({ status: kshetra.project ? 'all' : 'open,in_progress,blocked,deferred,closed' })),
+  // Every task, the proposed ones included.
+  loadBeadsJson: kshetra => withTrackerReads(kshetra, r => r.list({ status: 'all' })),
   registry: () => loadRegistry(),
-  async loadProvenance(kshetra, ids) {
-    // On the task graph engine: no beads head; the id hash over the exported
-    // tasks (every one, as loadBeadsJson reads them), as freeze records it.
-    if (kshetra.project) return { beadsHeadSha: null, beadIdHash: taskIdHash(ids) };
-    // Beads HEAD is best-effort (a beads dir that is not a git checkout records
-    // null rather than failing the export) — mirrors freeze's own handling.
-    let beadsHeadSha: string | null = null;
-    try {
-      beadsHeadSha = await git(kshetra.beads.path).headSha();
-    } catch {
-      beadsHeadSha = null;
-    }
-    return { beadsHeadSha, beadIdHash: readBeadStats(kshetra.beads.path).beadIdHash };
+  async loadProvenance(_kshetra, ids) {
+    // No beads head; the id hash over the exported tasks (every one, as
+    // loadBeadsJson reads them), as freeze records it.
+    return { beadsHeadSha: null, beadIdHash: taskIdHash(ids) };
   },
   readSnapshotManifest(dir) {
     const m = readManifest(dir);

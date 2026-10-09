@@ -16,8 +16,8 @@ checks the diff against your acceptance criteria. Your lint and test suite gate 
 and what passes gets merged. On *your* machine, with *your* model, on *your* terms.
 You bring the ideas; the team ships the product.
 
-And because every task lives in **beads** — a durable, git-tracked issue database —
-you get a full, replayable trace of what the team did: which agent touched which
+And because every task lives in Shreni's **task graph** — a Postgres database where
+every change is a recorded event — you get a full, replayable trace of what the team did: which agent touched which
 task, the reviewer's verdicts, the round-by-round notes, and the commit that closed
 it. Nothing the staff does is a black box.
 
@@ -128,7 +128,7 @@ that's Shreni.
 ## Quickstart
 
 > Prefer a zero-setup taste first? See [Prerequisites](#prerequisites) — you need a
-> provider CLI (e.g. Claude) authenticated, plus `bd`, `gh`, and Node ≥ 20.
+> provider CLI (e.g. Claude) authenticated, plus Postgres, `gh`, and Node ≥ 22.
 
 Install the CLI from source:
 
@@ -151,8 +151,9 @@ shreni init               # asks: will Shreni work tasks here (kshetra), or only
 # Non-interactive / scripted equivalent (--mode is required without a terminal):
 #   shreni init --mode kshetra --slug myapp --path /projects/myapp
 
-bd create "Add user authentication" -p 2 \
+shreni task create --title "Add user authentication" --priority 2 \
   --description "Email + password login with JWT sessions"
+shreni task approve <id>  # a task you file lands as proposed; approving it makes it ready
 ```
 
 Start the harness and watch it work:
@@ -164,19 +165,24 @@ shreni phalaka start             # optional: local dashboard on 127.0.0.1
 ```
 
 Sthapathi polls each registered project every 30 seconds (and re-checks
-immediately after finishing a task, so back-to-back beads don't each wait out the
+immediately after finishing a task, so back-to-back tasks don't each wait out the
 interval). When your task is ready, the coder ↔ reviewer loop runs and — on
 approval — the change merges to `main`.
 
 ## Prerequisites
 
 - **Node.js** ≥ 22 and **pnpm** (`npm install -g pnpm`)
-- **`bd` (Beads) CLI** — the task database — `npm install -g @beads/bd`
+- **Postgres** ≥ 15 — the task database. Shreni doesn't bundle a server: use
+  Homebrew's `postgresql@17` or Postgres.app on macOS, your distribution's package on
+  Linux, or the official Docker image anywhere. `shreni init` finds it (or names the
+  install and start commands) and creates the database; `shreni db check` diagnoses
+  it. `~/.shreni/config.yaml` names the databases a machine uses, and
+  `SHRENI_DATABASE_URL` overrides them (as CI does).
 - **A provider CLI, authenticated** — **Anthropic API key** (`ANTHROPIC_API_KEY`)
   for the default Claude provider. The agent still calls a model, so this is
   required; Shreni does not host one for you.
 - **GitHub CLI** (`gh`) — authenticated for the account/org where your projects
-  live. Used to create the task database repo and (in `pr` merge mode) to open PRs.
+  live. Used to create the project repo if it's missing and (in `pr` merge mode) to open PRs.
 
 ## Status
 
@@ -193,53 +199,53 @@ logs, config, and the dashboard. Think of them as the staff you've hired:
 
 | Component | Role on the team | What they do |
 |---|---|---|
-| **Suthradhara** (draughtsman / layout-planner) | **Product manager** | Requirements & design intake agent. Interviews you to turn a feature idea into a dependency-ordered epic of ready beads plus a per-feature design doc. Runs *outside* the poll loop as a producer — it files work for Sthapathi to pick up; it never claims or closes. |
-| **Sthapathi** (master builder / chief architect) | **Engineering manager** | Orchestrator. Polls `bd` for tasks, assigns them, drives the review loop, and owns the task lifecycle and git workflow. |
+| **Suthradhara** (draughtsman / layout-planner) | **Product manager** | Requirements & design intake agent. Interviews you to turn a feature idea into a dependency-ordered epic of tasks plus a per-feature design doc. Runs *outside* the poll loop as a producer — it files work for Sthapathi to pick up; it never claims or closes. |
+| **Sthapathi** (master builder / chief architect) | **Engineering manager** | Orchestrator. Claims ready tasks from the task graph, assigns them, drives the review loop, and owns the task lifecycle and git workflow. |
 | **Silpi** (craftsman) | **Software engineer** | Coding agent. Writes implementation code and unit tests, runs lint and tests, submits for review. |
 | **Viharapala** (guardian) | **Code reviewer** | Review agent. Judges Silpi's output against acceptance criteria, quality, and coverage; returns `APPROVE` or `REJECT` with structured feedback. |
 | **Parikshaka** (examiner) | **QA engineer** | Test agent. Runs asynchronously after each merge; backfills tests and surfaces coverage gaps. |
 | **Phalaka** (panel) | **The team's status board** | Local dashboard. Loopback web UI to watch worker status, task progress, and stuck-state alerts. |
 
-And the record-keeping runs underneath all of them: **beads** is the team's durable
-ledger — every task, assignment, review verdict, and round note is written to a
-git-tracked database, so the whole engagement is auditable and replayable long after
+And the record-keeping runs underneath all of them: the **task graph** is the team's
+durable ledger — every task, claim, review verdict, and round note is written to
+Postgres as an event, so the whole engagement is auditable and replayable long after
 the work merges.
 
-Each project managed by Shreni is a **Kshetra** (field) — its own git repo, `bd`
-task database, and agent queue, fully isolated from every other project.
+Each project managed by Shreni is a **Kshetra** (field) — its own git repo, task graph
+project, and agent queue, fully isolated from every other project.
 
 ```
 Developer machine
 ├── Suthradhara (interactive, own process)   ← PRODUCER, outside the poll loop
 │   ├── interviews you: Discovery → Clarify → Decompose → Design → Confirm
 │   ├── reads the Kshetra repo (read-only) to ground the decomposition
-│   └── on confirm, files an epic + child beads and writes a design doc
+│   └── on confirm, files a plan (an epic + child tasks) and writes a design doc
 │           │                                    │
-│           ▼ (bd create / dep add)              ▼ (.shreni/design/<feature>.md)
+│           ▼ (shreni plan task add / dep add)   ▼ (.shreni/design/<feature>.md)
 ├── Sthapathi (Node.js process)               ← CONSUMER of what Suthradhara filed
-│   ├── polls bd ready every 30s per Kshetra
+│   ├── claims ready tasks from the task graph every 30s per Kshetra
 │   ├── dispatches Silpi → Viharapala loop (up to 3 rounds)   ← read the design doc on demand
 │   ├── squash-merges approved branches to main (or opens a PR)
 │   └── dispatches the test agent async post-merge
 ├── Phalaka server (Fastify, loopback)
 │   └── serves the local dashboard at 127.0.0.1
+├── Postgres            ← the task graph: one project per Kshetra
 └── Kshetras/
-    ├── myapp/          ← project repo
-    │   ├── .beads/          ← symlink to myapp-beads/
-    │   ├── .shreni/kshetra.yaml
-    │   └── .shreni/design/  ← per-feature design docs Suthradhara writes
-    └── myapp-beads/    ← bd Dolt database (git repo)
+    └── myapp/          ← project repo
+        ├── .shreni/kshetra.yaml  ← names the database and the project's uuid
+        └── .shreni/design/       ← per-feature design docs Suthradhara writes
 ```
 
-Suthradhara and Sthapathi never call each other — they meet only at the `bd`
-database and the design-docs path, both of which the poll loop already reads. See
+Suthradhara and Sthapathi never call each other — they meet only at the task
+graph and the design-docs path, both of which the poll loop already reads. See
 [docs/architecture/suthradhara.md](docs/architecture/suthradhara.md) for the full
 intake agent design.
 
-**Key design constraint:** Sthapathi is the sole caller of `bd update --claim` and
-`bd close`. Agents (Silpi, Viharapala, Parikshaka) never call `bd` directly — they
-receive task context as injected prompt data. Interactive Claude Code sessions can
-file tasks (`bd create`) but cannot claim or close them.
+**Key design constraint:** Sthapathi is the sole claimer and finisher of a Kshetra's
+tasks. Agents (Silpi, Viharapala, Parikshaka) never touch the task graph directly —
+they receive task context as injected prompt data. Interactive Claude Code sessions
+can file tasks (`shreni task create`, landing as proposed for you to approve) but
+cannot claim or finish them.
 
 > For a deeper walkthrough — the worker lifecycle and phase machine, the git
 > workflow, the provider abstraction, and the watchdog/self-heal resilience
@@ -279,18 +285,17 @@ Then register the project. This is a one-time setup per project:
 shreni init --mode kshetra --slug myapp --path /projects/myapp
 ```
 
-This command runs 10 steps automatically:
+This command runs these phases. Each is idempotent, so a re-run after a failure
+resumes:
 
-1. Creates `<your-org>/myapp-beads` on GitHub
-2. Clones the beads repo to `/projects/myapp-beads`
-3. Initialises the `bd` database (`bd init --stealth`)
-4. Creates symlink: `/projects/myapp/.beads → /projects/myapp-beads`
-5. Appends `.beads` to `/projects/myapp/.gitignore`
-6. Installs Claude Code hooks (`bd setup claude`) — auto-injects project context at session start
-7. Generates `.shreni/kshetra.yaml` from the project template
-8. Appends a `SHRENI INTEGRATION` section to `CLAUDE.md` defining the interactive session role boundary
-9. Scaffolds an empty RAG index placeholder (codebase-search indexing is not yet implemented)
-10. Registers the Kshetra with Sthapathi
+1. **App repo** — checks the project repo and its `origin` remote (creating the GitHub repo if it's missing)
+2. **Base branch** — resolves `repo.mainBranch` on origin
+3. **Database** — reaches Postgres, creates the database if it's missing, and applies the schema migrations
+4. **Config** — generates `.shreni/kshetra.yaml` and the conventions docs, writes Shreni's block into
+   the agent CLI's instruction file (e.g. `CLAUDE.md`) with the Claude Code hooks that run
+   `shreni task prime`, and scaffolds an empty RAG index placeholder
+5. **Project** — registers the project in the database and records its uuid in `kshetra.yaml`
+6. **Register** — registers the Kshetra with Sthapathi
 
 After init, edit `.shreni/kshetra.yaml` to set your stack and conventions:
 
@@ -350,50 +355,55 @@ There is **exactly one config per Kshetra**, at `<repo>/.shreni/kshetra.yaml`, a
 plus the `style-guide.md` / `arch.md` conventions docs it references), which keeps
 the target repo root clean.
 
-- **Absolute paths only.** `repo.path` and `beads.path` are used verbatim as the
+- **Absolute paths only.** `repo.path` is used verbatim as the
   cwd for git and exec — the loader does **not** expand `~` or resolve relative
   paths. `init` writes absolute paths.
 - **Resolution.** `shreni register <dir>` prefers `<dir>/.shreni/kshetra.yaml` and
   falls back to a legacy root `<dir>/kshetra.yaml`.
-- **Moving off beads.** `shreni migrate <kshetra>` moves a Kshetra still on beads
-  onto the task graph engine: a dry run, a confirmation and a database dump come
-  first, and `shreni migrate <kshetra> --undo` puts it back until the first new
-  write. It is safe to re-run.
+- **Moving off beads.** A Kshetra set up before the task graph (its config has
+  `beads:` and no `project:`) can't run: `shreni start` and the worker refuse it
+  with "run shreni migrate <id>". `shreni migrate <kshetra>` moves it onto the task
+  graph engine: it reads the beads export committed in the beads directory
+  (`issues.jsonl`) — if `bd` is still installed, run `bd export -o <path>` first for
+  the latest — then a dry run, a confirmation and a database dump come first, and
+  `shreni migrate <kshetra> --undo` puts it back until the first new write. It is
+  safe to re-run.
 
 ### Merge policy (push vs pr)
 
 `repo.mergePolicy` decides **where approved work lands** — independently of *when*
-the next task starts (that is always driven by the `bd` dependency graph):
+the next task starts (that is always driven by the task graph's dependencies):
 
-| Policy | On APPROVE | Task closes | Use when |
+| Policy | On APPROVE | Task finishes | Use when |
 |---|---|---|---|
-| `push` (default) | Squash-merge the bead branch straight to `main` and push | Immediately | Solo, high-trust, fastest loop |
+| `push` (default) | Squash-merge the task branch straight to `main` and push | Immediately | Solo, high-trust, fastest loop |
 | `pr` | Push the branch and open a **pull request** (`bead-…` → `main`); do **not** merge | Only when the PR actually merges | You want a human gate, or a team merge queue |
 
-In `pr` mode the bead is kept **open** (labelled `awaiting-merge`) so anything that
+In `pr` mode the task **waits** on its PR (state `waiting`) so anything that
 depends on it stays blocked until the code is really on `main`. Sthapathi does not
-wait around: it immediately picks the next ready bead branching from the current
-`main`. A background reconcile pass closes the bead when its PR merges, or blocks it
-for review if the PR is closed unmerged. The Silpi ↔ Viharapala AI review runs in
+wait around: it immediately picks the next ready task branching from the current
+`main`. A background reconcile pass finishes the task when its PR merges, or flags
+it for a human if the PR is closed unmerged. The Silpi ↔ Viharapala AI review runs in
 both modes — `pr` mode adds a human merge gate *on top of* it, it does not replace it.
 
 #### Active PR follow-up loop
 
 An open PR is not left to rot when it draws feedback. On the same background
-reconcile pass, Shreni inspects each `awaiting-merge` PR for **unaddressed
+reconcile pass, Shreni inspects the PR of each task waiting on one for **unaddressed
 feedback** — a failing *required* check, a `CHANGES_REQUESTED` review, or a
-foreign commit pushed onto the branch — measured against a per-bead watermark so
-the same feedback never re-triggers. When it finds some, it labels the bead
-`pr-needs-followup`, and the scheduler routes that bead **back into the single
-work slot ahead of fresh `bd ready` work**. There it runs a bounded
+foreign commit pushed onto the branch — measured against a per-task watermark so
+the same feedback never re-triggers. When it finds some, it reopens the task
+boosted, so the scheduler routes it **back into the single work slot ahead of
+fresh ready work**. There it runs a bounded
 Silpi ↔ Viharapala pass over the PR: Silpi pushes the fix and drafts a reply per
 comment, Viharapala re-reviews the diff, and Sthapathi owns every side effect —
 it pushes **before** it replies (never auto-resolving a human's thread), advances
-the watermark, and drops the label. If a comment needs a human decision
-(`escalate`) or the round budget runs out (`prFollowupMaxRounds`, reset on each
-new human review), the bead is flagged for a human rather than looped forever. The
+the watermark, and puts the task back to waiting on the PR. If a comment needs a
+human decision (`escalate`) or the round budget runs out (`prFollowupMaxRounds`,
+reset on each new human review), the task is flagged for a human rather than
+looped forever. The
 loop is **on by default** — set `repo.prFollowup: false` or `SHRENI_PR_FOLLOWUP=off`
-to disable it. Follow-up state is visible on `shreni status` (the active bead shows
+to disable it. Follow-up state is visible on `shreni status` (the active task shows
 its round) and the Phalaka banner (a `PR follow-up` chip).
 
 Set it at init or in `kshetra.yaml`, and override per run with an env var:
@@ -491,7 +501,7 @@ shreni start         # start the Sthapathi orchestration loop
 shreni stop          # graceful shutdown (waits for active round to finish)
 ```
 
-Sthapathi polls each registered Kshetra every 30 seconds for ready tasks, and re-ticks immediately after completing one so a chain of ready beads isn't paced by the interval. P0-priority tasks interrupt the queue immediately.
+Sthapathi polls each registered Kshetra every 30 seconds for ready tasks, and re-ticks immediately after completing one so a chain of ready tasks isn't paced by the interval. P0-priority tasks interrupt the queue immediately.
 
 ### Check Status
 
@@ -505,19 +515,25 @@ shreni agents             # which agent is active per Kshetra and what it's work
 
 | State | Meaning | Next action |
 |---|---|---|
-| `idle` | No pending tasks, loop is running | File a task via `bd create` |
-| `running` | Sthapathi is actively processing a bead | Wait, or `shreni agents` for detail |
+| `idle` | No ready tasks, loop is running | File a task via `shreni task create`, then `shreni task approve` it |
+| `running` | Sthapathi is actively processing a task | Wait, or `shreni agents` for detail |
 | `paused` | Manually paused or paused due to an error | `shreni resume --kshetra <slug>` |
 | `error` | Unrecoverable state, loop stopped | Check logs, resolve the issue, then `shreni resume` |
 
-### Bead (Task) States
+### Task States
 
 | State | Meaning |
 |---|---|
-| `pending` | Filed, waiting to be picked up |
-| `in_progress` | Claimed by Sthapathi, agents are working on it |
+| `proposed` | Filed by a person, a session or Suthradhara; waits for `shreni task approve` |
+| `open` | Approved; ready to be picked up once its dependencies are done |
+| `claimed` | Claimed by Sthapathi, agents are working on it |
+| `waiting` | Its PR is open (`pr` merge policy); finishes when the PR merges |
 | `blocked` | Exceeded max rounds, or a hard failure occurred — needs human review |
-| `complete` | Merged to `main`, `bd close` called |
+| `parked` | Set aside on purpose |
+| `done` | Merged to `main` |
+| `cancelled` | Dropped |
+
+`shreni task list` and `shreni task show <id>` read them.
 
 ### Per-Kshetra Controls
 
@@ -525,14 +541,13 @@ shreni agents             # which agent is active per Kshetra and what it's work
 shreni pause --kshetra myapp    # pause without stopping other Kshetras
 shreni resume --kshetra myapp   # resume a paused Kshetra
 shreni run --kshetra myapp      # work at most one cycle now — alias for `shreni drain --max-cycles 1`
-shreni sync --kshetra myapp     # force beads git pull + push
 ```
 
 ### Logs
 
 ```bash
 shreni logs --kshetra myapp
-shreni logs --kshetra myapp --bead bd-f3a2   # logs for a specific bead
+shreni logs --kshetra myapp --bead myapp-f3a   # logs for a specific task
 shreni logs --all
 ```
 
@@ -569,7 +584,7 @@ collector endpoint is configured, opted-in events are written to a local file
 ## Troubleshooting
 
 Hit a snag? The common failure modes — a stuck task after restart, a rejected
-push, a paused Kshetra, `bd` lock contention, and rate limits —
+push, a paused Kshetra, an unreachable database, and rate limits —
 and their recovery steps live in the
 **[Troubleshooting guide](docs/guides/troubleshooting.md)**.
 

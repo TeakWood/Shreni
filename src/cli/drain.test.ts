@@ -3,11 +3,11 @@ import type { KshetraConfig } from '../kshetra/config';
 import type { Scheduler, CycleOutcome } from '../sthapathi/index';
 import type { WorkerRuntime } from './worker-runtime';
 
-// bd is mocked only for the collectEpicScope suite; driveDrain is pure and needs
-// no mocks. Declare the mock up front so the import below binds to it.
+// The engine's reads are mocked only for the collectEpicScope suite; driveDrain
+// is pure and needs no mocks. Declare the mock up front so the import below binds to it.
 const mockChildren = vi.fn<(id: string) => Promise<string>>();
-vi.mock('../sthapathi/beads', () => ({
-  bd: () => ({ children: mockChildren }),
+vi.mock('../policy/sthapathi/reads', () => ({
+  withTrackerReads: (_k: unknown, fn: (r: { children: typeof mockChildren }) => Promise<unknown>) => fn({ children: mockChildren }),
 }));
 
 const { driveDrain, collectEpicScope, drainResultJson, formatDrainResult, openBeadIds } = await import('./drain');
@@ -19,7 +19,6 @@ const KSHETRA: KshetraConfig = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/projects/myapp-beads', remote: '', mode: 'embedded' },
   stack: { language: 'typescript' },
   conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
@@ -49,8 +48,7 @@ function fakeDriver(script: {
     kshetra: KSHETRA,
     scheduler,
     hooks: {} as WorkerRuntime['hooks'],
-    startup: vi.fn(async () => { log.push('startup'); return 0; }),
-    sync: vi.fn(async () => { log.push('sync'); }),
+    startup: vi.fn(async () => { log.push('startup'); }),
     startTimers: () => () => {},
     sweepEpics: vi.fn(async () => []),
     isInFlight: () => script.isInFlight?.() ?? false,
@@ -81,36 +79,27 @@ describe('driveDrain', () => {
     const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, noDelay);
     expect(result).toMatchObject({ exitCode: 0, reason: 'complete', openInScope: [] });
     // 'ran' re-ticks immediately (no delay); the trailing 'no-work' triggers the
-    // exit sequence: final sync → one probe cycle (still no-work) → classify.
-    expect(log).toEqual(['startup', 'cycle:ran', 'cycle:ran', 'cycle:ran', 'cycle:no-work', 'sync', 'cycle:no-work', 'open:0']);
+    // exit sequence: one probe cycle (still no-work) → classify.
+    expect(log).toEqual(['startup', 'cycle:ran', 'cycle:ran', 'cycle:ran', 'cycle:no-work', 'cycle:no-work', 'open:0']);
     expect(noDelay).not.toHaveBeenCalled();
   });
 
-  it('runs startup (recoverKshetra) before the first cycle', async () => {
+  it('runs startup before the first cycle', async () => {
     const { driver, log } = fakeDriver({ outcomes: ['no-work'], openInScope: [] });
     await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, noDelay);
     expect(log[0]).toBe('startup');
     expect(log.indexOf('startup')).toBeLessThan(log.indexOf('cycle:no-work'));
   });
 
-  it('syncs the ledger BEFORE returning (final sync precedes classification)', async () => {
-    const { driver, log } = fakeDriver({ outcomes: ['no-work'], openInScope: ['b1'] });
-    const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, noDelay);
-    expect(result.reason).toBe('stalled');
-    // sync happens, then the open-in-scope classification read.
-    expect(log.indexOf('sync')).toBeLessThan(log.indexOf('open:1'));
-  });
-
-  it('picks up a bead a backfill filed during the final sync (probe cycle resumes the loop)', async () => {
-    // After the first 'no-work' + sync, the probe cycle returns 'ran' — a backfill
+  it('picks up a bead a backfill filed meanwhile (probe cycle resumes the loop)', async () => {
+    // After the first 'no-work', the probe cycle returns 'ran' — a backfill
     // surfaced fresh work — so the loop resumes instead of exiting. The second
     // exit attempt's probe is 'no-work', so it drains.
     const { driver, log } = fakeDriver({ outcomes: ['ran', 'no-work', 'ran', 'no-work'], openInScope: [] });
     const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, noDelay);
     expect(result.exitCode).toBe(0);
-    // Two exit attempts ⇒ two final syncs; the middle probe 'ran' resumed the loop.
-    expect(log.filter(l => l === 'sync')).toHaveLength(2);
-    expect(log.filter(l => l === 'cycle:ran')).toHaveLength(2);
+    // Two exit attempts; the middle probe 'ran' resumed the loop.
+    expect(log).toEqual(['startup', 'cycle:ran', 'cycle:no-work', 'cycle:ran', 'cycle:no-work', 'cycle:no-work', 'open:0']);
   });
 
   it("waits an interval while work is still in flight, then re-checks", async () => {
@@ -134,8 +123,8 @@ describe('driveDrain', () => {
     const delay = vi.fn(async () => {});
     const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal }, delay);
     expect(delay).toHaveBeenCalledWith(100); // interval backoff on 'declined'
-    // No sync ran on the 'declined' iteration — the exit sequence was not entered.
-    expect(log.indexOf('sync')).toBeGreaterThan(log.indexOf('cycle:no-work'));
+    // The 'declined' iteration did not enter the exit sequence (no probe right after it).
+    expect(log.slice(0, 4)).toEqual(['startup', 'cycle:declined', 'cycle:no-work', 'cycle:no-work']);
     expect(result).toMatchObject({ exitCode: 10, reason: 'stalled', openInScope: ['b1'] });
   });
 
@@ -244,11 +233,11 @@ describe('driveDrain — maxCycles', () => {
     expect(result.stalled[0].category).toBe('not-reached');
   });
 
-  it('counts the post-sync probe cycle toward the cap', async () => {
+  it('counts the probe cycle toward the cap', async () => {
     const { driver, log, cycles } = fakeDriver({ outcomes: ['no-work', 'ran', 'ran'], openInScope: ['b3'], stalled: [READY('b3')] });
     const result = await driveDrain(driver, { intervalMs: 100, signalled: noSignal, maxCycles: 2 }, noDelay);
     expect(cycles()).toBe(2);
-    expect(log).toEqual(['startup', 'cycle:no-work', 'sync', 'cycle:ran', 'open:1', 'classify:1']);
+    expect(log).toEqual(['startup', 'cycle:no-work', 'cycle:ran', 'open:1', 'classify:1']);
     expect(result.reason).toBe('capped');
   });
 
@@ -302,7 +291,7 @@ describe('openBeadIds', () => {
 });
 
 describe('collectEpicScope', () => {
-  it('walks bd children breadth-first into the full subtree id set', async () => {
+  it('walks the children breadth-first into the full subtree id set', async () => {
     // epic → [c1, c2]; c1 → [g1]; c2, g1 → none.
     mockChildren.mockImplementation(async (id: string) => {
       if (id === 'epic') return JSON.stringify([{ id: 'c1', title: 'c1', priority: 2, status: 'open' }, { id: 'c2', title: 'c2', priority: 2, status: 'open' }]);

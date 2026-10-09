@@ -8,11 +8,9 @@
 // designdoc.ts / commit.ts and the note in §4.4).
 //
 // A worktree is detached, pinned to the current origin/<mainBranch>: Suthradhara
-// never commits — it writes design docs (to repo.path, absolute) and files beads
-// (via an absolute BEADS_DIR), so it needs a clean, private tree to read from,
-// not a branch. The `.beads/` symlink is gitignored and therefore ABSENT from a
-// fresh worktree, so the interview child MUST carry an absolute BEADS_DIR rather
-// than trust cwd auto-discovery — session.ts sets it (ARD §4.4).
+// never commits — it writes design docs (to repo.path, absolute) and files its
+// plan through `shreni plan` (the plan and Kshetra come in its environment,
+// set by session.ts), so it needs a clean, private tree to read from, not a branch.
 //
 // Lifecycle (ARD §4.2, G5 crash-safety): created on session start (lifecycle.ts),
 // torn down on session stop (lifecycle.ts stopSession), and `git worktree prune`d

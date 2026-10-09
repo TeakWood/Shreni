@@ -21,8 +21,9 @@ vi.mock('../kshetra/registry', () => ({ loadRegistry: mockLoadRegistry }));
 
 const mockBdList = vi.fn<(filters: { status?: string; label?: string }) => Promise<string>>();
 const mockBdReady = vi.fn<() => Promise<string>>();
-vi.mock('../sthapathi/beads', () => ({
-  bd: vi.fn(() => ({ list: mockBdList, ready: mockBdReady })),
+// The engine's reads (withTrackerReads), as the status assembly makes them.
+vi.mock('../policy/sthapathi/reads', () => ({
+  withTrackerReads: (_k: unknown, fn: (r: unknown) => unknown) => fn({ list: mockBdList, ready: mockBdReady }),
 }));
 
 // ── imports after mocks ───────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ const KSHETRA = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/projects/myapp-beads', remote: '', mode: 'embedded' },
+  project: '00000000-0000-0000-0000-000000000001',
   stack: { language: 'typescript' },
   conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },

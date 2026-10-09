@@ -11,17 +11,16 @@ import {
   getKshetraState,
   type KshetraState,
 } from '../kshetra/state';
-import { git } from '../sthapathi/git';
 import {
   readManifest,
   copyTree,
   moveTree,
-  readBeadStats,
-  readLastDoltCommit,
   computeSnapshotId,
   scanSnapshotParent,
   SNAPSHOT_SCHEMA_VERSION,
+  BEADS_SNAPSHOT_SCHEMA_VERSION,
 } from '../kshetra/snapshot';
+import { requireProject } from '../kshetra/config';
 import { appendLedgerEvent } from '../ext/index';
 
 // Filesystem-safe timestamp for the archive dir name (colons/dots break some
@@ -33,20 +32,21 @@ function archiveStamp(): string {
 // `shreni restore --kshetra <id> --from <dir> --yes [--clean] [--archive <dir>]`
 // — put a frozen state back exactly, or fail loudly (epic Shreni-beads-ius, B4.3).
 // Destructive and guarded: no --force escape (restoring under a running worker
-// corrupts the DB), archive-first so it is reversible, delete-then-copy (never
-// bd import, which is an upsert — finding 2), verified against the manifest.
+// corrupts its state), archive-first so it is reversible, delete-then-copy for
+// the files and purge-then-import for the project, verified against the manifest.
 export async function runRestore(ctx: CommandContext): Promise<void> {
   const id = ctx.flag('--kshetra');
   if (!id) throw new Error('restore requires --kshetra <id>.');
   const fromArg = ctx.flag('--from');
   if (!fromArg) throw new Error('restore requires --from <dir>.');
   if (!ctx.has('--yes')) {
-    throw new Error('restore is destructive (replaces the beads DB, or the engine project); pass --yes to confirm.');
+    throw new Error('restore is destructive (replaces the engine project); pass --yes to confirm.');
   }
   const clean = ctx.has('--clean');
 
   const kshetra = loadRegistry().find(k => k.id === id);
   if (!kshetra) throw new Error(`Kshetra not found: ${id}`);
+  requireProject(kshetra);
 
   // --latest: treat --from as a PARENT of snapshots and resolve to this kshetra's
   // newest one by manifest createdAt (never mtime — a copied/cloned snapshot's
@@ -67,8 +67,8 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
     from = chosen.path;
   }
 
-  // Guard 1 — a live worker. No --force: restoring the beads dir under an active
-  // dispatch corrupts the Dolt DB mid-write.
+  // Guard 1 — a live worker. No --force: restoring under an active dispatch
+  // corrupts its state mid-write.
   const pid = readPid(id);
   if (pid !== null && isAlive(pid)) {
     throw new Error(
@@ -90,11 +90,15 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
     );
   }
 
-  if (!!kshetra.project !== !!manifest.engine) {
-    throw new Error(kshetra.project
-      ? `Kshetra "${id}" is on the task graph engine, but the snapshot is of its beads directory; it can't be restored here.`
-      : `the snapshot is of a task graph engine project, but Kshetra "${id}" is on beads.`);
+  // A beads snapshot (schema v1: a copy of the beads directory) has no project
+  // to restore: beads is gone, and the snapshot predates the move off it.
+  if (manifest.schemaVersion <= BEADS_SNAPSHOT_SCHEMA_VERSION || !manifest.engine) {
+    throw new Error(
+      `Snapshot ${from} is of "${id}"'s beads directory (schema v${manifest.schemaVersion}), taken before it moved to the task graph engine; ` +
+        `beads snapshots can no longer be restored. Freeze the Kshetra again (shreni freeze) to snapshot its project.`,
+    );
   }
+  const frozen = manifest.engine;
 
   const locations = kshetraStateLocations(kshetra);
   const byKey = new Map(manifest.locations.map(l => [l.key, l]));
@@ -106,11 +110,11 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
   const archiveTo = join(archiveBase, archiveStamp());
   mkdirSync(archiveTo, { recursive: true });
 
-  // On the task graph engine the tasks come back first, through a purge and an
-  // import of the snapshot's project bundle (the live project is archived, and
-  // put back if the import fails), so a failure there leaves the files untouched.
-  // It holds the worker lock meanwhile, so a worker on another host can't write.
-  const engine = manifest.engine ? await restoreEngine(kshetra, from, manifest.engine, archiveTo) : undefined;
+  // The tasks come back first, through a purge and an import of the snapshot's
+  // project bundle (the live project is archived, and put back if the import
+  // fails), so a failure there leaves the files untouched. It holds the worker
+  // lock meanwhile, so a worker on another host can't write.
+  const engine = await restoreEngine(kshetra, from, frozen, archiveTo);
 
   for (const loc of locations) {
     if (loc.kind === 'json-slice') {
@@ -146,7 +150,7 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
   // ── --clean: leave the per-trial feeds empty rather than carrying the
   // snapshot's copies forward (what the study driver wants once it has copied the
   // previous trial's data out). activity/usage/notifications live in the runtime
-  // dir; ledger.jsonl lives at ledgerPath (the beads dir, or the runtime dir on the engine).
+  // dir, as does ledger.jsonl (ledgerPath).
   if (clean) {
     for (const p of [
       logPath(id),
@@ -160,16 +164,7 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
   }
 
   // Post-restore facts, read once for both the ledger boundary and verification.
-  const stats = engine ? engine.stats : readBeadStats(kshetra.beads.path);
-  let headSha: string | null = null;
-  if (!engine) {
-    try {
-      headSha = await git(kshetra.beads.path).headSha();
-    } catch {
-      headSha = null;
-    }
-  }
-  const doltCommit = engine ? null : readLastDoltCommit(kshetra.beads.path);
+  const stats = engine.stats;
   const slice = getKshetraState(kshetra);
 
   // Record the restore in the RESTORED ledger, AFTER the restore (and after any
@@ -189,10 +184,10 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
       snapshotId,
       beadCount: stats.beadCount,
       memoryCount: stats.memoryCount,
-      beadsSha: headSha,
+      beadsSha: null,
       archivePath: archiveTo,
-      // On the engine: the restored project's last event id, its version from here on.
-      ...(engine ? { lastEventId: engine.lastEventId } : {}),
+      // The restored project's last event id, its version from here on.
+      lastEventId: engine.lastEventId,
       clean,
     });
   } catch (err) {
@@ -208,10 +203,8 @@ export async function runRestore(ctx: CommandContext): Promise<void> {
   check('beadCount', stats.beadCount === manifest.beads.beadCount, stats.beadCount, manifest.beads.beadCount);
   check('beadIdHash', stats.beadIdHash === manifest.beads.beadIdHash, stats.beadIdHash, manifest.beads.beadIdHash);
   check('memoryCount', stats.memoryCount === manifest.beads.memoryCount, stats.memoryCount, manifest.beads.memoryCount);
-  check('beadsHeadSha', headSha === manifest.beads.headSha, headSha, manifest.beads.headSha);
-  check('lastDoltCommit', doltCommit === manifest.beads.lastDoltCommit, doltCommit, manifest.beads.lastDoltCommit);
-  // On the engine: the project's tasks and events (Shreni's rows included) match the freeze's.
-  if (engine) check('engineMatches', engine.matches, engine.matches, true);
+  // The project's tasks and events (Shreni's rows included) match the freeze's.
+  check('engineMatches', engine.matches, engine.matches, true);
   check('notPaused', !slice?.paused, slice?.paused ?? false, false);
   check('notStuck', slice?.stuck === undefined, slice?.stuck ?? null, null);
 

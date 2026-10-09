@@ -13,14 +13,19 @@ const mockPush = vi.fn<() => Promise<void>>();
 const mockHeadSha = vi.fn<() => Promise<string>>();
 vi.mock('./git.js', () => ({ git: vi.fn(() => ({ push: mockPush, headSha: mockHeadSha })) }));
 
-const mockShow = vi.fn<() => Promise<string>>();
-const mockAddNote = vi.fn<() => Promise<string>>();
-const mockRemoveLabel = vi.fn<() => Promise<string>>();
-const mockFlag = vi.fn<() => Promise<string>>();
-const mockSyncBeads = vi.fn<() => Promise<void>>();
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ show: mockShow, addNote: mockAddNote, removeLabel: mockRemoveLabel, flag: mockFlag })),
-  syncBeads: mockSyncBeads,
+// The task store: the watermark lives on the attempt's evidence, and resubmit
+// puts the task back to waiting on its PR (the engine's "drop the label").
+type Watermark = { head: string | null; round: number; at: string | null };
+const mockReadWatermark = vi.fn<(id: string) => Promise<Watermark>>();
+const mockWriteWatermark = vi.fn<(id: string, w: Watermark) => Promise<void>>();
+const mockResubmit = vi.fn<(id: string, reason: string) => Promise<void>>();
+const mockNote = vi.fn<(id: string, text: string) => Promise<void>>();
+const mockFlag = vi.fn<(id: string, reason: string) => Promise<void>>();
+vi.mock('./task-store.js', () => ({
+  engineStore: vi.fn(() => ({
+    readWatermark: mockReadWatermark, writeWatermark: mockWriteWatermark,
+    resubmit: mockResubmit, note: mockNote, flag: mockFlag,
+  })),
 }));
 
 const mockNotify = vi.fn<() => Promise<void>>();
@@ -59,12 +64,12 @@ function loopResult(over: Partial<PrFollowupResult>): PrFollowupResult {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockShow.mockResolvedValue(JSON.stringify({ id: TASK.id })); // no notes → zeroed watermark
+  mockReadWatermark.mockResolvedValue({ head: null, round: 0, at: null }); // never followed up
   mockHeadSha.mockResolvedValue('newsha');
 });
 
 describe('runPrFollowupTask', () => {
-  it('approved: pushes BEFORE replying, then advances the watermark and drops the label', async () => {
+  it('approved: pushes BEFORE replying, then advances the watermark and resubmits', async () => {
     mockPrStatus.mockResolvedValue(openStatusWithReview());
     mockRunLoop.mockResolvedValue(
       loopResult({ output: { commentResponses: [{ commentId: 'c0', disposition: 'change', reply: 'done' }] } as never, rounds: 1 }),
@@ -77,12 +82,13 @@ describe('runPrFollowupTask', () => {
     expect(mockPrReply).toHaveBeenCalledWith('bead-proj-9/fix-thing', 'done');
     // push STRICTLY precedes reply
     expect(mockPush.mock.invocationCallOrder[0]).toBeLessThan(mockPrReply.mock.invocationCallOrder[0]);
-    // watermark advanced (head=newsha) and marker removed
-    expect(mockAddNote).toHaveBeenCalledWith(TASK.id, expect.stringContaining('pr-followup-head:newsha'));
-    expect(mockRemoveLabel).toHaveBeenCalledWith(TASK.id, 'pr-needs-followup');
+    // watermark advanced (head=newsha), and back to waiting on the PR
+    expect(mockWriteWatermark).toHaveBeenCalledWith(TASK.id, expect.objectContaining({ head: 'newsha', round: 1 }));
+    expect(mockResubmit).toHaveBeenCalledWith(TASK.id, expect.stringContaining('PR follow-up pushed'));
+    expect(mockWriteWatermark.mock.invocationCallOrder[0]).toBeLessThan(mockResubmit.mock.invocationCallOrder[0]);
   });
 
-  it('a push failure posts NO reply and keeps the label for retry', async () => {
+  it('a push failure posts NO reply, leaves the watermark, and resubmits for a retry', async () => {
     mockPrStatus.mockResolvedValue(openStatusWithReview());
     mockRunLoop.mockResolvedValue(
       loopResult({ output: { commentResponses: [{ commentId: 'c0', disposition: 'change', reply: 'done' }] } as never }),
@@ -93,11 +99,12 @@ describe('runPrFollowupTask', () => {
 
     expect(res.approved).toBe(false);
     expect(mockPrReply).not.toHaveBeenCalled();
-    expect(mockRemoveLabel).not.toHaveBeenCalled(); // label kept → retried next pass
-    expect(mockAddNote).toHaveBeenCalledWith(TASK.id, expect.stringContaining('push failed'));
+    expect(mockWriteWatermark).not.toHaveBeenCalled(); // same feedback re-detected next pass
+    expect(mockNote).toHaveBeenCalledWith(TASK.id, expect.stringContaining('push failed'));
+    expect(mockResubmit).toHaveBeenCalledWith(TASK.id, expect.stringContaining('push failed'));
   });
 
-  it('escalated: drops the label, flags a human, and notifies — no push', async () => {
+  it('escalated: flags a human and notifies — no push', async () => {
     mockPrStatus.mockResolvedValue(openStatusWithReview());
     mockRunLoop.mockResolvedValue(loopResult({ outcome: 'escalated', note: 'needs a human' }));
 
@@ -105,7 +112,7 @@ describe('runPrFollowupTask', () => {
 
     expect(res.approved).toBe(false);
     expect(mockPush).not.toHaveBeenCalled();
-    expect(mockRemoveLabel).toHaveBeenCalledWith(TASK.id, 'pr-needs-followup');
+    expect(mockResubmit).not.toHaveBeenCalled();
     expect(mockFlag).toHaveBeenCalledWith(TASK.id, expect.stringContaining('escalated'));
     expect(mockNotify).toHaveBeenCalledWith(KSHETRA, TASK, 'pr_followup_escalated');
     expect(mockEmit).toHaveBeenCalledWith('pr_followup_escalated', { rounds: 1 });
@@ -130,23 +137,21 @@ describe('runPrFollowupTask', () => {
     expect(mockEmit).not.toHaveBeenCalledWith('pr_followup_exhausted', expect.anything());
   });
 
-  it('skips and clears the label when the PR is no longer OPEN', async () => {
+  it('skips and resubmits when the PR is no longer OPEN, for reconcile to settle', async () => {
     mockPrStatus.mockResolvedValue({ ...openStatusWithReview(), state: 'MERGED' });
     const res = await runPrFollowupTask(KSHETRA, TASK);
     expect(res.approved).toBe(false);
-    expect(mockRemoveLabel).toHaveBeenCalledWith(TASK.id, 'pr-needs-followup');
+    expect(mockResubmit).toHaveBeenCalledWith(TASK.id, expect.stringContaining('no longer open'));
     expect(mockRunLoop).not.toHaveBeenCalled();
   });
 
-  it('clears the label and does nothing when there is no unaddressed feedback', async () => {
+  it('resubmits and does nothing else when there is no unaddressed feedback', async () => {
     // A watermark newer than the review → detectPrFeedback returns null.
-    mockShow.mockResolvedValue(
-      JSON.stringify({ id: TASK.id, notes: 'pr-followup-head:h pr-followup-round:1 pr-followup-at:2026-07-29T23:00:00Z' }),
-    );
+    mockReadWatermark.mockResolvedValue({ head: 'h', round: 1, at: '2026-07-29T23:00:00Z' });
     mockPrStatus.mockResolvedValue(openStatusWithReview());
     const res = await runPrFollowupTask(KSHETRA, TASK);
     expect(res.approved).toBe(false);
     expect(mockRunLoop).not.toHaveBeenCalled();
-    expect(mockRemoveLabel).toHaveBeenCalledWith(TASK.id, 'pr-needs-followup');
+    expect(mockResubmit).toHaveBeenCalledWith(TASK.id, 'no unaddressed feedback');
   });
 });

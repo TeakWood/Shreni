@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { join, resolve } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { listPacks, loadPack, defaultPacksDir, PACK_TEMPLATE_FILES, type Pack } from './packs.js';
 import { suggestPack } from '../cli/detect-toolchain.js';
 import {
@@ -36,13 +36,24 @@ describe('launch packs — loader', () => {
     for (const p of packs) expect(p.version).toBe(1);
   });
 
-  it('every pack carries the three conventions templates and a reference fixture with backlog.sh', () => {
+  it('every pack carries the three conventions templates and a reference fixture with a backlog.json', () => {
     for (const name of LAUNCH) {
       const pack = loadPack(join(PACKS_DIR, name));
       for (const f of PACK_TEMPLATE_FILES) {
         expect(existsSync(join(pack.dir, f)), `${name}/${f}`).toBe(true);
       }
-      expect(existsSync(join(pack.dir, 'reference', 'backlog.sh')), `${name}/reference/backlog.sh`).toBe(true);
+      const file = join(pack.dir, 'reference', 'backlog.json');
+      expect(existsSync(file), `${name}/reference/backlog.json`).toBe(true);
+      // The certification backlog: 3–5 tasks, each with a title, a description and a priority.
+      const backlog = JSON.parse(readFileSync(file, 'utf8')) as { title: string; description: string; priority: number }[];
+      expect(backlog.length, name).toBeGreaterThanOrEqual(3);
+      expect(backlog.length, name).toBeLessThanOrEqual(5);
+      for (const t of backlog) {
+        expect(typeof t.title === 'string' && t.title.length > 0, `${name}: title`).toBe(true);
+        expect(typeof t.description, `${name}: description`).toBe('string');
+        expect(Number.isInteger(t.priority) && t.priority >= 0 && t.priority <= 4, `${name}: priority`).toBe(true);
+      }
+      expect(existsSync(join(pack.dir, 'reference', 'backlog.sh')), `${name}: no bd backlog script`).toBe(false);
     }
   });
 });

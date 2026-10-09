@@ -2,21 +2,18 @@ import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path';
 import type { CommandContext } from './registry';
 import { loadRegistry } from '../kshetra/registry';
+import { requireProject } from '../kshetra/config';
 import { readPid, isAlive } from './pid';
 import { parseLabels } from './labels';
 import { loadState } from '../kshetra/state';
 import { kshetraStateLocations, ledgerPath } from '../kshetra/state-locations';
 import { freezeEngine, type EngineSnapshotInfo } from '../policy/sthapathi/snapshot';
-import { git } from '../sthapathi/git';
 import { getBuildIdentity } from '../sthapathi/build-info';
 import {
   copyTree,
   pathSizeBytes,
-  readBeadStats,
-  readLastDoltCommit,
   computeSnapshotId,
   MANIFEST_FILENAME,
-  BEADS_SNAPSHOT_SCHEMA_VERSION,
   SNAPSHOT_SCHEMA_VERSION,
   type SnapshotLocationEntry,
   type SnapshotManifest,
@@ -129,9 +126,10 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
 
   const kshetra = loadRegistry().find(k => k.id === id);
   if (!kshetra) throw new Error(`Kshetra not found: ${id}`);
+  requireProject(kshetra);
 
-  // A snapshot taken while the worker is dispatching is torn (mid-write beads
-  // DB, half-flushed activity log). Refuse unless the operator forces it.
+  // A snapshot taken while the worker is dispatching is torn (half-flushed
+  // activity log). Refuse unless the operator forces it.
   const pid = readPid(id);
   if (pid !== null && isAlive(pid) && !force) {
     throw new Error(
@@ -148,13 +146,10 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
   const resolvedOut = resolveFreezeOutDir(out, labels, now);
   mkdirSync(resolvedOut, { recursive: true });
 
-  // On the task graph engine the project's bundle comes first: it holds the
-  // worker lock, so a refusal there leaves nothing half-written.
-  let engineFrozen: Awaited<ReturnType<typeof freezeEngine>> | undefined;
-  if (kshetra.project) {
-    // The worker lock keeps a worker on any host from writing meanwhile; --force freezes regardless.
-    engineFrozen = await freezeEngine(kshetra, resolvedOut, { force });
-  }
+  // The project's bundle comes first: it holds the worker lock, so a refusal
+  // there leaves nothing half-written. The worker lock keeps a worker on any
+  // host from writing meanwhile; --force freezes regardless.
+  const engineFrozen = await freezeEngine(kshetra, resolvedOut, { force });
 
   const locations = kshetraStateLocations(kshetra);
   const entries: SnapshotLocationEntry[] = [];
@@ -208,28 +203,15 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
     });
   }
 
-  // beads HEAD is best-effort provenance: a beads dir that is not a git checkout
-  // records null rather than failing the freeze.
-  // On the task graph engine the project's bundle and last event id stand in
-  // for the beads directory, its git head and its last Dolt commit.
-  let headSha: string | null = null;
-  let engine: EngineSnapshotInfo | undefined;
-  let beadStats;
-  if (engineFrozen) {
-    engine = engineFrozen.info;
-    beadStats = engineFrozen.stats;
-  } else {
-    try {
-      headSha = await git(kshetra.beads.path).headSha();
-    } catch {
-      headSha = null;
-    }
-    beadStats = readBeadStats(kshetra.beads.path);
-  }
+  // The project's bundle and last event id are the snapshot's task state; the
+  // `beads` section keeps its name (and null git/Dolt fields) for the schema.
+  const engine: EngineSnapshotInfo = engineFrozen.info;
+  const beadStats = engineFrozen.stats;
+  const headSha: string | null = null;
   const ragEntry = entries.find(e => e.key === 'rag');
 
   const manifest: SnapshotManifest = {
-    schemaVersion: engine ? SNAPSHOT_SCHEMA_VERSION : BEADS_SNAPSHOT_SCHEMA_VERSION,
+    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     snapshotId: '', // filled in below once the rest of the manifest is assembled
     kshetraId: id,
     createdAt: now.toISOString(),
@@ -237,10 +219,10 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
     repoPath: kshetra.repo.path,
     beads: {
       headSha,
-      lastDoltCommit: engine ? null : readLastDoltCommit(kshetra.beads.path),
+      lastDoltCommit: null,
       ...beadStats,
     },
-    ...(engine ? { engine } : {}),
+    engine,
     rag: {
       present: ragEntry?.present ?? false,
       sizeBytes: ragEntry?.sizeBytes ?? 0,
@@ -264,7 +246,7 @@ export async function runFreeze(ctx: CommandContext): Promise<void> {
       beadCount: beadStats.beadCount,
       memoryCount: beadStats.memoryCount,
       beadsSha: headSha,
-      ...(engine ? { lastEventId: engine.lastEventId } : {}),
+      lastEventId: engine.lastEventId,
       labels,
     });
   } catch (err) {

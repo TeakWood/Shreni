@@ -26,11 +26,10 @@ export function kshetraDir(kshetraId: string): string {
 // this one file under `.kshetras[<id>]` (src/kshetra/state.ts). A restore must
 // therefore rewrite only this Kshetra's slice, never replace the file — see the
 // `json-slice` entry in kshetraStateLocations.
-// The decision ledger. On the task graph engine it sits in the runtime dir,
-// beside activity.jsonl and usage.jsonl (migration plan, "Beyond the bd
-// wrapper"); on beads, in the beads directory, where the beads sync commits it.
-export function ledgerPath(kshetra: Pick<KshetraConfig, 'id' | 'project' | 'beads'>): string {
-  return kshetra.project ? join(kshetraDir(kshetra.id), 'ledger.jsonl') : join(kshetra.beads.path, 'ledger.jsonl');
+// The decision ledger sits in the runtime dir, beside activity.jsonl and
+// usage.jsonl (migration plan, "Beyond the bd wrapper").
+export function ledgerPath(kshetra: Pick<KshetraConfig, 'id'>): string {
+  return join(kshetraDir(kshetra.id), 'ledger.jsonl');
 }
 
 export function stateFilePath(): string {
@@ -56,7 +55,7 @@ export function legacyLogPath(kshetraId: string): string {
 }
 
 export type StateLocationKind = 'dir' | 'file' | 'json-slice';
-export type StateLocationRole = 'beads' | 'runtime' | 'flags' | 'index';
+export type StateLocationRole = 'runtime' | 'flags' | 'index';
 
 // One piece of a Kshetra's state on this machine.
 export interface StateLocation {
@@ -69,9 +68,9 @@ export interface StateLocation {
   // `dir`/`file`: the whole path is this Kshetra's. `json-slice`: the file is
   // shared across Kshetras and only `sliceKey`'s entry belongs to this one.
   role: StateLocationRole;
-  // Whether the location must exist for a valid Kshetra. `beads` is required;
-  // the runtime dir, flags slice, RAG index and legacy log are all created
-  // lazily and may be absent on a freshly registered Kshetra.
+  // Whether the location must exist for a valid Kshetra. The runtime dir,
+  // flags slice, RAG index and legacy log are all created lazily and may be
+  // absent on a freshly registered Kshetra.
   required: boolean;
   // Present only on `json-slice` entries: the object key under which this
   // Kshetra's state lives in the shared file (`state.kshetras[sliceKey]`). A
@@ -90,19 +89,9 @@ export interface StateLocation {
 // target repo. Freeze records repo.path in its manifest straight from config;
 // the resolver only enumerates what shreni itself snapshots.
 export function kshetraStateLocations(kshetra: KshetraConfig): StateLocation[] {
+  // The tasks live in the database, which freeze snapshots through the
+  // project's export; the ledger is in the runtime dir.
   return [
-    // On the task graph engine the tasks live in the database, which freeze
-    // snapshots through the project's export, and the ledger in the runtime dir.
-    ...(kshetra.project ? [] : [{
-      // The whole beads directory — Dolt DB, issues.jsonl, export-state.json,
-      // ledger.jsonl. Snapshotted whole (memories round-trip through here, so a
-      // partial rebuild by `bd import` would leak them between trials).
-      key: 'beads',
-      path: kshetra.beads.path,
-      kind: 'dir' as const,
-      role: 'beads' as const,
-      required: true,
-    }]),
     {
       key: 'runtime',
       path: kshetraDir(kshetra.id),

@@ -21,9 +21,9 @@ import type { StateLocationKind, StateLocationRole } from './state-locations.js'
 // they live here rather than in either command.
 
 // Bump when the manifest shape or snapshot layout changes incompatibly. restore
-// refuses a snapshot whose schemaVersion it does not understand. Version 2 adds
-// a task graph engine snapshot (the `engine` section, no beads location); a
-// beads snapshot is still written as version 1, so older builds restore it.
+// refuses a snapshot whose schemaVersion it does not understand. Version 2 is a
+// task graph engine snapshot (the `engine` section, no beads location). Version
+// 1 was a copy of the beads directory; restore refuses it, as beads is gone.
 export const SNAPSHOT_SCHEMA_VERSION = 2;
 export const BEADS_SNAPSHOT_SCHEMA_VERSION = 1;
 
@@ -45,7 +45,7 @@ export interface SnapshotLocationEntry {
   // absent aborts the freeze; optional ones simply record present:false.
   present: boolean;
   // Path RELATIVE to the snapshot dir where this location was captured
-  // (e.g. 'beads', 'runtime', 'flags.json'), or null when absent.
+  // (e.g. 'runtime', 'flags.json'), or null when absent.
   snapshotPath: string | null;
   // Bytes captured (recursive for a dir, file size for a file, slice JSON size
   // for a json-slice), 0 when absent.
@@ -54,9 +54,9 @@ export interface SnapshotLocationEntry {
   sliceKey?: string;
 }
 
-// Verifiable bead/memory accounting, read from issues.jsonl (finding 1: the
-// memory count must be counted, never assumed — memories round-trip through
-// issues.jsonl and would otherwise leak between trials undetected).
+// Verifiable task/memory accounting, from the project's bundle (finding 1: the
+// memory count must be counted, never assumed — memories would otherwise leak
+// between trials undetected).
 export interface BeadStats {
   beadCount: number;
   memoryCount: number;
@@ -148,55 +148,6 @@ export function moveTree(src: string, dest: string): void {
     if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
     cpSync(src, dest, { recursive: true });
     rmSync(src, { recursive: true, force: true });
-  }
-}
-
-// Classify issues.jsonl and compute verifiable counts + the bead-id hash. A
-// missing file (a freshly created beads dir before its first export) yields all
-// zeros and the hash of the empty id list, not an error.
-export function readBeadStats(beadsPath: string): BeadStats {
-  const file = join(beadsPath, 'issues.jsonl');
-  const ids: string[] = [];
-  let memoryCount = 0;
-  let openCount = 0;
-  let closedCount = 0;
-
-  if (existsSync(file)) {
-    const raw = readFileSync(file, 'utf8');
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const rec = JSON.parse(trimmed) as { _type?: string; id?: string; status?: string };
-      if (rec._type === 'memory') {
-        memoryCount++;
-        continue;
-      }
-      // Everything that is not a memory and carries an id is a bead. (Today the
-      // only _type values are 'issue' and 'memory'; this stays correct if a new
-      // non-memory record type appears.)
-      if (typeof rec.id === 'string') {
-        ids.push(rec.id);
-        if (rec.status === 'closed') closedCount++;
-        else openCount++;
-      }
-    }
-  }
-
-  ids.sort();
-  const beadIdHash =
-    'sha256:' + createHash('sha256').update(ids.join('\n')).digest('hex');
-  return { beadCount: ids.length, memoryCount, openCount, closedCount, beadIdHash };
-}
-
-// Parse the last_dolt_commit recorded in export-state.json at the beads repo
-// root. Missing/malformed → null (best-effort provenance, never fatal).
-export function readLastDoltCommit(beadsPath: string): string | null {
-  try {
-    const raw = readFileSync(join(beadsPath, 'export-state.json'), 'utf8');
-    const parsed = JSON.parse(raw) as { last_dolt_commit?: unknown };
-    return typeof parsed.last_dolt_commit === 'string' ? parsed.last_dolt_commit : null;
-  } catch {
-    return null;
   }
 }
 

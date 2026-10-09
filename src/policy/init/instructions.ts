@@ -221,7 +221,8 @@ export function blockProblem(file: string, mode: ProjectMode): string | null {
 
 // ── Claude Code hooks ─────────────────────────────────────────────────────────
 
-const PRIME = 'shreni task prime';
+/** The command the session-start and pre-compaction hooks run. */
+export const PRIME = 'shreni task prime';
 const HOOK_EVENTS = ['SessionStart', 'PreCompact'] as const;
 
 type HookEntry = { matcher?: string; hooks?: { type?: string; command?: string }[] };

@@ -12,15 +12,15 @@ vi.mock('os', async (importOriginal) => {
 
 // ── import after mocks ────────────────────────────────────────────────────────
 
-const { verifyHooks, REQUIRED_COMMAND } = await import('./verify-hooks.js');
+const { verifyHooks, REQUIRED_COMMAND, settingsPaths } = await import('./verify-hooks.js');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function makeSettings(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     hooks: {
-      SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
-      PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+      SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'shreni task prime' }] }],
+      PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'shreni task prime' }] }],
     },
     ...overrides,
   });
@@ -44,7 +44,7 @@ describe('verifyHooks', () => {
   it('returns sessionStart.present=false when SessionStart hook is missing', () => {
     mockReadFileSync.mockReturnValue(makeSettings({
       hooks: {
-        PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+        PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'shreni task prime' }] }],
       },
     }));
     const result = verifyHooks('/fake/settings.json');
@@ -56,7 +56,7 @@ describe('verifyHooks', () => {
   it('returns preCompact.present=false when PreCompact hook is missing', () => {
     mockReadFileSync.mockReturnValue(makeSettings({
       hooks: {
-        SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+        SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'shreni task prime' }] }],
       },
     }));
     const result = verifyHooks('/fake/settings.json');
@@ -84,7 +84,7 @@ describe('verifyHooks', () => {
     mockReadFileSync.mockReturnValue(JSON.stringify({
       hooks: {
         SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'some other cmd' }] }],
-        PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+        PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'shreni task prime' }] }],
       },
     }));
     const result = verifyHooks('/fake/settings.json');
@@ -98,7 +98,32 @@ describe('verifyHooks', () => {
     expect(result.allPresent).toBe(false);
   });
 
-  it(`REQUIRED_COMMAND is 'bd prime'`, () => {
-    expect(REQUIRED_COMMAND).toBe('bd prime');
+  it(`REQUIRED_COMMAND is 'shreni task prime'`, () => {
+    expect(REQUIRED_COMMAND).toBe('shreni task prime');
+  });
+
+  it('no longer counts the old bd prime hooks', () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      hooks: {
+        SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+        PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+      },
+    }));
+    expect(verifyHooks('/fake/settings.json').allPresent).toBe(false);
+  });
+
+  it('finds each hook in either the repo\'s or the user\'s settings', () => {
+    mockReadFileSync.mockImplementation((p: string) => {
+      if (p === '/repo/.claude/settings.json') {
+        return JSON.stringify({ hooks: { SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'shreni task prime' }] }] } });
+      }
+      if (p === '/home/test/.claude/settings.json') {
+        return JSON.stringify({ hooks: { PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'shreni task prime' }] }] } });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(settingsPaths('/repo')).toEqual(['/repo/.claude/settings.json', '/home/test/.claude/settings.json']);
+    expect(verifyHooks(settingsPaths('/repo')).allPresent).toBe(true);
+    expect(verifyHooks(['/repo/.claude/settings.json']).allPresent).toBe(false);
   });
 });

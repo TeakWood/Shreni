@@ -21,8 +21,9 @@ vi.mock('../kshetra/state', () => ({ loadState: mockLoadState }));
 
 const mockBdList = vi.fn<(f: { status?: string }) => Promise<string>>();
 const mockBdReady = vi.fn<() => Promise<string>>();
-vi.mock('../sthapathi/beads', () => ({
-  bd: vi.fn(() => ({ list: mockBdList, ready: mockBdReady })),
+// The engine's reads (withTrackerReads), as the status assembly makes them.
+vi.mock('../policy/sthapathi/reads', () => ({
+  withTrackerReads: (_k: unknown, fn: (r: unknown) => unknown) => fn({ list: mockBdList, ready: mockBdReady }),
 }));
 
 // ── imports after mocks ───────────────────────────────────────────────────────
@@ -34,7 +35,7 @@ const { getAgentLines, formatAgentLines } = await import('./agents');
 const K1 = {
   id: 'alpha', name: 'Alpha',
   repo: { path: '/p/alpha', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/p/alpha-beads', remote: '', mode: 'embedded' },
+  project: '00000000-0000-0000-0000-000000000001',
   stack: { language: 'typescript' }, conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },

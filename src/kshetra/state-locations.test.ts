@@ -16,18 +16,20 @@ const {
   ragIndexDir,
   kshetraRagSlug,
   legacyLogPath,
+  ledgerPath,
 } = await import('./state-locations.js');
 
 const KSHETRA = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main' },
-  beads: { path: '/projects/myapp-beads', remote: '' },
+  project: '0b9d6f4e-6a43-4c1e-9d77-2f6f3c1a9e10',
   agents: { maxRoundsPerBead: 5 },
 } as unknown as import('./config.js').KshetraConfig;
 
 describe('path helpers', () => {
   it('derives every ~/.shreni path from homedir', () => {
+    expect(ledgerPath(KSHETRA)).toBe(join(HOME, '.shreni', 'kshetra', 'myapp', 'ledger.jsonl'));
     expect(kshetraDir('myapp')).toBe(join(HOME, '.shreni', 'kshetra', 'myapp'));
     expect(stateFilePath()).toBe(join(HOME, '.shreni', 'state.json'));
     expect(ragIndexDir('myapp')).toBe(join(HOME, '.shreni', 'rag', 'myapp'));
@@ -45,23 +47,14 @@ describe('kshetraStateLocations', () => {
   const locs = kshetraStateLocations(KSHETRA);
   const byKey = Object.fromEntries(locs.map(l => [l.key, l]));
 
-  it('returns the beads dir, runtime dir, flags slice, RAG index and legacy log', () => {
+  it('returns the runtime dir, flags slice, RAG index and legacy log: no beads dir, the tasks are in the database', () => {
     expect(Object.keys(byKey).sort()).toEqual(
-      ['beads', 'flags', 'legacy-log', 'rag', 'runtime'].sort(),
+      ['flags', 'legacy-log', 'rag', 'runtime'].sort(),
     );
   });
 
   it('keys unique, one role each', () => {
     expect(new Set(locs.map(l => l.key)).size).toBe(locs.length);
-  });
-
-  it('beads points at the whole configured beads dir and is required', () => {
-    expect(byKey.beads).toMatchObject({
-      path: '/projects/myapp-beads',
-      kind: 'dir',
-      role: 'beads',
-      required: true,
-    });
   });
 
   it('runtime is the per-kshetra dir, optional', () => {
@@ -108,7 +101,6 @@ describe('kshetraStateLocations', () => {
 
   it('every machine-side location lives under ~/.shreni', () => {
     for (const l of locs) {
-      if (l.role === 'beads') continue; // project-side, configured absolute path
       expect(l.path.startsWith(join(HOME, '.shreni'))).toBe(true);
     }
   });

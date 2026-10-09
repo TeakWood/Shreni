@@ -10,15 +10,20 @@ const mockBdAddNote = vi.fn<() => Promise<string>>();
 const mockBdRemember = vi.fn<() => Promise<string>>();
 const mockBdFlag = vi.fn<() => Promise<string>>();
 
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({
+const mockRecordAcceptance = vi.fn(async () => {});
+vi.mock('./task-store.js', () => {
+  const tracker = {
     prime: mockBdPrime,
     show: mockBdShow,
     addNote: mockBdAddNote,
     remember: mockBdRemember,
     flag: mockBdFlag,
-  })),
-}));
+  };
+  return {
+    trackerFor: vi.fn(() => tracker),
+    engineStore: vi.fn(() => ({ tracker, recordAcceptance: mockRecordAcceptance })),
+  };
+});
 
 const mockRunSilpi = vi.fn<() => Promise<SilpiOutput>>();
 vi.mock('../agents/silpi.js', () => ({ runSilpi: mockRunSilpi }));
@@ -113,11 +118,6 @@ const KSHETRA: KshetraConfig = {
     mainBranch: 'main',
     branchPattern: 'bead-{id}/{slug}',
   },
-  beads: {
-    path: '/projects/myapp-beads',
-    remote: 'git@github.com:TeakWood/myapp-beads.git',
-    mode: 'embedded',
-  },
   // coverageCommand '' so the real evaluateGates skips coverage instead of
   // exec'ing a coverage run in tests.
   stack: { language: 'typescript', coverageCommand: '' },
@@ -211,18 +211,18 @@ const HEALTH_TASK: Task = {
 // ── buildAgentContext ─────────────────────────────────────────────────────────
 
 describe('buildAgentContext', () => {
-  it('calls bd prime and bd show', async () => {
+  it('calls the tracker prime and show', async () => {
     await buildAgentContext(KSHETRA, TASK);
     expect(mockBdPrime).toHaveBeenCalledOnce();
     expect(mockBdShow).toHaveBeenCalledWith('proj-42');
   });
 
-  it('injects bd prime output as projectMemory', async () => {
+  it('injects the tracker prime output as projectMemory', async () => {
     const ctx = await buildAgentContext(KSHETRA, TASK);
     expect(ctx.projectMemory).toBe('prime output');
   });
 
-  it('injects bd show output as taskDetails', async () => {
+  it('injects the tracker show output as taskDetails', async () => {
     const ctx = await buildAgentContext(KSHETRA, TASK);
     expect(ctx.taskDetails).toBe('task details output');
   });
@@ -524,12 +524,12 @@ describe('runSilpiViharapalaLoop', () => {
     expect(mockBdAddNote).toHaveBeenCalledWith('proj-42', expect.stringContaining('APPROVE'));
   });
 
-  it('calls bd remember for each Silpi insight', async () => {
+  it('records a memory (remember) for each Silpi insight', async () => {
     await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
     expect(mockBdRemember).toHaveBeenCalledWith('insight A');
   });
 
-  it('calls bd remember for each Viharapala insight', async () => {
+  it('records a memory (remember) for each Viharapala insight', async () => {
     await runSilpiViharapalaLoop(KSHETRA, TASK, 'bead-proj-42/fix-auth');
     expect(mockBdRemember).toHaveBeenCalledWith('insight B');
   });

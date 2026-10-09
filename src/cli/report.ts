@@ -6,7 +6,6 @@
 // and the presentation.
 
 import { readFileSync } from 'fs';
-import { join } from 'path';
 import { loadRegistry } from '../kshetra/registry';
 import { resolveTargetKshetra } from './suthradhara';
 import { logPath, usagePath } from '../sthapathi/activity-log';
@@ -44,11 +43,10 @@ function readJsonl<T>(path: string): T[] {
 }
 
 // Gather the feeds for a Kshetra into the aggregator's input shape. The three
-// per-Kshetra feeds live under ~/.shreni/kshetra/<id>/; interactions.jsonl lives
-// in the BEADS repo (git-tracked since 4a2.7), so it takes the beads path — the
-// waiting-on-human derivation (epic hto) reads it. beads path optional so callers
-// with only an id (older tests) still work — interactions default to [].
-export function readFeeds(kshetraId: string, beadsPath?: string): {
+// per-Kshetra feeds live under ~/.shreni/kshetra/<id>/; the interactions the
+// waiting-on-human derivation (epic hto) reads come from the engine's events
+// (runReport adds them), so here they default to [].
+export function readFeeds(kshetraId: string): {
   events: LoggedEvent[];
   usage: UsageEntry[];
   notifications: ReturnType<typeof readNotifications>;
@@ -58,7 +56,7 @@ export function readFeeds(kshetraId: string, beadsPath?: string): {
     events: readJsonl<LoggedEvent>(logPath(kshetraId)),
     usage: readJsonl<UsageEntry>(usagePath(kshetraId)),
     notifications: readNotifications(kshetraId),
-    interactions: beadsPath ? readJsonl<BeadInteraction>(join(beadsPath, 'interactions.jsonl')) : [],
+    interactions: [] as BeadInteraction[],
   };
 }
 
@@ -311,10 +309,8 @@ async function engineInteractions(kshetra: KshetraConfig) {
 export async function runReport(opts: ReportOpts): Promise<void> {
   const kshetras = opts.kshetras ?? loadRegistry();
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
-  // On the task graph engine the waiting-on-human metric reads events, not interactions.jsonl.
-  const feeds = kshetra.project
-    ? { ...readFeeds(kshetra.id), interactions: await engineInteractions(kshetra) }
-    : readFeeds(kshetra.id, kshetra.beads.path);
+  // The waiting-on-human metric reads the engine's events.
+  const feeds = { ...readFeeds(kshetra.id), interactions: await engineInteractions(kshetra) };
   if (opts.turns) {
     // One JSON object per line (JSONL): streams row-by-row into a plotting/
     // analysis pipeline without loading the whole array, and matches the JSONL

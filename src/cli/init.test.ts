@@ -20,7 +20,7 @@ vi.mock('../kshetra/user-config', async orig => ({
 }));
 const { runInit, initEngine, trackerAt, startRefusal } = await import('./init');
 const { registerProject, projectMode, idPrefixFor } = await import('../policy/init/project');
-const { registerKshetra, loadRegistry } = await import('../kshetra/registry');
+const { registerKshetra, unregisterKshetra, loadRegistry } = await import('../kshetra/registry');
 const { COMMANDS } = await import('./commands');
 const { makeContext } = await import('./registry');
 type InitDeps = import('./init').InitDeps;
@@ -115,29 +115,13 @@ describe('shreni init: the mode', { timeout: PGLITE_TIMEOUT }, () => {
     const d = deps(null);
     const r = repo();
     await runInit({
-      mode: 'kshetra', path: r, slug: 'web', org: 'Acme', language: 'python', beadsPath: '/b', provider: 'claude',
+      mode: 'kshetra', path: r, slug: 'web', org: 'Acme', language: 'python', provider: 'claude',
       model: 'm', mergePolicy: 'pr', dryRun: true, pack: 'p', noPack: false, upgrade: false,
     }, d);
     expect(d.kshetraCalls).toHaveBeenCalledWith({
-      slug: 'web', path: resolve(r), org: 'Acme', language: 'python', beadsPath: '/b', provider: 'claude', model: 'm',
+      slug: 'web', path: resolve(r), org: 'Acme', language: 'python', provider: 'claude', model: 'm',
       mergePolicy: 'pr', dryRun: true, pack: 'p', noPack: false, upgrade: false, engine: expect.any(Object),
     });
-  });
-});
-
-describe('shreni init --on-beads', { timeout: PGLITE_TIMEOUT }, () => {
-  it('sets up a Kshetra on beads, with no database or project, and only a Kshetra', async () => {
-    const d = deps(null);
-    await runInit({ mode: 'kshetra', path: repo(), slug: 'web', onBeads: true }, d);
-    expect(d.kshetraCalls.mock.calls[0][0]).not.toHaveProperty('engine');
-    await expect(runInit({ mode: 'tracker', path: repo(), onBeads: true }, d)).rejects.toThrow(/--on-beads is for a Kshetra/);
-  });
-
-  it('refuses a tracker repo, which it would leave with both configs', async () => {
-    const shreni = await engineDb();
-    const r = repo();
-    await runInit({ mode: 'tracker', path: r, slug: 'notes' }, deps(shreni));
-    await expect(runInit({ mode: 'kshetra', path: r, onBeads: true }, deps(shreni))).rejects.toThrow(/is a tracker project; --on-beads can't make it a Kshetra/);
   });
 });
 
@@ -156,6 +140,28 @@ describe('shreni start and tracker projects', () => {
     const nested = join(r, 'vendor', 'lib');
     mkdirSync(join(nested, '.git'), { recursive: true });
     expect(trackerAt(nested)).toBeNull();
+  });
+
+  it('refuses a Kshetra with no project, naming shreni migrate, whether or not it still has beads to move', async () => {
+    const kshetraAt = (id: string, extra = '') => {
+      const r = repo();
+      mkdirSync(join(r, '.shreni'));
+      const config = join(r, '.shreni', 'kshetra.yaml');
+      writeFileSync(config, `id: ${id}\nname: ${id}\nrepo: { path: ${r}, remote: 'git@x:${id}.git' }\nstack: { language: ts }\n${extra}`);
+      registerKshetra(id, config);
+      onTestFinished(() => unregisterKshetra(id));
+      return r;
+    };
+    kshetraAt('noproj');
+    // An old config still on beads: without a terminal, it isn't offered the move.
+    const beads = mkdtempSync(join(tmpdir(), 'shreni-init-beads-'));
+    writeFileSync(join(beads, 'issues.jsonl'), '');
+    kshetraAt('oldbeads', `beads: { path: ${beads}, remote: 'git@x:b.git' }\n`);
+    const start = COMMANDS.find(c => c.name === 'start')!;
+    await expect(start.run(makeContext(['--kshetra', 'noproj'])))
+      .rejects.toThrow('noproj: not started: noproj has no task graph project: run shreni migrate noproj');
+    await expect(start.run(makeContext(['--kshetra', 'oldbeads'])))
+      .rejects.toThrow('oldbeads: not started: oldbeads has no task graph project: run shreni migrate oldbeads');
   });
 });
 
@@ -343,7 +349,7 @@ describe('the Database and Project phases on the database', { timeout: PGLITE_TI
       { name: 'shreni', mode: 'tracker' },
       {
         probe, open: async () => ({ shreni, close: async () => {} }), env: {},
-        exportBeads: async () => false, dump: async db => { dumps.push(db); return 'dumped'; }, manifestsDir: join(r, 'm'),
+        dump: async db => { dumps.push(db); return 'dumped'; }, manifestsDir: join(r, 'm'),
       },
     );
     // Without a terminal the import needs its confirmation, so it stops before writing.
@@ -356,7 +362,7 @@ describe('the Database and Project phases on the database', { timeout: PGLITE_TI
       { name: 'shreni', mode: 'tracker' },
       {
         probe, open: async () => ({ shreni, close: async () => {} }), env: {},
-        exportBeads: async () => false, dump: async db => { dumps.push(db); return 'dumped'; }, manifestsDir: join(r, 'm'),
+        dump: async db => { dumps.push(db); return 'dumped'; }, manifestsDir: join(r, 'm'),
       },
     );
     const id = await yes.project({ database: 'local', repoUrl: '', beads: { dir: join(r, '.beads'), repo: r, configPath: config } });
@@ -366,6 +372,8 @@ describe('the Database and Project phases on the database', { timeout: PGLITE_TI
     expect(readFileSync(config, 'utf8')).toBe(`name: shreni\nproject: ${id}\ndatabase: local\n`);
     expect(existsSync(join(r, '.beads'))).toBe(false);
     expect(out.join('\n')).toMatch(/held by parked epic/);
+    // The committed export is read; Shreni never runs bd.
+    expect(out.join('\n')).toContain(`reading the committed ${join(r, '.beads', 'issues.jsonl')}; if bd is installed, run`);
     // Init keeps no record to undo: the config names the project, and the dump is the way back.
     expect(existsSync(join(r, 'm')) ? readdirSync(join(r, 'm')) : []).toEqual([]);
   });

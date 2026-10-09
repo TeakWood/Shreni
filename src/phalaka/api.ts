@@ -42,7 +42,7 @@ export const KshetraSummarySchema = z.object({
   // banner surfaces it so the operator sees active review-fix work, not just
   // stuck/paused states.
   followup: z.number().int().nonnegative().optional(),
-  // One Kshetra's broken beads DB surfaces here instead of blanking the board.
+  // One Kshetra's failing task read surfaces here instead of blanking the board.
   error: z.string().optional(),
 });
 
@@ -100,7 +100,7 @@ export const HealthSchema = z.object({ ok: z.literal(true), version: z.string() 
 
 // ── Process snapshots (control plane) ───────────────────────────────────────
 // Mirrors ProcessSnapshot in process-read.ts; the extra `error` field carries a
-// per-Kshetra bead-enrichment failure so one broken `bd` never blanks the fleet.
+// per-Kshetra bead-enrichment failure so one failing read never blanks the fleet.
 
 export const ProcessStuckSchema = z.object({
   since: z.string(),
@@ -292,7 +292,7 @@ async function summarizeKshetra(kshetra: KshetraConfig): Promise<z.infer<typeof 
   try {
     const reader = beadsRead(kshetra);
     // Active list (open/in_progress/blocked/deferred) + closed list, so the
-    // counts cover every status without a wide-open `bd list --all`. The
+    // counts cover every status without a wide-open list of every status. The
     // follow-up slice is a nice-to-have banner detail, so it is best-effort: a
     // failure there must degrade only the chip, never blank the whole card (the
     // core counts/phase/stuck must still render — the file's isolation intent).
@@ -342,8 +342,8 @@ export function registerPhalakaApi(app: FastifyInstance): void {
     // are then merged onto worker rows from the shared assembleKshetraStatus().
     const snapshots = readProcessSnapshots();
 
-    // One bd read per Kshetra with a worker row, not one per process — dedupe the
-    // ids, then run them concurrently. A Kshetra whose bd is unreadable resolves to
+    // One task read per Kshetra with a worker row, not one per process — dedupe the
+    // ids, then run them concurrently. A Kshetra whose tasks are unreadable resolves to
     // an error entry so its rows carry `error` while every other row still renders.
     const workerKshetraIds = [
       ...new Set(
@@ -380,7 +380,7 @@ export function registerPhalakaApi(app: FastifyInstance): void {
   });
 
   // Planning sessions (fnd.5): file-only fold of the Suthradhara activity stream.
-  // Like /api/processes it never calls bd — it degrades to [] for a Kshetra with
+  // Like /api/processes it never reads tasks — it degrades to [] for a Kshetra with
   // no activity rather than erroring.
   app.get('/api/planning-sessions', async (req, reply) => {
     if (!requireToken(req, reply)) return;
@@ -439,7 +439,7 @@ export function registerPhalakaApi(app: FastifyInstance): void {
   // Both routes are a straight line: mutation-auth gate → Sthapathi-owned
   // primitive (src/cli/pause.ts, sole writer of state.json) → zod-validated
   // response. The card reflects the change via the existing SSE watch of
-  // state.json; these handlers never write state or touch bd/git directly.
+  // state.json; these handlers never write state or touch the task store/git directly.
   //
   // Error handling mirrors the read routes: the primitive's `not_found` variant
   // maps to 404; an unexpected throw is isolated to a 502 so a single failing

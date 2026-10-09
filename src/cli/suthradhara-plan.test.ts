@@ -293,7 +293,7 @@ describe('the session and prompt on the engine', () => {
   it('gives the session its plan and Kshetra in place of BEADS_DIR, and gate ① files with shreni plan', () => {
     const kshetra = {
       id: 'web', project: '00000000-0000-0000-0000-000000000001', repo: { path: '/r', remote: 'git@x:web.git', mainBranch: 'main' },
-      beads: { path: '/b', remote: 'git@x:b.git' }, agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, mcp: { servers: {} },
+      agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, mcp: { servers: {} },
     } as unknown as KshetraConfig;
     const spec = buildPlanningSession({ kshetra, claudeSessionId: 'c', planId: 'web-plan-ab12' });
     expect(spec.env).toMatchObject({ SHRENI_PLAN: 'web-plan-ab12', SHRENI_KSHETRA: 'web' });
@@ -307,13 +307,12 @@ describe('the session and prompt on the engine', () => {
     expect(prompt).toContain('you never approve it');
   });
 
-  it('keeps bd on a Kshetra still on beads', () => {
+  it('refuses a Kshetra still on beads, naming shreni migrate', () => {
     const kshetra = {
       id: 'old', repo: { path: '/r', remote: 'git@x:old.git', mainBranch: 'main' },
-      beads: { path: '/b', remote: 'git@x:b.git' }, agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, mcp: { servers: {} },
+      agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, mcp: { servers: {} },
     } as unknown as KshetraConfig;
-    expect(buildPlanningSession({ kshetra, claudeSessionId: 'c' }).env).toMatchObject({ BEADS_DIR: '/b' });
-    expect(buildPlanningPrompt(kshetra)).toContain('bd create');
+    expect(() => buildPlanningSession({ kshetra, claudeSessionId: 'c', planId: 'p' })).toThrow('old has no task graph project: run shreni migrate old');
   });
 
   it('reads the developer\'s decision', () => {

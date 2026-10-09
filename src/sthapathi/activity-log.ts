@@ -182,8 +182,8 @@ export type ActivityEvent =
   // emitted AFTER a restore into the restored ledger, so a rewound ledger can be
   // told apart from one that simply lost history: `shreni show` renders it as an
   // explicit boundary ("entries above predate the restore").
-  | { type: 'state_frozen';     kshetra: string; snapshotId: string; beadCount: number; memoryCount: number; beadsSha: string | null; labels: Record<string, string> }
-  | { type: 'state_restored';   kshetra: string; snapshotId: string; beadCount: number; memoryCount: number; beadsSha: string | null; archivePath: string; clean: boolean }
+  | { type: 'state_frozen';     kshetra: string; snapshotId: string; beadCount: number; memoryCount: number; beadsSha: string | null; lastEventId?: string | null; labels: Record<string, string> }
+  | { type: 'state_restored';   kshetra: string; snapshotId: string; beadCount: number; memoryCount: number; beadsSha: string | null; lastEventId?: string | null; archivePath: string; clean: boolean }
   // phase_changed (RUN-LOG, epic hto / Study A3): one scheduler phase transition,
   // with `heldMs` = the monotonic time spent in `from` before moving to `to`. It
   // is how the report attributes select/prepare overhead and idle (poll) time,

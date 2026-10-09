@@ -3,14 +3,13 @@ import type { KshetraConfig } from '../kshetra/config';
 import type { Scheduler } from '../sthapathi/index';
 import type { WorkerRuntime } from './worker-runtime';
 
-// runDrain wiring: it must RECORD the drain_finished outcome and then PUSH it
-// (final sync) before returning — the trial's outcome belongs in the git-tracked,
-// pushed ledger. These mocks isolate that glue from bd/git/agents.
+// runDrain wiring: it must RECORD the drain_finished outcome before returning,
+// and stop the timers last. These mocks isolate that glue from the engine/git/agents.
 
 const KSHETRA: KshetraConfig = {
   id: 'myapp', name: 'Myapp',
   repo: { path: '/p', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/pb', remote: '', mode: 'embedded' },
+  project: '00000000-0000-0000-0000-000000000001',
   stack: { language: 'typescript' }, conventions: {},
   agents: { model: 'm', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
@@ -43,8 +42,7 @@ function fakeDriver(openInScope: string[]): DrainDriver {
     kshetra: KSHETRA,
     scheduler: { runCycle: vi.fn(async () => 'no-work' as const) } as unknown as Scheduler,
     hooks: {} as WorkerRuntime['hooks'],
-    startup: vi.fn(async () => 0),
-    sync: vi.fn(async () => { order.push('sync'); }),
+    startup: vi.fn(async () => {}),
     startTimers: () => () => { order.push('stopTimers'); },
     sweepEpics: vi.fn(async () => { order.push('sweepEpics'); return []; }),
     isInFlight: () => false,
@@ -122,23 +120,20 @@ describe('runDrain', () => {
     await expect(runDrain('ghost', {}, async () => fakeDriver([]))).rejects.toThrow('Kshetra not found: ghost');
   });
 
-  it('records drain_finished and PUSHES it (final sync) before returning — complete', async () => {
+  it('records drain_finished before returning, then stops the timers — complete', async () => {
     const result = await runDrain('myapp', { intervalMs: 1 }, async () => fakeDriver([]), async () => {});
     expect(result).toMatchObject({ exitCode: 0, reason: 'complete', lotId: 'lot-xyz', counts: { merged: 3, open: 0 } });
     expect(mockEmit).toHaveBeenCalledWith(expect.objectContaining({ type: 'drain_finished', reason: 'complete' }));
-    // Ordering: the drain_finished emit precedes the FINAL sync that pushes it.
-    const lastSync = order.lastIndexOf('sync');
-    expect(order.indexOf('emit:drain_finished')).toBeLessThan(lastSync);
+    // Ordering: the drain_finished emit precedes stopping the timers.
+    expect(order.indexOf('emit:drain_finished')).toBeLessThan(order.lastIndexOf('stopTimers'));
   });
 
-  it('sweeps complete epics at drain exit, before drain_finished and its final sync (Shreni-beads-q08)', async () => {
+  it('sweeps complete epics at drain exit, before drain_finished (Shreni-beads-q08)', async () => {
     const driver = fakeDriver([]);
     await runDrain('myapp', { intervalMs: 1, epic: 'epic-1' }, async () => driver, async () => {});
     expect(driver.runtime.sweepEpics).toHaveBeenCalledTimes(1);
-    // The epic close rides the FINAL sync that pushes drain_finished.
     expect(order.indexOf('sweepEpics')).toBeGreaterThanOrEqual(0);
     expect(order.indexOf('sweepEpics')).toBeLessThan(order.indexOf('emit:drain_finished'));
-    expect(order.indexOf('sweepEpics')).toBeLessThan(order.lastIndexOf('sync'));
   });
 
   it('does NOT sweep epics when a signal ends the drain (state is left to recovery)', async () => {
@@ -164,8 +159,8 @@ describe('runDrain', () => {
 
   // --max-cycles (Shreni-beads-nhw): the cap drives the loop through the injected
   // driver and the FULL exit sequence still runs — classification, exit code,
-  // drain_finished (carrying the cap), then the final sync that pushes it.
-  it('--max-cycles caps the loop and still records + pushes drain_finished', async () => {
+  // drain_finished (carrying the cap).
+  it('--max-cycles caps the loop and still records drain_finished', async () => {
     const driver = fakeDriver(['b2']);
     (driver.classify as ReturnType<typeof vi.fn>).mockImplementation(async (ids: string[]) =>
       ids.map(id => ({ beadId: id, category: 'ready-but-unworked' as const, reason: 'READY BUT UNWORKED' })));
@@ -181,7 +176,6 @@ describe('runDrain', () => {
       type: 'drain_finished', reason: 'capped', exitCode: 12, maxCycles: 3,
       stalled: [{ beadId: 'b2', reason: 'ready — not reached before the --max-cycles cap' }],
     }));
-    expect(order.indexOf('emit:drain_finished')).toBeLessThan(order.lastIndexOf('sync'));
     expect(order.at(-1)).toBe('stopTimers');
   });
 

@@ -2,8 +2,8 @@ import { sql } from 'kysely';
 import type { ProjectHandle, Task } from '../../taskgraph';
 import type { ShreniClient } from '../db/client';
 import type { KshetraConfig } from '../../kshetra/config';
-import { bd } from '../../sthapathi/beads';
-import { engineStore } from '../../sthapathi/task-store';
+import { registeredStore } from '../../sthapathi/task-store';
+import { requireProject } from '../../kshetra/config';
 import { openKshetraEngine } from './connect';
 import { PR_NEEDS_FOLLOWUP_LABEL } from '../../sthapathi/pr-followup';
 import { taskLifecycle } from '../lifecycle/lifecycle';
@@ -25,13 +25,12 @@ export interface TrackerReads {
   show(id: string): Promise<string>;
   /** The task's direct children. */
   children(id: string): Promise<string>;
-  /** The project's last event id, its version for lot manifests and snapshots; null on beads. */
+  /** The project's last event id, its version for lot manifests and snapshots. */
   lastEventId(): Promise<string | null>;
   /**
    * What people did on tasks, oldest first, in the shape of beads'
    * interactions.jsonl: every event by a developer, and the interactions the
-   * importer kept from beads (BEADS_INTERACTION_EVENT). Empty on beads, where
-   * the report reads the file.
+   * importer kept from beads (BEADS_INTERACTION_EVENT).
    */
   interactions(): Promise<{ created_at: string; issue_id: string; kind: string; actor: string }[]>;
 }
@@ -195,36 +194,23 @@ export function engineReads(shreni: ShreniClient, tg: ProjectHandle): TrackerRea
   };
 }
 
-/** bd's reads, for a Kshetra still on beads. */
-function bdReads(kshetra: KshetraConfig): TrackerReads {
-  const c = bd(kshetra);
-  return {
-    list: (f = {}) => c.list({ ...(f.status ? { status: f.status } : {}), ...(f.label ? { label: f.label } : {}), ...(f.type ? { type: f.type } : {}) }),
-    ready: () => c.ready(),
-    show: id => c.show(id),
-    children: id => c.children(id),
-    lastEventId: async () => null,
-    interactions: async () => [],
-  };
-}
-
 /**
- * Runs `fn` with the Kshetra's reads: the engine's when it names an engine
- * project (the worker's own connection when it is open in this process, else
- * one opened for the call and closed after), else bd's.
+ * Runs `fn` with the Kshetra's reads on the engine: the worker's own
+ * connection when it is open in this process, else one opened for the call and
+ * closed after. A Kshetra with no project throws, naming `shreni migrate`.
  */
 export async function withTrackerReads<T>(
   kshetra: KshetraConfig, fn: (r: TrackerReads) => Promise<T>,
   /** Keep the connection for later calls (a long-lived reader such as Phalaka). */
   opts: { shared?: boolean } = {},
 ): Promise<T> {
-  if (!kshetra.project) return fn(bdReads(kshetra));
-  const reads = engineStore(kshetra)?.reads;
+  const project = requireProject(kshetra);
+  const reads = registeredStore(kshetra)?.reads;
   if (reads) return fn(reads);
   if (opts.shared) return fn(await sharedReads(kshetra));
   const conn = await openKshetraEngine(kshetra, { name: 'shreni-read' });
   try {
-    return await fn(engineReads(conn.shreni, conn.shreni.tg.project(kshetra.project)));
+    return await fn(engineReads(conn.shreni, conn.shreni.tg.project(project)));
   } finally {
     // A failed close doesn't turn a good read into a failure.
     await conn.close().catch(() => {});

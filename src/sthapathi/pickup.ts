@@ -1,16 +1,14 @@
 import { z } from 'zod';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
-import { bd, syncBeads } from './beads.js';
 import { git } from './git.js';
 import { checkBaseBranch } from './base-branch.js';
 import { checkHealth, ensureHealthBead, isHealthBead } from './health.js';
 import { emit } from './activity-log.js';
 import { isAblated } from '../kshetra/ablation.js';
 import { REPO_MAP_RELATIVE_PATH } from '../kshetra/repo-map.js';
-import { loadState, pauseKshetra, recordProgress, recordStall, MISSING_BASE_BRANCH_REASON } from '../kshetra/state.js';
+import { loadState, pauseKshetra, recordStall, MISSING_BASE_BRANCH_REASON } from '../kshetra/state.js';
 import { appendNotification } from './notifications.js';
-import { hasOpenChildren } from './epics.js';
 
 // Re-exported for back-compat: .4 first exported this from pickup, and the
 // approval CLI (.5) imports it here. The definition now lives in state.js (see
@@ -22,10 +20,8 @@ export { MISSING_BASE_BRANCH_REASON };
 // may still exist in a Kshetra's DB, so Sthapathi keeps filtering them out of
 // its pickup queue rather than trying to "work" one.
 const SUTHRADHARA_SESSION_TYPE = 'suthradhara-session';
-// An epic is a CONTAINER, never executable work (Shreni-beads-q08). Working one
-// made Silpi implement children under the epic's id (then again as themselves)
-// and then bd refused the close ("cannot close epic: open children"), pausing the
-// kshetra. Sthapathi closes an epic itself once its children finish (epics.ts).
+// An epic is a CONTAINER, never executable work (Shreni-beads-q08); the engine
+// settles it once its children finish.
 const EPIC_TYPE = 'epic';
 
 export class PreFlightError extends Error {
@@ -67,14 +63,14 @@ const BeadsIssueSchema = z.object({
   status: z.string(),
   description: z.string().optional(),
   notes: z.string().optional(),
-  // bd names this `issue_type` in --json output. Optional so a source that omits
-  // it still parses; pickNext uses it to drop suthradhara-session beads (§9.1).
+  // The reads name this `issue_type`. Optional so a source that omits it still
+  // parses; rankCandidates uses it to drop epics and suthradhara-session tasks.
   issue_type: z.string().optional(),
 });
 
-// Deterministic slug from a bead title — the same function that names bead
-// branches at creation, exported so reconcilePullRequests can reconstruct a
-// bead's branch name from its title (bd list --json carries no slug field).
+// Deterministic slug from a task title — the same function that names task
+// branches at creation, exported so reconcile can reconstruct a task's branch
+// name from its title (the task rows carry no slug field).
 export function toSlug(title: string): string {
   return title
     .toLowerCase()
@@ -110,74 +106,13 @@ export function parseReadyOutput(raw: string): Task[] {
   return tasks;
 }
 
-// Stable sort: P0 first, then preserve arrival order (FIFO) within same priority.
-//
-// QUEUE ISOLATION (ARD §9.1): a `suthradhara-session` bead is Suthradhara's own
-// tracking spine — never executable work — so it must never be handed to a
-// Silpi. Its type is set at the bead's creation, so this filter excludes it from
-// the very first instant, even during the sub-second window before the server
-// marks it in_progress (the structural half of isolation, which keeps it out of
-// the unclaimed `bd ready` pool). Filtering HERE, in pickNext, is the load-
-// bearing, race-proof guarantee and is asserted directly by test. This is the
-// single Suthradhara-driven touch to Sthapathi — a selection-path line, not a
-// state-machine change (§13.1).
-//
-// EPICS (Shreni-beads-q08) are excluded the same way and for the same reason: an
-// epic is a container, never work. `bd ready` DOES list epics (the ready() call
-// passes --exclude-type=epic as a belt), but this filter is the authoritative,
-// race-proof guard and is asserted directly by test (via pickNext).
+// What pickup would select from a list of task rows, best first: epics and
+// suthradhara-session tasks are never work. Stable sort: P0 first, then arrival
+// order (FIFO) within a priority. drain's exit classification reads it.
 export function rankCandidates(tasks: Task[]): Task[] {
   return tasks
     .filter(t => t.type !== SUTHRADHARA_SESSION_TYPE && t.type !== EPIC_TYPE)
     .sort((a, b) => a.priority - b.priority);
-}
-
-// The type filter alone (no structural children check) — a pure, synchronous view
-// kept for the queue-isolation tests. Production pickup uses pickNextWorkable.
-export function pickNext(tasks: Task[]): Task | null {
-  return rankCandidates(tasks)[0] ?? null;
-}
-
-// Structural guard (q08): rankCandidates' type filter trusts the bead's type, but a
-// parent filed with the wrong type (Suthradhara once filed epics as `feature`)
-// would slip through. So the candidate about to be picked is also checked for
-// OPEN children — whatever its type — and skipped in favour of the next one if it
-// has any. One bd lookup per candidate actually considered (usually one).
-// A lookup that FAILS skips the candidate too (logged): working a parent is the
-// failure this guard exists to prevent, and bd errors here are transient — the
-// next poll re-evaluates it. If NO candidate was workable and any lookup failed,
-// the error is rethrown rather than reported as an empty queue.
-// This — not pickNext — is what production pickup (selectNext) calls.
-const parentSkipLogged = new Set<string>();
-
-export async function pickNextWorkable(kshetra: KshetraConfig, tasks: Task[]): Promise<Task | null> {
-  let lookupError: unknown;
-  for (const task of rankCandidates(tasks)) {
-    let parent: boolean;
-    try {
-      parent = await hasOpenChildren(kshetra, task.id);
-    } catch (err) {
-      lookupError = err;
-      console.warn(`[shreni pickup:${kshetra.id}] skipping ${task.id}: children lookup failed — ${(err as Error).message}`);
-      continue;
-    }
-    if (parent) {
-      // Logged once per bead per process, not every 30s poll.
-      const key = `${kshetra.id}:${task.id}`;
-      if (!parentSkipLogged.has(key)) {
-        parentSkipLogged.add(key);
-        console.log(`[shreni pickup:${kshetra.id}] skipping ${task.id} (${task.type ?? 'untyped'}): it has open children — a parent is never worked`);
-      }
-      continue;
-    }
-    return task;
-  }
-  // Nothing workable, but a lookup FAILED: that is a bd error, not an empty queue.
-  // Rethrow so the cycle takes the error path (as a failing `bd ready` does) —
-  // returning null would read as 'no-work' and let a drain exit 'drained' on a
-  // transient bd hiccup.
-  if (lookupError !== undefined) throw lookupError;
-  return null;
 }
 
 export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promise<void> {
@@ -189,7 +124,7 @@ export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promis
   // value that was never pushed — the checkout(main) + pull below fail
   // cryptically on EVERY poll. Detect it up front, pause the Kshetra for
   // operator approval (idempotent — one notification, not one per poll), and
-  // abort the cycle cleanly via PreFlightError (prepareTask returns null).
+  // abort the cycle cleanly via PreFlightError (the claim is given back).
   const { exists } = await checkBaseBranch(kshetra, g);
   if (!exists) {
     pauseForMissingBaseBranch(kshetra, main);
@@ -224,26 +159,7 @@ export async function preFlightCheck(task: Task, kshetra: KshetraConfig): Promis
   }
 }
 
-// SELECT (read-only). Picks the highest-priority ready bead. Performs NO git ops
-// and NO claim, so it is safe to call on every poll — the scheduler only commits
-// to mutating the work tree once it advances a selected task into PREPARE. This
-// separation is what stops a poll from checking out main under an in-flight agent
-// (see the Sthapathi workflow design §4.2).
-export async function selectNext(
-  kshetra: KshetraConfig,
-  // Optional scope filter (epic 7h3 / Study B3): `shreni drain --epic <id>` passes
-  // a predicate so only ready beads inside the epic's subtree are picked. Applied
-  // to the ready LIST before pickNext, so an out-of-scope higher-priority bead
-  // never masks an in-scope one. Omitted everywhere else — the daemon works the
-  // whole ready queue.
-  inScope?: (task: Task) => boolean,
-): Promise<Task | null> {
-  const raw = await bd(kshetra).ready();
-  const tasks = parseReadyOutput(raw);
-  return pickNextWorkable(kshetra, inScope ? tasks.filter(inScope) : tasks);
-}
-
-// The health gate (shared by the bd and engine paths): true when the task may
+// The health gate: true when the task may
 // start. On a red base it queues the repair task, records the stall and
 // returns false, unless enforcement is ablated.
 export async function healthGate(task: Task, kshetra: KshetraConfig): Promise<boolean> {
@@ -298,63 +214,4 @@ export class BaseRedError extends PreFlightError {
 export async function preFlightFresh(task: Task, kshetra: KshetraConfig): Promise<void> {
   await preFlightCheck(task, kshetra);
   if (!(await healthGate(task, kshetra))) throw new BaseRedError(task);
-}
-
-// PREPARE (the ONLY mutator in the pickup path) + bd claim. Syncs beads, runs
-// preFlightCheck (checkout main, pull, branch guard) and the health gate, then
-// claims. Returns the task when it is ready to work, or null when preflight
-// rejects or the base suite is red — both logged, so a wedge is never silent.
-export async function prepareTask(task: Task, kshetra: KshetraConfig): Promise<Task | null> {
-  if (task.followup) return prepareFollowup(task, kshetra);
-  await syncBeads(kshetra);
-  try {
-    await preFlightCheck(task, kshetra);
-  } catch (err) {
-    if (err instanceof PreFlightError) {
-      // Surface the rejection — otherwise a leftover branch or persistently
-      // dirty tree wedges the worker silently, returning null on every poll
-      // with no clue why nothing is progressing. Record the stall so the
-      // watchdog trips if the same rejection repeats.
-      recordStall(kshetra, `preflight: ${err.message}`);
-      console.warn(`[shreni prepare:${kshetra.id}] preflight rejected ${task.id}: ${err.message}`);
-      return null;
-    }
-    throw err;
-  }
-
-  if (!(await healthGate(task, kshetra))) return null;
-
-  await bd(kshetra).claim(task.id);
-  // Forward progress: a bead was successfully claimed — clear any stall counter.
-  recordProgress(kshetra);
-  return task;
-}
-
-// PREPARE for a PR follow-up bead (epic hjw). Unlike a fresh task this bead is
-// already in_progress + awaiting-merge with an existing branch and open PR, so
-// there is NO claim, NO fresh-work preFlightCheck (which branches from main and
-// rejects an existing branch), and NO health gate (a pickup-only precondition for
-// admitting NEW work). Instead: sync beads, then adopt the PR head — fetch
-// origin/<branch> and hard-reset the local branch to it. The reset makes any
-// commits a collaborator pushed the new base (the "foreign commit" trigger
-// becomes a re-sync, ARD §4.2) and guarantees the fix builds on the real PR head,
-// even if RECOVER dropped the stale local branch (checkout DWIMs it from origin).
-async function prepareFollowup(task: Task, kshetra: KshetraConfig): Promise<Task | null> {
-  await syncBeads(kshetra);
-  const g = git(kshetra);
-  const branch = `bead-${task.id}/${task.slug}`;
-  try {
-    await g.fetch('origin', branch);
-    await g.checkout(branch);
-    await g.resetHard(`origin/${branch}`);
-  } catch (err) {
-    // The branch/PR is gone or unreachable — cannot follow up this cycle. Record
-    // the stall (so a persistent failure trips the watchdog) and idle; the next
-    // reconcile re-evaluates the PR's terminal state.
-    recordStall(kshetra, `pr-followup prepare: ${(err as Error).message}`);
-    console.warn(`[shreni prepare:${kshetra.id}] pr-followup prepare failed for ${task.id}: ${(err as Error).message}`);
-    return null;
-  }
-  recordProgress(kshetra);
-  return task;
 }

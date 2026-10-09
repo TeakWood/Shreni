@@ -56,7 +56,7 @@ async function loadUniversalSkills(): Promise<string> {
 // set the orchestrator injects here is what `shreni export --with-context` writes
 // beside a plan file (Study C1.3), with no chance of the two drifting apart — the
 // study's BARE baseline is only argued in good faith if it gets the same inputs.
-// Project memory (bd prime) is deliberately NOT here: it accumulates DURING a run
+// Project memory (the tracker's prime) is deliberately NOT here: it accumulates DURING a run
 // and feeds later beads, so it is dynamic state under test, not a static input.
 export interface StaticAgentContext {
   universalSkills: string;
@@ -89,19 +89,19 @@ export function gateLedgerVerdict(g: GateResult): 'pass' | 'fail' | 'warn' | 'sk
 }
 
 export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Promise<AgentContext> {
-  const bdClient = trackerFor(kshetra);
+  const tracker = trackerFor(kshetra);
 
   // Injection flip (the agent-execution design §3.1): the provider CLI now loads the
   // repo's own config natively (instruction file, `.claude/` skills/rules/
   // subagents, per-dir CLAUDE.md, the @-imported conventions docs), so Shreni no
   // longer reads-and-injects any of that — doing so would double-load. Shreni
-  // injects only what has no repo-native home: bd's workflow context, the task
+  // injects only what has no repo-native home: the project's memories, the task
   // details + acceptance criteria, the cross-project universalSkills, and the
   // reviewer-only reviewGuide (§3.3 — no provider has a reviewer-only native
   // file, so this one stays Shreni-injected).
   const [projectMemory, taskDetails, staticCtx] = await Promise.all([
-    bdClient.prime(),
-    bdClient.show(task.id),
+    tracker.prime(),
+    tracker.show(task.id),
     loadStaticAgentContext(kshetra),
   ]);
   const { universalSkills, reviewGuide, repoMap } = staticCtx;
@@ -131,18 +131,18 @@ export async function runSilpiSafe(
   branch: string,
   feedback?: ViharapalaOutput | null,
 ): Promise<SilpiOutput> {
-  const bdClient = trackerFor(kshetra);
-  await bdClient.addNote(task.id, `Round ${round}: dispatching Silpi`);
+  const tracker = trackerFor(kshetra);
+  await tracker.addNote(task.id, `Round ${round}: dispatching Silpi`);
   try {
     const output = await withRetry(`Silpi r${round}`, () => runSilpi(context, round, feedback, branch));
-    await bdClient.addNote(task.id, `Round ${round}: Silpi submitted`);
+    await tracker.addNote(task.id, `Round ${round}: Silpi submitted`);
     return output;
   } catch (err) {
     if (err instanceof ParseError) {
-      await bdClient.addNote(task.id, `Round ${round}: Silpi output malformed — ${err.message}`);
+      await tracker.addNote(task.id, `Round ${round}: Silpi output malformed — ${err.message}`);
       throw new AgentError('MALFORMED_OUTPUT', { task, round, cause: err });
     }
-    await bdClient.addNote(task.id, `Round ${round}: Silpi failed after retries — ${(err as Error).message}`);
+    await tracker.addNote(task.id, `Round ${round}: Silpi failed after retries — ${(err as Error).message}`);
     throw new AgentError('API_FAILURE', { task, round, cause: err });
   }
 }
@@ -155,20 +155,20 @@ export async function runViharapalaSafe(
   round: number,
   branch: string,
 ): Promise<ViharapalaOutput> {
-  const bdClient = trackerFor(kshetra);
-  await bdClient.addNote(task.id, `Round ${round}: dispatching Viharapala`);
+  const tracker = trackerFor(kshetra);
+  await tracker.addNote(task.id, `Round ${round}: dispatching Viharapala`);
   try {
     const output = await withRetry(`Viharapala r${round}`, () =>
       runViharapala(context, silpiOut, round, context.taskDetails, branch),
     );
-    await bdClient.addNote(task.id, `Round ${round}: ${output.verdict}`);
+    await tracker.addNote(task.id, `Round ${round}: ${output.verdict}`);
     return output;
   } catch (err) {
     if (err instanceof ParseError) {
-      await bdClient.addNote(task.id, `Round ${round}: Viharapala output malformed — ${err.message}`);
+      await tracker.addNote(task.id, `Round ${round}: Viharapala output malformed — ${err.message}`);
       throw new AgentError('MALFORMED_OUTPUT', { task, round, cause: err });
     }
-    await bdClient.addNote(task.id, `Round ${round}: Viharapala failed after retries — ${(err as Error).message}`);
+    await tracker.addNote(task.id, `Round ${round}: Viharapala failed after retries — ${(err as Error).message}`);
     throw new AgentError('API_FAILURE', { task, round, cause: err });
   }
 }
@@ -209,7 +209,7 @@ export async function runSilpiViharapalaLoop(
     return runHealthRepairLoop(kshetra, task, signal);
   }
 
-  const bdClient = trackerFor(kshetra);
+  const tracker = trackerFor(kshetra);
   let round = 0;
   let feedback: ViharapalaOutput | null = null;
   let lastSilpiOut: SilpiOutput | null = null;
@@ -305,13 +305,13 @@ export async function runSilpiViharapalaLoop(
     }
 
     for (const insight of silpiOut.insights) {
-      await bdClient.remember(insight);
+      await tracker.remember(insight);
     }
 
     // Failing warn gates never block, but they are surfaced on the bead so a
     // human (and the next round's prompt context) can see them.
     if (gates.warnings.length > 0) {
-      await bdClient.addNote(
+      await tracker.addNote(
         task.id,
         `Round ${round}: gate warnings (non-blocking) — ${gates.warnings.map(w => w.reason).join(' | ')}`,
       );
@@ -319,7 +319,7 @@ export async function runSilpiViharapalaLoop(
 
     if (!gates.passed) {
       const failed = gates.blockers.map(b => b.gate).join(', ');
-      await bdClient.addNote(task.id, `Round ${round}: gates failed (${failed})`);
+      await tracker.addNote(task.id, `Round ${round}: gates failed (${failed})`);
       lastRejectSource = 'tests';
       feedback = {
         verdict: 'REJECT',
@@ -342,7 +342,7 @@ export async function runSilpiViharapalaLoop(
       // Honor a mid-round self-heal abort before merging, matching the normal
       // path's pre-review throwIfAborted.
       throwIfAborted(signal);
-      await bdClient.addNote(task.id, `Round ${round}: merged WITHOUT review (ablation: review)`);
+      await tracker.addNote(task.id, `Round ${round}: merged WITHOUT review (ablation: review)`);
       emit({ type: 'review_ablated', kshetra: kshetra.id, beadId: task.id, round, ablations: ['review'] });
       emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
       recordProgress(kshetra);
@@ -362,7 +362,7 @@ export async function runSilpiViharapalaLoop(
       return { approved: true, note: `Round ${round} — review ablated, merged` };
     }
 
-    await bdClient.addNote(task.id, `Round ${round}: submitted for review`);
+    await tracker.addNote(task.id, `Round ${round}: submitted for review`);
 
     throwIfAborted(signal);
     emit({ type: 'round_start', kshetra: kshetra.id, beadId: task.id, round, agent: 'viharapala' });
@@ -380,10 +380,10 @@ export async function runSilpiViharapalaLoop(
     });
 
     for (const insight of feedback.insights) {
-      await bdClient.remember(insight);
+      await tracker.remember(insight);
     }
 
-    await bdClient.addNote(task.id, `Round ${round}: ${feedback.verdict}`);
+    await tracker.addNote(task.id, `Round ${round}: ${feedback.verdict}`);
 
     if (feedback.verdict === 'APPROVE') {
       emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
@@ -408,7 +408,7 @@ export async function runSilpiViharapalaLoop(
     lastRejectSource === 'tests'
       ? "task's own tests/lint kept failing"
       : 'Viharapala kept rejecting';
-  await bdClient.flag(task.id, `Blocked after ${round} rounds — ${cause}.`);
+  await tracker.flag(task.id, `Blocked after ${round} rounds — ${cause}.`);
   return { approved: false, note: `Blocked after ${round} rounds (${lastRejectSource ?? 'unknown'})` };
 }
 
@@ -422,7 +422,7 @@ export async function runHealthRepairLoop(
   task: Task,
   signal?: AbortSignal,
 ): Promise<{ approved: boolean; note: string }> {
-  const bdClient = trackerFor(kshetra);
+  const tracker = trackerFor(kshetra);
   let round = 0;
   let feedback: ViharapalaOutput | null = null;
   let lastSilpiOut: SilpiOutput | null = null;
@@ -434,7 +434,7 @@ export async function runHealthRepairLoop(
 
   // Failures on the branch before any repair work — the bar each round must beat.
   let prevFailCount = (await measureHealth(kshetra)).failCount;
-  await bdClient.addNote(task.id, `Repair start: ${prevFailCount} failing`);
+  await tracker.addNote(task.id, `Repair start: ${prevFailCount} failing`);
 
   while (round < kshetra.agents.maxRoundsPerBead) {
     round++;
@@ -445,7 +445,7 @@ export async function runHealthRepairLoop(
     const silpiOut = await runSilpi(context, round, feedback, branch, signal);
     lastSilpiOut = silpiOut;
     for (const insight of silpiOut.insights) {
-      await bdClient.remember(insight);
+      await tracker.remember(insight);
     }
 
     const offBranch = await guardAfterAgent(kshetra, task, guard, round);
@@ -466,7 +466,7 @@ export async function runHealthRepairLoop(
     });
 
     if (health.green) {
-      await bdClient.addNote(task.id, `Round ${round}: suite green — merging`);
+      await tracker.addNote(task.id, `Round ${round}: suite green — merging`);
       emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: true, rounds: round });
       recordProgress(kshetra); // suite restored to green is forward progress (the design §3.2)
       // Health-repair beads ALWAYS merge to main directly, regardless of
@@ -480,14 +480,14 @@ export async function runHealthRepairLoop(
     }
 
     if (health.failCount >= 0 && health.failCount < prevFailCount) {
-      await bdClient.addNote(
+      await tracker.addNote(
         task.id,
         `Round ${round}: progress ${prevFailCount} -> ${health.failCount} failing`,
       );
       prevFailCount = health.failCount;
       feedback = repairFeedback(health.failCount, true);
     } else {
-      await bdClient.addNote(task.id, `Round ${round}: no progress (${health.failCount} failing)`);
+      await tracker.addNote(task.id, `Round ${round}: no progress (${health.failCount} failing)`);
       feedback = repairFeedback(health.failCount, false);
     }
   }
@@ -497,7 +497,7 @@ export async function runHealthRepairLoop(
   void lastSilpiOut;
   setHealthBaseline(kshetra, prevFailCount);
   emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: false, rounds: round });
-  await bdClient.flag(
+  await tracker.flag(
     task.id,
     `[needs-human] Could not restore green after ${round} rounds — ` +
       `${prevFailCount} failing test(s) quarantined as the accepted baseline. ` +
@@ -523,10 +523,10 @@ function repairFeedback(failCount: number, progress: boolean): ViharapalaOutput 
 }
 
 /**
- * On the engine, records on the attempt that the task's acceptance checks
- * passed: the gates ran green and the reviewer approved. finish's checksPassed
- * guard reads it (policy spec, "The lifecycle"). Nothing to do on bd.
+ * Records on the attempt that the task's acceptance checks passed: the gates
+ * ran green and the reviewer approved. finish's checksPassed guard reads it
+ * (policy spec, "The lifecycle").
  */
 async function recordGatesPassed(kshetra: KshetraConfig, task: Task): Promise<void> {
-  await engineStore(kshetra)?.recordAcceptance(task.id, true);
+  await engineStore(kshetra).recordAcceptance(task.id, true);
 }

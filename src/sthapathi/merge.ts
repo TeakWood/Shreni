@@ -1,33 +1,19 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task, SilpiOutput, ViharapalaOutput } from './types.js';
-import { bd, syncBeads, parseAcceptanceCriteria } from './beads.js';
+import { parseAcceptanceCriteria } from './task-json.js';
 import { git, GitError } from './git.js';
 import { gh } from './gh.js';
 import { branchName } from './branch.js';
-import { toSlug } from './pickup.js';
 import { pauseKshetra, clearBeadAttempts } from '../kshetra/state.js';
 import { notifyOperator } from './errors.js';
 import { dispatchParikshakaAsync } from './parikshaka-dispatch.js';
 import { regenerateRepoMapAsync } from '../kshetra/repo-map.js';
 import { getEntitlements } from '../ext/index.js';
 import { emit } from './activity-log.js';
-import { closeParentEpicIfComplete, AWAITING_MERGE_LABEL } from './epics.js';
-import { engineStore, type EngineTaskStore } from './task-store.js';
+import { engineStore, trackerFor, type EngineTaskStore } from './task-store.js';
 import { nowMs, elapsedMs } from './timing.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
-import {
-  resolvePrFollowup,
-  detectPrFeedback,
-  readWatermark,
-  PR_NEEDS_FOLLOWUP_LABEL,
-} from './pr-followup.js';
-
-// Label marking a bead whose approved work is on a PR awaiting a human merge
-// (mergePolicy 'pr'). The bead stays open + in_progress so bd dependents stay
-// blocked; reconcilePullRequests keys on this label, and RECOVER excludes it so
-// a deferred bead is never reopened and re-worked on restart.
-// (Defined in epics.ts, which needs it too; re-exported here for existing callers.)
-export { AWAITING_MERGE_LABEL };
+import { resolvePrFollowup, detectPrFeedback } from './pr-followup.js';
 
 // Resolve the effective merge policy: SHRENI_MERGE_POLICY overrides the config
 // (the "+CLI override" from yds.9/3r2 — set it in the environment `shreni start`
@@ -60,7 +46,7 @@ function buildCommitMessage(task: Task, output: SilpiOutput): string {
 // commit message has no room for this, but a PR body does, so only the PR
 // carries the extra context.
 //
-// taskDetails is the raw `bd show <id> --json` payload (the same bundle
+// taskDetails is the tracker's show payload for the task (the same bundle
 // Viharapala reviewed against). We render ONLY the acceptance_criteria field
 // parsed out of it — dumping the whole JSON blob would be mislabeled (it carries
 // the full bead + every dependency) and, being pretty-printed JSON, would mangle
@@ -97,12 +83,13 @@ async function rebaseBranchOnMain(
 ): Promise<void> {
   const g = git(kshetra);
   const main = kshetra.repo.mainBranch;
-  await bd(kshetra).addNote(task.id, 'main has new commits — attempting rebase before merge');
+  const tracker = trackerFor(kshetra);
+  await tracker.addNote(task.id, 'main has new commits — attempting rebase before merge');
   try {
     await g.checkout(branch);
     await g.rebase(`origin/${main}`);
     await g.checkout(main);
-    await bd(kshetra).addNote(task.id, 'rebase onto main succeeded');
+    await tracker.addNote(task.id, 'rebase onto main succeeded');
   } catch (err) {
     await g.rebase('--abort');
     await g.checkout(main);
@@ -119,7 +106,7 @@ export async function safePush(kshetra: KshetraConfig, task: Task): Promise<void
     const msg = (pushErr as Error).message ?? '';
     if (!msg.includes('non-fast-forward')) throw pushErr;
 
-    await bd(kshetra).addNote(
+    await trackerFor(kshetra).addNote(
       task.id,
       'push rejected (non-fast-forward) — pull-rebase and retrying',
     );
@@ -144,10 +131,10 @@ export async function handleMergeConflict(
 ): Promise<void> {
   const taskFiles = task.context?.relatedFiles ?? [];
   const outOfScope = conflictedFiles.filter(f => !taskFiles.includes(f));
-  const bdClient = bd(kshetra);
+  const tracker = trackerFor(kshetra);
 
   if (outOfScope.length > 0) {
-    await bdClient.flag(
+    await tracker.flag(
       task.id,
       `Merge conflict in files outside task scope: ${outOfScope.join(', ')}. ` +
         `Silpi may have drifted. Branch kept for inspection.`,
@@ -162,14 +149,14 @@ export async function handleMergeConflict(
   }
 
   if ((task.round ?? 0) < kshetra.agents.maxRoundsPerBead) {
-    await bdClient.addNote(
+    await tracker.addNote(
       task.id,
       `Merge conflict in task files — re-dispatching Silpi with conflict context. ` +
         `Conflicted: ${conflictedFiles.join(', ')}`,
     );
     // Phase 5: scheduleResumeWithConflictContext(kshetra, task, conflictedFiles)
   } else {
-    await bdClient.flag(
+    await tracker.flag(
       task.id,
       `Merge conflict after max rounds: ${conflictedFiles.join(', ')}`,
     );
@@ -217,10 +204,10 @@ export async function squashMergeAndClose(
   const g = git(kshetra);
   const main = kshetra.repo.mainBranch;
   const branch = branchName(task);
-  // On the engine: verify and extend the lease right before the merge, which is
-  // outside the database (policy spec, "Running work").
+  // Verify and extend the lease right before the merge, which is outside the
+  // database (policy spec, "Running work").
   const store = engineStore(kshetra);
-  if (store) await store.beforeMerge(task.id);
+  await store.beforeMerge(task.id);
 
   // Time the merge + push at the site (epic hto / Study A3).
   const mergeStart = nowMs();
@@ -237,8 +224,8 @@ export async function squashMergeAndClose(
   //
   // GUARDED (4a2.9): the merge is already committed + pushed by this point, so a
   // ledger-fold failure must never reject squashMergeAndClose — that would skip
-  // bd close, Parikshaka dispatch, clearBeadAttempts, syncBeads, and the branch
-  // cleanup below, leaving the bead open with its branch undeleted while the code
+  // finish, Parikshaka dispatch, clearBeadAttempts, and the branch cleanup
+  // below, leaving the task unfinished with its branch undeleted while the code
   // is already on main. Both the headSha() subprocess AND the emit are wrapped;
   // a headSha failure degrades the entry to no SHA rather than failing the merge.
   try {
@@ -269,17 +256,13 @@ export async function squashMergeAndClose(
   const note =
     `Merged: confidence=${output.confidenceScore} ` +
     `files=${output.filesChanged.length} — ${output.summary.slice(0, 120)}`;
-  if (store) {
-    // finish; the engine settles the parent container (children.settled). The
-    // change is already on main: if finish is refused, flag the task for a
-    // human rather than let it be released and worked again.
-    try {
-      await store.finish(task.id, note);
-    } catch (err) {
-      await store.flag(task.id, `merged to ${main} but finish failed: ${(err as Error).message}. Check it and finish by hand.`);
-    }
-  } else {
-    await bd(kshetra).close(task.id, note);
+  // finish; the engine settles the parent container (children.settled). The
+  // change is already on main: if finish is refused, flag the task for a
+  // human rather than let it be released and worked again.
+  try {
+    await store.finish(task.id, note);
+  } catch (err) {
+    await store.flag(task.id, `merged to ${main} but finish failed: ${(err as Error).message}. Check it and finish by hand.`);
   }
 
   // Activation signal (yds.5) — opt-in + anonymous, a no-op unless enabled.
@@ -287,15 +270,6 @@ export async function squashMergeAndClose(
 
   // The bead succeeded — clear any recovery attempt count it accumulated.
   clearBeadAttempts(kshetra, task.id);
-
-  if (!store) {
-    // Shreni-beads-q08: if this was the last open child of an epic, close the epic
-    // (epics are never worked, so nothing else would). Best-effort — never throws;
-    // a miss self-heals at the next startup/drain-exit sweep. Before syncBeads so
-    // the epic close rides the same sync.
-    await closeParentEpicIfComplete(kshetra, task.id);
-    await syncBeads(kshetra);
-  }
 
   // Force-delete: after `git merge --squash` the bead branch's commits are not
   // reachable as merge parents on main, so git treats it as "not fully merged"
@@ -305,10 +279,9 @@ export async function squashMergeAndClose(
 }
 
 // PR merge policy (3r2). On APPROVE, instead of squash-merging to main, push the
-// bead branch and open a PR, then DEFER: mark the bead awaiting-merge but leave
-// it open (in_progress) so bd dependents stay blocked until the code is on main.
-// The bead is closed later — only when its PR actually merges — by
-// reconcilePullRequests. Decouples "where code lands" from "when the next bead
+// task branch and open a PR, then DEFER: the task waits on its PR (dependents
+// stay blocked until the code is on main). It is finished later — only when its
+// PR actually merges — by reconcilePullRequests. Decouples "where code lands" from "when the next bead
 // starts" (the next READY bead branches from the unchanged main immediately).
 export async function openPrAndDefer(
   task: Task,
@@ -335,19 +308,13 @@ export async function openPrAndDefer(
   });
   const openDurationMs = elapsedMs(openStart);
 
-  if (store) {
-    // The PR goes on the attempt's evidence first: submit's hasOpenPr guard reads it.
-    // The PR exists now: if recording it fails, flag the task with the PR rather
-    // than let it be released and worked again (a second PR).
-    try {
-      await store.deferForPr(task.id, url);
-    } catch (err) {
-      await store.flag(task.id, `opened ${url} but could not record it: ${(err as Error).message}. Submit it by hand.`);
-    }
-  } else {
-    const bdClient = bd(kshetra);
-    await bdClient.addNote(task.id, `PR opened (awaiting merge): ${url}`);
-    await bdClient.addLabel(task.id, AWAITING_MERGE_LABEL);
+  // The PR goes on the attempt's evidence first: submit's hasOpenPr guard reads it.
+  // The PR exists now: if recording it fails, flag the task with the PR rather
+  // than let it be released and worked again (a second PR).
+  try {
+    await store.deferForPr(task.id, url);
+  } catch (err) {
+    await store.flag(task.id, `opened ${url} but could not record it: ${(err as Error).message}. Submit it by hand.`);
   }
 
   // Decision-grade (4a2.2): under mergePolicy 'pr' the landing decision is "open
@@ -364,176 +331,57 @@ export async function openPrAndDefer(
     durationMs: openDurationMs,
   });
 
-  if (!store) await syncBeads(kshetra);
-  // The bead branch is deliberately NOT deleted — the open PR needs it. It is
+  // The task branch is deliberately NOT deleted — the open PR needs it. It is
   // dropped when the PR merges (reconcilePullRequests). Parikshaka is likewise
   // deferred: it runs post-merge, so it fires from the reconcile path, not here.
 }
 
-interface AwaitingMergeBead {
-  id: string;
-  slug: string;
-  title: string;
-}
-
-// Parse `bd list --json` (awaiting-merge filter) into the id + reconstructed
-// slug needed to name each bead's branch. bd carries no slug field, so the slug
-// is rebuilt deterministically from the title via the same toSlug used to name
-// the branch at creation.
-export function parseAwaitingMerge(raw: string): AwaitingMergeBead[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const beads: AwaitingMergeBead[] = [];
-  for (const item of parsed as Record<string, unknown>[]) {
-    if (typeof item.id !== 'string' || typeof item.title !== 'string') continue;
-    beads.push({ id: item.id, title: item.title, slug: toSlug(item.title) });
-  }
-  return beads;
-}
-
-// bd refuses to close an epic while it still has open children:
-// `cannot close epic <id>: N open child issue(s); close children first ...`.
-// When an epic's own PR merges before its children land, reconcile must defer the
-// close rather than let bd throw — recognise that specific refusal here.
-function isEpicOpenChildrenError(err: unknown): boolean {
-  const msg = (err as Error)?.message ?? '';
-  return /cannot close epic/i.test(msg) && /open child/i.test(msg);
-}
-
-// Epics whose merged-PR close we've already deferred-and-logged, so a merged epic
-// with open children logs once (at info) rather than every reconcile pass.
-// Process-lifetime memory; keyed by "<kshetra>:<bead>". Reset in tests.
-const deferredEpicsLogged = new Set<string>();
-
-// Test-only: forget which deferred epics have been logged.
-export function resetDeferredEpicLog(): void {
-  deferredEpicsLogged.clear();
-}
-
-// Reconcile deferred PR beads (mergePolicy 'pr'). For each bead labelled
-// awaiting-merge, check its PR: MERGED → close the bead and drop the branch;
-// CLOSED-without-merge → block for a human and clear the marker; OPEN (or gh
+// Reconcile deferred PRs (mergePolicy 'pr'). For each task waiting on its PR,
+// check the PR: MERGED → finish the task (the engine settles its container)
+// and drop the branch; CLOSED-without-merge → flag it for a human; OPEN with
+// unaddressed feedback → reopen it boosted for a follow-up round; OPEN (or gh
 // unavailable) → leave it for a later pass. Read-mostly and gh-tolerant: any gh
 // failure degrades to "nothing to reconcile" rather than throwing. Intended to
 // run only when the worker is IDLE, so its branch deletes never race an
 // in-flight agent's work tree.
 export async function reconcilePullRequests(kshetra: KshetraConfig): Promise<void> {
   const store = engineStore(kshetra);
-  if (store) return reconcileOnEngine(kshetra, store);
-  const bdClient = bd(kshetra);
-
-  let raw: string;
-  try {
-    raw = await bdClient.list({ status: 'in_progress', label: AWAITING_MERGE_LABEL });
-  } catch (err) {
-    console.warn(`[shreni reconcile:${kshetra.id}] could not list awaiting-merge beads: ${(err as Error).message}`);
-    return;
-  }
-
-  const beads = parseAwaitingMerge(raw);
-  if (beads.length === 0) return;
-
+  const waiting = await store.listAwaitingMerge();
+  if (waiting.length === 0) return;
   const client = gh(kshetra.repo.path);
   const g = git(kshetra);
-
-  for (const bead of beads) {
-    const branch = branchName(bead);
-    const pr = await client.prView(branch);
-    if (!pr) continue;
-    if (pr.state === 'OPEN') {
-      // Active follow-up (epic hjw): an OPEN PR is no longer a no-op. When the
-      // policy is on, detect unaddressed feedback and stamp pr-needs-followup so
-      // the next scheduler tick routes the bead through the follow-up lifecycle.
-      // MERGED/CLOSED handling below is unchanged.
-      if (resolvePrFollowup(kshetra)) {
-        await detectAndStampFollowup(kshetra, bead, branch, client);
-      }
-      continue;
-    }
-
-    if (pr.state === 'MERGED') {
-      try {
-        await bdClient.close(bead.id, `Merged via PR: ${pr.url}`);
-      } catch (err) {
-        if (isEpicOpenChildrenError(err)) {
-          // Epic PR merged but children still open — bd won't close it yet. Keep
-          // the awaiting-merge label and defer; a later pass closes it (and drops
-          // the branch) once the children land. Log once at info instead of
-          // erroring — and throwing — every pass, which also aborted the rest of
-          // the reconcile loop.
-          const key = `${kshetra.id}:${bead.id}`;
-          if (!deferredEpicsLogged.has(key)) {
-            deferredEpicsLogged.add(key);
-            console.log(
-              `[shreni reconcile:${kshetra.id}] ${bead.id} epic PR merged but has open children — ` +
-              `deferring close until they land`,
-            );
-          }
-          continue;
-        }
-        throw err;
-      }
-      // Close succeeded — the epic's children (if any) are all done, or it had
-      // none. Any earlier deferral no longer applies.
-      deferredEpicsLogged.delete(`${kshetra.id}:${bead.id}`);
-      emitTelemetry('task_merged', { policy: 'pr' });
-      clearBeadAttempts(kshetra, bead.id);
-      // Shreni-beads-q08: the PR-path twin of squashMergeAndClose's epic close —
-      // this child landing may complete its epic. Best-effort, never throws; it
-      // rides the syncBeads below.
-      await closeParentEpicIfComplete(kshetra, bead.id);
-      // Drop the merged branch locally and (best-effort) on the remote — GitHub
-      // may already have auto-deleted the head branch, so ignore failures.
-      try {
-        await g.deleteBranch(branch, { force: true });
-      } catch { /* local branch already gone */ }
-      try {
-        await g.push('origin', '--delete', branch);
-      } catch { /* remote branch already gone (auto-delete) */ }
-      await syncBeads(kshetra);
-      console.log(`[shreni reconcile:${kshetra.id}] ${bead.id} merged via PR — closed`);
-    } else {
-      // CLOSED without merging: a human declined the PR. Clear the marker so it
-      // is not reconciled again, and block for review — the change did not land.
-      await bdClient.removeLabel(bead.id, AWAITING_MERGE_LABEL);
-      await bdClient.flag(
-        bead.id,
-        `PR closed without merging: ${pr.url}. The change did not land on ${kshetra.repo.mainBranch} — investigate manually.`,
-      );
-      await syncBeads(kshetra);
-      console.log(`[shreni reconcile:${kshetra.id}] ${bead.id} PR closed unmerged — blocked`);
+  for (const t of waiting) {
+    // One task's failure (a refused finish, a lost connection) mustn't hold up the rest.
+    try {
+      await reconcileOne(kshetra, store, t, client, g);
+    } catch (err) {
+      console.warn(`[shreni reconcile:${kshetra.id}] ${t.id}: ${(err as Error).message}`);
     }
   }
 }
 
 // Detection for the active follow-up loop (epic hjw), run on the 5-min reconcile
-// pass for an OPEN awaiting-merge PR. Reads the rich PR status + the bead's
-// watermark and, if there is unaddressed feedback (a new CHANGES_REQUESTED
-// review, a failing REQUIRED check, or a foreign commit), stamps
-// pr-needs-followup so selectFollowup routes the bead into the work slot. Stamps
-// only — the watermark is advanced by the FINALIZE step once the feedback is
-// addressed. gh-tolerant: a null status (unauthenticated / race to terminal
+// pass for an OPEN PR. Reads the rich PR status + the task's watermark and, if
+// there is unaddressed feedback (a new CHANGES_REQUESTED review, a failing
+// REQUIRED check, or a foreign commit), reopens the task boosted (followUp) so
+// it is claimed ahead of other work. The watermark is advanced by the FINALIZE
+// step once the feedback is addressed. gh-tolerant: a null status (unauthenticated / race to terminal
 // state) is a no-op this pass. Foreign-commit detection is disabled unless the
 // operator has declared repo.prFollowupSelfLogins (else we cannot tell our own
 // pushes apart and would loop on them).
 async function detectAndStampFollowup(
   kshetra: KshetraConfig,
-  bead: AwaitingMergeBead,
+  bead: { id: string },
   branch: string,
   client: ReturnType<typeof gh>,
-  /** The engine store reconcile started with; absent on bd. */
-  store?: EngineTaskStore,
+  /** The store reconcile started with. */
+  store: EngineTaskStore,
 ): Promise<void> {
   const status = await client.prStatus(branch);
   if (!status || status.state !== 'OPEN') return;
 
   const selfLogins = kshetra.repo.prFollowupSelfLogins;
-  const watermark = store ? await store.readWatermark(bead.id) : await readWatermark(kshetra, bead.id);
+  const watermark = await store.readWatermark(bead.id);
   const feedback = detectPrFeedback({
     // Suppress foreign-commit detection when we can't identify ourselves.
     status: selfLogins.length ? status : { ...status, commits: [] },
@@ -543,40 +391,16 @@ async function detectAndStampFollowup(
   });
   if (!feedback) return;
 
-  if (store) {
-    // followUp reopens it boosted, so it is claimed ahead of other ready work.
-    await store.needsFollowup(bead.id);
-  } else {
-    await bd(kshetra).addLabel(bead.id, PR_NEEDS_FOLLOWUP_LABEL);
-    await syncBeads(kshetra);
-  }
+  // followUp reopens it boosted, so it is claimed ahead of other ready work.
+  await store.needsFollowup(bead.id);
   console.log(
     `[shreni reconcile:${kshetra.id}] ${bead.id} PR has unaddressed feedback ` +
-      `(${feedback.triggers.join(', ')}) — stamped ${PR_NEEDS_FOLLOWUP_LABEL}`,
+      `(${feedback.triggers.join(', ')}) — reopened for a follow-up`,
   );
 }
-/**
- * reconcilePullRequests on the task graph engine: the tasks waiting on their
- * PR. A merged PR finishes the task (the engine settles its container); a PR
- * closed unmerged flags it; an open PR with unaddressed feedback reopens it
- * for a follow-up round, boosted.
- */
-async function reconcileOnEngine(kshetra: KshetraConfig, store: EngineTaskStore): Promise<void> {
-  const waiting = await store.listAwaitingMerge();
-  if (waiting.length === 0) return;
-  const client = gh(kshetra.repo.path);
-  const g = git(kshetra);
-  for (const t of waiting) {
-    // One task's failure (a refused finish, a lost connection) mustn't hold up the rest.
-    try {
-      await reconcileOneOnEngine(kshetra, store, t, client, g);
-    } catch (err) {
-      console.warn(`[shreni reconcile:${kshetra.id}] ${t.id}: ${(err as Error).message}`);
-    }
-  }
-}
 
-async function reconcileOneOnEngine(
+/** One task waiting on its PR. */
+async function reconcileOne(
   kshetra: KshetraConfig, store: EngineTaskStore, t: { id: string; title: string; slug: string },
   client: ReturnType<typeof gh>, g: ReturnType<typeof git>,
 ): Promise<void> {

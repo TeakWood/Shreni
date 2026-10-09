@@ -1,5 +1,5 @@
 import type { KshetraConfig } from '../kshetra/config';
-import { resolveAgentModel } from '../kshetra/config';
+import { requireProject, resolveAgentModel } from '../kshetra/config';
 import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
 import { resolveMcpConnection, McpConnectionError } from '../kshetra/mcp-connect';
@@ -10,11 +10,11 @@ import { KSHETRA_ENV, PLAN_ENV } from '../policy/suthradhara/filing';
 // (epic d3y). Unlike the old per-turn headless spawn (buildClaudeSpawn, removed
 // with the interview engine), this drops `-p`/`--output-format stream-json`: the
 // operator drives a real interactive Claude Code session that holds the
-// conversation itself and executes the completion protocol (files beads, writes
-// the doc, syncs beads, pushes the branch). The runner spawns it with inherited
+// conversation itself and executes the completion protocol (files the plan,
+// writes the doc, pushes the branch). The runner spawns it with inherited
 // stdio in the session worktree.
 //
-// TOOLS. This is a full session — it must Write the design doc and run bd/git —
+// TOOLS. This is a full session — it must Write the design doc and run shreni/git —
 // so there is NO `--allowedTools` whitelist and no grant-on-demand layer: the
 // operator is at the keyboard and approves Claude Code's own permission prompts.
 // The read-only/grant machinery the headless turns needed is gone.
@@ -59,9 +59,11 @@ export interface PlanningSessionOpts {
 // assemble the invocation without spawning a process.
 export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
   const { kshetra } = opts;
-  if (kshetra.project && !opts.planId) {
-    throw new SuthradharaSpawnError(`${kshetra.id} is on the task graph engine: a planning session needs the plan it files into`);
+  requireProject(kshetra);
+  if (!opts.planId) {
+    throw new SuthradharaSpawnError(`${kshetra.id}: a planning session needs the plan it files into`);
   }
+  const planId = opts.planId;
 
   // Connect every defined MCP server (secretEnv resolved into the child env). A
   // secretEnv naming an unset host var fails loud here, before the session
@@ -84,7 +86,7 @@ export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
     args.push('--session-id', opts.claudeSessionId);
     args.push('--append-system-prompt', buildPlanningPrompt(kshetra, {
       extendDocRelPath: opts.extendDocRelPath,
-      planId: opts.planId,
+      planId,
     }));
   }
   args.push('--setting-sources', 'project');
@@ -101,20 +103,12 @@ export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
   return {
     bin: resolveBin('SHRENI_CLAUDE_BIN', 'claude'),
     args,
-    // BEADS_DIR is absolute (kshetra.beads.path) and load-bearing in a worktree:
-    // the `.beads/` symlink is gitignored, so a fresh worktree has none and cwd
-    // auto-discovery would fail. Passing the absolute dir makes every `bd` (read
-    // and the completion-protocol `bd create`/`bd export`) resolve to the one
-    // shared dolt DB regardless of cwd.
-    //
-    // On the task graph engine the session gets its plan and Kshetra instead,
-    // and files with `shreni plan` as the planner (policy spec, "Approval:
-    // humans only"); there is nothing to sync.
+    // The session gets its plan and Kshetra, and files with `shreni plan` as
+    // the planner (policy spec, "Approval: humans only"); there is nothing to sync.
     env: {
       CLAUDE_CODE_ENTRYPOINT: 'cli',
-      ...(kshetra.project && opts.planId
-        ? { [PLAN_ENV]: opts.planId, [KSHETRA_ENV]: kshetra.id }
-        : { BEADS_DIR: kshetra.beads.path }),
+      [PLAN_ENV]: planId,
+      [KSHETRA_ENV]: kshetra.id,
       ...secretEnv,
     },
   };

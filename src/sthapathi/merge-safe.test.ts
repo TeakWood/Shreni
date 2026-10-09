@@ -46,15 +46,14 @@ vi.mock('./git.js', () => ({
   })),
 }));
 
-// ── beads mock ────────────────────────────────────────────────────────────────
+// ── task store mock ───────────────────────────────────────────────────────────
 
 const mockBdAddNote = vi.fn<() => Promise<string>>();
 const mockBdFlag = vi.fn<() => Promise<string>>();
-const mockSyncBeads = vi.fn<() => Promise<void>>();
 
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ addNote: mockBdAddNote, flag: mockBdFlag })),
-  syncBeads: mockSyncBeads,
+vi.mock('./task-store.js', () => ({
+  trackerFor: vi.fn(() => ({ addNote: mockBdAddNote, flag: mockBdFlag })),
+  engineStore: vi.fn(() => ({})),
 }));
 
 vi.mock('./errors.js', () => ({
@@ -75,7 +74,6 @@ const KSHETRA = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main' },
-  beads: { path: '/projects/myapp-beads', remote: '' },
   agents: { maxRoundsPerBead: 3 },
 } as unknown as KshetraConfig;
 
@@ -103,7 +101,6 @@ beforeEach(() => {
   mockMergeTree.mockResolvedValue([]);
   mockBdAddNote.mockResolvedValue('ok');
   mockBdFlag.mockResolvedValue('ok');
-  mockSyncBeads.mockResolvedValue(undefined);
 });
 
 afterEach(() => {

@@ -1,19 +1,12 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { z } from 'zod';
 import type { KshetraConfig } from '../kshetra/config.js';
-import { BD_MAX_BUFFER } from '../sthapathi/beads.js';
 import { withTrackerReads } from '../policy/sthapathi/reads.js';
 
-const execFileAsync = promisify(execFile);
-
-// Read-only `bd` accessor for Phalaka.
+// Read-only task accessor for Phalaka, over the task graph engine's reads.
 //
-// Deliberately exposes ONLY non-mutating commands (`list --json`, `show --json`).
-// The internal write wrapper lives in src/sthapathi/beads.ts and is the sole
-// owner of the `bd` write lifecycle (claim/close/create/...). Keeping a separate
-// reader makes the "Sthapathi owns writes" invariant enforceable by construction:
-// there is simply no mutation method on this surface.
+// Deliberately exposes ONLY reads (list, show). Sthapathi owns every write;
+// keeping a separate reader makes the "Sthapathi owns writes" invariant
+// enforceable by construction: there is simply no mutation method on this surface.
 
 export const LIST_CACHE_TTL_MS = 5_000;
 
@@ -27,8 +20,8 @@ export class BeadsReadError extends Error {
   }
 }
 
-// Bead ids are like `myapp-beads-9g3` or `myapp-beads-9sk.6`. Validate before
-// passing to `bd show` so a path/arg-injection attempt can't reach the subprocess.
+// Task ids are like `myapp-9g3` or `myapp-9sk.6`. Validate before a read, so a
+// malformed id is refused up front.
 const BEAD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function isValidBeadId(id: string): boolean {
@@ -62,17 +55,16 @@ export interface BeadDetail extends BeadSummary {
   dependencies: BeadDependency[];
   blockedBy: string[];
   parent?: string;
-  // bd's `list --json` omits labels but `show --json` includes them, so labels
-  // ride on the detail surface only (e.g. `pr-needs-followup`, `awaiting-merge`).
+  // Labels ride on the detail surface only (e.g. `pr-needs-followup`).
   labels: string[];
 }
 
-// ── Raw `bd --json` parsing (snake_case, lenient) ───────────────────────────
+// ── Raw task-row parsing (snake_case, lenient) ──────────────────────────────
 
 const RawDependencySchema = z
   .object({
-    // `bd list --json` dependency rows use issue_id/depends_on_id; `bd show`
-    // nests full bead objects with id/title. Accept either.
+    // Dependency rows use issue_id/depends_on_id, or nest full task objects
+    // with id/title. Accept either.
     id: z.string().optional(),
     issue_id: z.string().optional(),
     depends_on_id: z.string().optional(),
@@ -117,8 +109,8 @@ function toSummary(raw: RawBead): BeadSummary {
 }
 
 function toDetail(raw: RawBead): BeadDetail {
-  // In `bd show`, the bead's own row carries `depends_on_id` links; the nested
-  // dependency objects describe the parent/blockers. Surface both shapes.
+  // The task's own row carries `depends_on_id` links; the nested dependency
+  // objects describe the parent/blockers. Surface both shapes.
   const deps: BeadDependency[] = (raw.dependencies ?? [])
     .map(d => ({ id: d.id ?? d.depends_on_id ?? d.issue_id ?? '', title: d.title, type: d.type }))
     .filter(d => d.id !== '');
@@ -143,7 +135,7 @@ function parseRawArray(stdout: string): RawBead[] {
   try {
     parsed = JSON.parse(stdout || '[]');
   } catch (err) {
-    throw new BeadsReadError(`bd returned non-JSON output: ${(err as Error).message}`, err);
+    throw new BeadsReadError(`the task read returned non-JSON output: ${(err as Error).message}`, err);
   }
   const arr = Array.isArray(parsed) ? parsed : [parsed];
   const out: RawBead[] = [];
@@ -154,7 +146,7 @@ function parseRawArray(stdout: string): RawBead[] {
   return out;
 }
 
-// ── TTL cache (in-process, per beads path + command) ────────────────────────
+// ── TTL cache (in-process, per project + read) ──────────────────────────────
 
 interface CacheEntry {
   expires: number;
@@ -178,29 +170,17 @@ async function cached<T>(key: string, ttl: number, produce: () => Promise<T>): P
   return value;
 }
 
-async function exec(args: string[], env: NodeJS.ProcessEnv): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync('bd', args, { env, maxBuffer: BD_MAX_BUFFER });
-    return stdout.trim();
-  } catch (err: unknown) {
-    const e = err as { stderr?: string; message?: string };
-    throw new BeadsReadError(`bd ${args[0]} failed: ${e.stderr ?? e.message ?? String(err)}`, err);
-  }
-}
-
 export interface ListFilters {
   status?: string;
-  // Server-side `--label` filter. bd applies it, so a label-filtered list returns
-  // only matching beads even though each row's own JSON omits its labels.
+  // A label filter, applied by the read, so a label-filtered list returns only
+  // matching tasks even though each row's own JSON omits its labels.
   label?: string;
 }
 
 export function beadsRead(kshetra: KshetraConfig) {
-  const beadsPath = kshetra.beads.path;
-  const env: NodeJS.ProcessEnv = { ...process.env, BEADS_DIR: beadsPath };
-  // On the task graph engine: the same rows, from a connection Phalaka keeps
-  // (still polling, through this cache, until change notifications come).
-  const source = kshetra.project ? `engine:${kshetra.project}` : beadsPath;
+  // The rows come from a connection Phalaka keeps (still polling, through this
+  // cache, until change notifications come).
+  const source = `engine:${kshetra.project}`;
   const engine = async (fn: Parameters<typeof withTrackerReads<string>>[1]): Promise<string> => {
     try {
       return await withTrackerReads(kshetra, fn, { shared: true });
@@ -211,18 +191,13 @@ export function beadsRead(kshetra: KshetraConfig) {
 
   return {
     async list(filters: ListFilters = {}): Promise<BeadSummary[]> {
-      const args = ['list', '--json'];
-      if (filters.status) args.push('--status', filters.status);
-      if (filters.label) args.push('--label', filters.label);
-      // bd list caps at 50 rows by default; the board and the per-kshetra counts
-      // need every bead, or a busy kshetra reads as "closed: 50" (Shreni-beads-8ym).
-      args.push('--limit', '0');
-      // The cache key MUST carry every filter — a label-filtered list must not
+      // Every row, never capped: the board and the per-kshetra counts need every
+      // task (Shreni-beads-8ym). The cache key MUST carry every filter — a label-filtered list must not
       // collide with (and return) the unfiltered 'default' slice.
       const key = `${source}::list::${filters.status ?? 'default'}::${filters.label ?? ''}`;
-      return cached(key, LIST_CACHE_TTL_MS, async () => parseRawArray(kshetra.project
-        ? await engine(r => r.list({ ...(filters.status ? { status: filters.status } : {}), ...(filters.label ? { label: filters.label } : {}) }))
-        : await exec(args, env)).map(toSummary));
+      return cached(key, LIST_CACHE_TTL_MS, async () => parseRawArray(
+        await engine(r => r.list({ ...(filters.status ? { status: filters.status } : {}), ...(filters.label ? { label: filters.label } : {}) })),
+      ).map(toSummary));
     },
 
     async show(id: string): Promise<BeadDetail | null> {
@@ -231,7 +206,7 @@ export function beadsRead(kshetra: KshetraConfig) {
       }
       const key = `${source}::show::${id}`;
       return cached(key, LIST_CACHE_TTL_MS, async () => {
-        const rows = parseRawArray(kshetra.project ? await engine(r => r.show(id)) : await exec(['show', id, '--json'], env));
+        const rows = parseRawArray(await engine(r => r.show(id)));
         const match = rows.find(r => r.id === id) ?? rows[0];
         return match ? toDetail(match) : null;
       });
@@ -241,7 +216,7 @@ export function beadsRead(kshetra: KshetraConfig) {
 
 // ── Per-Kshetra error isolation ─────────────────────────────────────────────
 //
-// One Kshetra's broken beads DB must not blank the whole board. These helpers
+// One Kshetra's failing read must not blank the whole board. These helpers
 // return a discriminated result instead of throwing, so the server can render
 // every healthy Kshetra and surface the failing one's `error` inline.
 

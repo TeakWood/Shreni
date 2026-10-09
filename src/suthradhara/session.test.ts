@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config';
-import { buildPlanningSession, defaultKickoff } from './session';
+import { buildPlanningSession, defaultKickoff, SuthradharaSpawnError } from './session';
+import { NotMigratedError } from '../kshetra/config';
+import { KSHETRA_ENV, PLAN_ENV } from '../policy/suthradhara/filing';
 
 const KSHETRA = {
   id: 'myapp',
   repo: { path: '/projects/myapp', remote: 'git@github.com:me/myapp.git', mainBranch: 'main' },
-  beads: { path: '/projects/myapp-beads/.beads', remote: 'git@github.com:me/myapp-beads.git' },
+  project: '00000000-0000-4000-8000-000000000001',
   agents: { model: 'claude-opus-4-8' },
   mcp: { servers: {} },
 } as unknown as KshetraConfig;
@@ -19,7 +21,7 @@ function valueAfter(args: string[], flag: string): string | undefined {
 }
 
 describe('buildPlanningSession — fresh launch', () => {
-  const spec = buildPlanningSession({ kshetra: KSHETRA, claudeSessionId: SID, kickoff: 'go' });
+  const spec = buildPlanningSession({ kshetra: KSHETRA, claudeSessionId: SID, kickoff: 'go', planId: 'plan-1' });
 
   it('is an INTERACTIVE invocation (no -p / stream-json)', () => {
     expect(spec.args).not.toContain('-p');
@@ -40,15 +42,23 @@ describe('buildPlanningSession — fresh launch', () => {
     expect(spec.args[spec.args.length - 1]).toBe('go');
   });
 
-  it('resolves the claude bin and sets BEADS_DIR (no --allowedTools whitelist)', () => {
+  it('resolves the claude bin and passes its plan and Kshetra, never BEADS_DIR (no --allowedTools whitelist)', () => {
     expect(spec.bin).toBe('claude');
-    expect(spec.env?.BEADS_DIR).toBe('/projects/myapp-beads/.beads');
+    expect(spec.env?.[PLAN_ENV]).toBe('plan-1');
+    expect(spec.env?.[KSHETRA_ENV]).toBe('myapp');
+    expect(spec.env).not.toHaveProperty('BEADS_DIR');
     expect(spec.args).not.toContain('--allowedTools');
+  });
+
+  it('refuses a Kshetra with no project, and one with no plan', () => {
+    const { project: _p, ...old } = KSHETRA as unknown as Record<string, unknown>;
+    expect(() => buildPlanningSession({ kshetra: old as unknown as KshetraConfig, claudeSessionId: SID })).toThrow(NotMigratedError);
+    expect(() => buildPlanningSession({ kshetra: KSHETRA, claudeSessionId: SID })).toThrow(SuthradharaSpawnError);
   });
 });
 
 describe('buildPlanningSession — resume', () => {
-  const spec = buildPlanningSession({ kshetra: KSHETRA, claudeSessionId: SID, resume: true });
+  const spec = buildPlanningSession({ kshetra: KSHETRA, claudeSessionId: SID, resume: true, planId: 'plan-1' });
 
   it('reattaches via --resume and omits the system prompt + kickoff', () => {
     expect(valueAfter(spec.args, '--resume')).toBe(SID);

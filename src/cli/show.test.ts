@@ -1,16 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { LedgerEntry } from '../ext/index.js';
 
-// Mock only bd() (unknown-id path + payload); keep parseAcceptanceCriteria real.
+// Mock only the engine's show read (unknown-id path + payload); keep
+// parseAcceptanceCriteria real. The ledger sits in the runtime dir under a
+// homedir pointed at the test's tmp dir.
 const mockShow = vi.fn<(id: string) => Promise<string>>();
-vi.mock('../sthapathi/beads', async (orig) => {
-  const actual = await (orig() as Promise<Record<string, unknown>>);
-  return { ...actual, bd: () => ({ show: mockShow }) };
-});
+vi.mock('../policy/sthapathi/reads', () => ({
+  withTrackerReads: (_k: unknown, fn: (r: unknown) => Promise<unknown>) => fn({ show: mockShow }),
+}));
+const home = vi.hoisted(() => ({ dir: '' }));
+vi.mock('os', async orig => ({ ...(await orig<typeof import('os')>()), homedir: () => home.dir }));
 
 const { runShow, renderShow } = await import('./show');
 
@@ -19,11 +22,11 @@ let kshetra: KshetraConfig;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'shreni-show-'));
+  home.dir = dir;
   kshetra = {
     id: 'myapp',
     name: 'Myapp',
     repo: { path: '/projects/myapp', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-    beads: { path: dir, remote: '', mode: 'embedded' },
     stack: { language: 'typescript' },
     conventions: {},
     agents: { model: 'm', maxRoundsPerBead: 3 },
@@ -38,7 +41,9 @@ function entry(kind: LedgerEntry['kind'], ts: string, payload: Record<string, un
 }
 
 function writeLedger(...entries: LedgerEntry[]): void {
-  writeFileSync(join(dir, 'ledger.jsonl'), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
+  const runtime = join(dir, '.shreni', 'kshetra', 'myapp');
+  mkdirSync(runtime, { recursive: true });
+  writeFileSync(join(runtime, 'ledger.jsonl'), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
 }
 
 const BEAD_JSON = JSON.stringify([
@@ -246,7 +251,7 @@ function manifest(opts: {
         shreni: { version: '0.1.0', commit, dirty, builtAt: '2026-09-19T00:00:00.000Z' },
         extension,
         providers: { anthropic: { bin: 'claude', version: '2.1.212 (Claude Code)' } },
-        tools: { bd: { version: 'bd version 1.0.3' }, node: 'v26.4.0' },
+        tools: { node: 'v26.4.0' },
       },
     },
   } as LedgerEntry;
@@ -350,7 +355,7 @@ describe('renderShow — lot manifest header (yrk.5)', () => {
         Lot lot-aaaa · 2026-09-19 07:40:31 · worker · labels: arm=A rep=2
           base: abc123def456 (clean)   config: sha256:9ce70da6   gates: test=block lint=block coverage=warn diffSize=warn
           models: silpi=anthropic/claude-sonnet-4-6
-          shreni: 0.1.0@339a18f   providers: anthropic=2.1.212 (Claude Code)   bd: bd version 1.0.3   node: v26.4.0
+          shreni: 0.1.0@339a18f   providers: anthropic=2.1.212 (Claude Code)   node: v26.4.0
           extension: none
 
       Timeline (1 ledger entry):
@@ -410,19 +415,16 @@ describe('runShow', () => {
     expect(printed).toContain('no ledger entries');
   });
 
-  it('resolves a SHORT id: joins on the canonical id from the bd payload (4a2.8)', async () => {
-    // User types the short id; bd resolves it and echoes the CANONICAL id.
+  it('resolves a SHORT id: joins on the canonical id from the show payload (4a2.8)', async () => {
+    // User types the short id; the read resolves it and echoes the CANONICAL id.
     mockShow.mockResolvedValue(JSON.stringify([
       { id: 'Shreni-beads-4a2.6', title: 'shreni show', status: 'closed', issue_type: 'task', priority: 2 },
       { id: 'Shreni-beads-4a2.3', title: 'dep' },
     ]));
     // The ledger stores entries under the CANONICAL id.
-    writeFileSync(
-      join(dir, 'ledger.jsonl'),
-      [
-        { ts: '2026-09-16T00:00:01.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: 'Shreni-beads-4a2.6', kind: 'task_claimed', payload: { title: 'shreni show' } },
-        { ts: '2026-09-16T00:00:02.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: 'Shreni-beads-4a2.6', kind: 'task_done', payload: { approved: true, rounds: 1 } },
-      ].map(e => JSON.stringify(e)).join('\n') + '\n',
+    writeLedger(
+      { ts: '2026-09-16T00:00:01.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: 'Shreni-beads-4a2.6', kind: 'task_claimed', payload: { title: 'shreni show' } } as LedgerEntry,
+      { ts: '2026-09-16T00:00:02.000Z', schemaVersion: 1, kshetra: 'myapp', beadId: 'Shreni-beads-4a2.6', kind: 'task_done', payload: { approved: true, rounds: 1 } } as LedgerEntry,
     );
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});

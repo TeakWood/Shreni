@@ -105,7 +105,7 @@ describe('triageEntryForKshetra', () => {
     expect(e!.key).toBe('blocked:proj');
     expect(e!.label).toBe('Project');
     expect(e!.reason).toContain('3 beads blocked');
-    expect(e!.remediation).toContain('bd list --status=blocked');
+    expect(e!.remediation).toContain('shreni task list --state blocked');
   });
 
   it('uses the singular when exactly one bead is blocked', () => {

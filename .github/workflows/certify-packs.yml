@@ -1,10 +1,10 @@
-# Pack certification (ARD Stack-Packs §3.4, Shreni-beads-84m.4). For every
+# Pack certification (ARD Stack-Packs §3.4). For every
 # in-tree pack with a reference/ fixture, run the FULL Silpi ↔ Viharapala ↔
 # health-gate ↔ Parikshaka loop against the fixture backlog and assert merged
-# beads + gates observed in the activity log + Parikshaka discovery. A pack may
+# tasks + gates observed in the activity log + Parikshaka discovery. A pack may
 # not claim "certified" without this passing — supported is a tested claim (G3).
 #
-# Runs real agents, so it needs ANTHROPIC_API_KEY and is NOT a per-PR gate:
+# Runs real agents, so it needs ANTHROPIC_API_KEY (and a Postgres service) and is NOT a per-PR gate:
 # trigger manually or on the weekly schedule. One job per pack, ~10 min cap.
 name: certify-packs
 
@@ -68,19 +68,36 @@ jobs:
     needs: discover
     if: needs.discover.outputs.packs != '[]'
     runs-on: ubuntu-latest
-    # Real agent latency on hosted runners is ~6-7 min/bead, and the reviewer-bait
-    # bead needs an extra reject→fix→merge cycle, so a 3-bead backlog runs ~20 min.
-    # A too-short cap still bills for the beads it did run but yields no green, so
-    # size the job to COMPLETE in one shot. See Shreni-beads-84m.13.
+    # Real agent latency on hosted runners is ~6-7 min/task, and the reviewer-bait
+    # task needs an extra reject→fix→merge cycle, so a 3-task backlog runs ~20 min.
+    # A too-short cap still bills for the tasks it did run but yields no green, so
+    # size the job to COMPLETE in one shot.
     timeout-minutes: 28
     strategy:
       fail-fast: false
       matrix:
         pack: ${{ fromJSON(needs.discover.outputs.packs) }}
+    # The task graph's database: init sets the fixture Kshetra up on it, the
+    # script files the backlog into it, and the worker claims from it.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: shreni
+          POSTGRES_PASSWORD: shreni
+          POSTGRES_DB: shreni
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shreni -d shreni"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SHRENI_DATABASE_URL: postgres://shreni:shreni@localhost:5432/shreni
       # The cert script's internal backlog cap (default 9 min) is too tight for a
-      # full 3-bead loop (incl. the reviewer-bait's extra cycle) on hosted
+      # full 3-task loop (incl. the reviewer-bait's extra cycle) on hosted
       # runners; give it room to finish within the job timeout.
       SHRENI_CERT_TIMEOUT_MS: '1320000' # 22 min
     steps:
@@ -92,18 +109,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - name: Install bd + claude CLIs
-        # @beads/bd's postinstall SKIPS the release-binary download when CI is
-        # set (GitHub Actions sets CI=true), so a plain `npm i -g` leaves the
-        # wrapper without its binary and `bd init` aborts with "bd binary not
-        # found". Clear CI for the bd install so the postinstall downloads it,
-        # then assert bd is on PATH so a silent miss fails here, not mid-cert.
-        run: |
-          npm install -g @anthropic-ai/claude-code
-          CI= npm install -g @beads/bd
-          bd version
+      - name: Install the claude CLI
+        run: npm install -g @anthropic-ai/claude-code
       # Per-ecosystem toolchains the fixtures need: uv for python-fastapi
-      # (backlog.sh runs `uv sync`); Go ships on ubuntu-latest already.
+      # (its reference/setup.sh runs `uv sync`); Go ships on ubuntu-latest already.
       - uses: astral-sh/setup-uv@v5
       - name: Git identity for fixture commits
         run: |

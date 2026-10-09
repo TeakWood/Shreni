@@ -1,6 +1,6 @@
 # Task Graph Engine
 
-> **Status:** design, October 2026. The engine is being built under `src/taskgraph/`; none of it has shipped, and Shreni still runs on beads today.
+> **Status:** October 2026. The engine is built under `src/taskgraph/`, and every Kshetra runs on it; beads is only a source to import from (`shreni migrate`).
 
 ## Overview
 

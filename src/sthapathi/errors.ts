@@ -1,7 +1,6 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
-import { BeadsError } from './beads.js';
-import { syncTracker, trackerFor } from './task-store.js';
+import { trackerFor } from './task-store.js';
 import { pauseKshetra, recordStall } from '../kshetra/state.js';
 import { git, GitError } from './git.js';
 import { branchName } from './branch.js';
@@ -50,10 +49,9 @@ export class RunNotPermittedError extends Error {
   }
 }
 
-type ErrorClass = 'API_DOWN' | 'AGENT_FAILED' | 'MALFORMED_OUTPUT' | 'GIT_FAILED' | 'BD_FAILED' | 'UNKNOWN';
+type ErrorClass = 'API_DOWN' | 'AGENT_FAILED' | 'MALFORMED_OUTPUT' | 'GIT_FAILED' | 'UNKNOWN';
 
 function classifyError(err: unknown): ErrorClass {
-  if (err instanceof BeadsError) return 'BD_FAILED';
   if (err instanceof GitError) return 'GIT_FAILED';
   if (err instanceof AgentError) {
     return err.kind === 'MALFORMED_OUTPUT' ? 'MALFORMED_OUTPUT' : 'AGENT_FAILED';
@@ -122,7 +120,7 @@ export async function handleCycleError(
   task: Task | null,
   err: Error,
 ): Promise<void> {
-  const bdClient = trackerFor(kshetra);
+  const tracker = trackerFor(kshetra);
 
   // Track repeating cycle errors so the watchdog can trip on a stall loop
   // (e.g. the same git/agent failure recurring across polls).
@@ -132,7 +130,7 @@ export async function handleCycleError(
   switch (errorClass) {
     case 'API_DOWN':
       if (task) {
-        await bdClient.addNote(task.id, `Paused: API unavailable — ${err.message}. Will retry.`);
+        await tracker.addNote(task.id, `Paused: API unavailable — ${err.message}. Will retry.`);
         // The retry re-picks the task and creates a fresh branch, so drop the
         // current one — otherwise preFlightCheck would reject the retry.
         await cleanupBranch(kshetra, task);
@@ -147,8 +145,7 @@ export async function handleCycleError(
 
     case 'AGENT_FAILED':
       if (task) {
-        await bdClient.flag(task.id, `Agent failed: ${err.message}`);
-        await syncTracker(kshetra);
+        await tracker.flag(task.id, `Agent failed: ${err.message}`);
         await cleanupBranch(kshetra, task);
       }
       await notifyOperator(kshetra, task, 'agent_failed');
@@ -156,8 +153,7 @@ export async function handleCycleError(
 
     case 'MALFORMED_OUTPUT':
       if (task) {
-        await bdClient.flag(task.id, `Malformed output after retries: ${err.message}`);
-        await syncTracker(kshetra);
+        await tracker.flag(task.id, `Malformed output after retries: ${err.message}`);
         await cleanupBranch(kshetra, task);
       }
       await notifyOperator(kshetra, task, 'agent_failed');
@@ -165,8 +161,7 @@ export async function handleCycleError(
 
     case 'GIT_FAILED':
       if (task) {
-        await bdClient.flag(task.id, `Git failure: ${err.message}. Branch kept.`);
-        await syncTracker(kshetra);
+        await tracker.flag(task.id, `Git failure: ${err.message}. Branch kept.`);
       }
       pauseKshetra(kshetra, {
         reason: 'git_failed',
@@ -176,19 +171,9 @@ export async function handleCycleError(
       await notifyOperator(kshetra, task, 'git_failed');
       break;
 
-    case 'BD_FAILED':
-      pauseKshetra(kshetra, {
-        reason: 'bd_failed',
-        message: err.message,
-        manual: true,
-      });
-      await notifyOperator(kshetra, null, 'bd_failed');
-      break;
-
     default:
       if (task) {
-        await bdClient.flag(task.id, `Unexpected error: ${err.message}`);
-        await syncTracker(kshetra);
+        await tracker.flag(task.id, `Unexpected error: ${err.message}`);
         await cleanupBranch(kshetra, task);
       }
       await notifyOperator(kshetra, task, 'unknown_error');

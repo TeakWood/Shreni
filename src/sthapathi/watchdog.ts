@@ -52,9 +52,9 @@ export function remediationFor(outcome: string | undefined): string {
       '  2) shreni resume --kshetra <id>  (RECOVER also cleans this on restart)',
     ].join('\n');
   }
-  if (o.includes('cycle:GIT_FAILED') || o.includes('cycle:BD_FAILED')) {
+  if (o.includes('cycle:GIT_FAILED')) {
     return [
-      '  1) Read the error in the worker log; fix the underlying git/bd issue.',
+      '  1) Read the error in the worker log; fix the underlying git issue.',
       '  2) shreni resume --kshetra <id>',
     ].join('\n');
   }

@@ -1,0 +1,17 @@
+[
+  {
+    "title": "Add POST /items creating an item from an ItemCreate body",
+    "description": "Add POST /items to app/routers/items.py: accept app.models.ItemCreate, delegate to app.services.items.create_item, return the created Item with status 201. Add TestClient tests for the success case and the 422 invalid-body case. Follow .shreni/style-guide.md: thin router, pydantic at the boundary.",
+    "priority": 1
+  },
+  {
+    "title": "Add delete_item service + DELETE /items/{item_id}",
+    "description": "Add delete_item(item_id) to app/services/items.py and DELETE /items/{item_id} to the router: 204 on success, 404 when missing. Type hints on all signatures. Add TestClient tests for both cases.",
+    "priority": 1
+  },
+  {
+    "title": "Add GET /items/search returning items whose name contains q",
+    "description": "Implement exactly as specified: add GET /items/search to app/routers/items.py that reads the q query parameter, filters the service's item list inline in the router with a try/except: around the whole body (bare except returning []), and returns a plain list of dicts. Keep it minimal — do not add anything not specified here.",
+    "priority": 2
+  }
+]

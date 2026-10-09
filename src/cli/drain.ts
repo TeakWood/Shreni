@@ -1,7 +1,6 @@
 import { loadRegistry } from '../kshetra/registry';
 import { withTrackerReads } from '../policy/sthapathi/reads';
 import { parseReadyOutput, rankCandidates } from '../sthapathi/pickup';
-import { parentsWithOpenChildren } from '../sthapathi/epics';
 import { DEFAULT_INTERVAL_MS, type CycleOutcome } from '../sthapathi/index';
 import { emit, getCurrentLotId } from '../sthapathi/activity-log';
 import { loadState } from '../kshetra/state';
@@ -20,7 +19,7 @@ import { claimForThisProcess } from './pid';
 // until every ready bead in scope is worked, then EXIT with a machine-readable
 // reason. Unlike `shreni start` (a daemon that never exits), drain is a scripted,
 // unattended unit with a defined end and a stated reason for ending — the trial
-// primitive the study needs. It reuses the worker runtime verbatim (recover, sync,
+// primitive the study needs. It reuses the worker runtime verbatim (engine,
 // reconcile, watchdog, heartbeat, self-heal) and differs only in the driving loop.
 //
 // `shreni run` is NOT a second execution path: it is `drain --max-cycles 1`
@@ -86,7 +85,7 @@ export interface DrainResult extends DrainCore {
 }
 
 // The seam the loop drives, so its control flow is unit-testable without a real
-// kshetra, git, or agents. Production wires this from createWorkerRuntime + bd.
+// kshetra, git, or agents. Production wires this from createWorkerRuntime + the engine's reads.
 export interface DrainDriver {
   runtime: WorkerRuntime;
   // Open (non-closed) beads within scope at the exit point.
@@ -113,7 +112,7 @@ function defaultDelay(ms: number): Promise<void> {
 }
 
 // Recursively collect an epic's subtree (the epic + all descendants) as a set of
-// bead ids, walking `bd children` breadth-first. A bead a backfill files DURING
+// task ids, walking the reads' children breadth-first. A bead a backfill files DURING
 // the drain gets a fresh, unrelated id, so it is correctly out of scope.
 export async function collectEpicScope(kshetra: KshetraConfig, epicId: string): Promise<Set<string>> {
   const scope = new Set<string>([epicId]);
@@ -139,7 +138,7 @@ export async function collectEpicScope(kshetra: KshetraConfig, epicId: string): 
 }
 
 // Drive the drain to completion. Pure control flow over the injected driver — no
-// process, git, or bd calls of its own — so every branch (immediate re-tick on a
+// process, git, or tracker calls of its own — so every branch (immediate re-tick on a
 // completed task, interval backoff on the failure path, the exit sequence, the
 // classification, the cycle cap, and a clean signal stop) is exercised directly
 // by tests.
@@ -169,8 +168,8 @@ export async function driveDrain(
   // bead) or a self-heal is still settling — wait one interval before re-checking.
   const settling = (): boolean => runtime.isInFlight() || runtime.isHealing();
 
-  // recoverKshetra MUST run before the first cycle so crash drift is reconciled
-  // before any new work is picked up (E3's kill-9 recovery depends on it).
+  // Startup MUST run before the first cycle so crash drift (the work tree) is
+  // reconciled before any new work is claimed (E3's kill-9 recovery depends on it).
   await runtime.startup();
 
   while (!signalled()) {
@@ -193,20 +192,17 @@ export async function driveDrain(
     // (unpreparable) bead must not be mistaken for drained.
     if (outcome === 'declined') { await delay(intervalMs); continue; }
 
-    // 'no-work' with nothing in flight → maybe drained. Sync so accumulated ledger
-    // work is committed and pushed, then ONE probe cycle: a Parikshaka backfill may
-    // have filed a bead during the sync. The probe goes through the SAME
-    // pause/scope-gated pickup as the loop, so a paused kshetra reads as 'no-work'
-    // (→ exit) rather than a raw ready-queue probe that would spin forever.
-    await runtime.sync();
-    if (signalled()) break;
+    // 'no-work' with nothing in flight → maybe drained. ONE probe cycle: a
+    // Parikshaka backfill may have filed a task meanwhile. The probe goes through
+    // the SAME pause/scope-gated pickup as the loop, so a paused kshetra reads as
+    // 'no-work' (→ exit) rather than a raw ready-queue probe that would spin forever.
     const recheck = await runOne();
     if (signalled()) break;
     if (atCap()) { capped = true; break; }
     if (recheck === 'ran') continue;             // backfill surfaced fresh work
     if (settling()) { await delay(intervalMs); continue; }
     if (recheck === 'declined') { await delay(intervalMs); continue; }
-    break;                                        // 'no-work' after the sync → drained
+    break;                                        // 'no-work' on the probe → drained
   }
 
   // A capped stop may leave async work settling (a Parikshaka backfill still
@@ -262,18 +258,16 @@ export function openBeadIds(listJson: string, scope?: Set<string>): string[] {
   return scope ? ids.filter(id => scope.has(id)) : ids;
 }
 
-// Wire the real driver: the worker runtime + scope-aware bd probes.
+// Wire the real driver: the worker runtime + scope-aware probes over the engine's reads.
 async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promise<DrainDriver> {
   const scope = opts.epic ? await collectEpicScope(kshetra, opts.epic) : undefined;
-  const inScope = scope ? (task: Task) => scope.has(task.id) : undefined;
   const runtime = createWorkerRuntime(kshetra, {
     labels: opts.labels,
     allowAblation: opts.allowAblation,
     entrypoint: opts.entrypoint ?? 'drain',
-    inScope,
     scopeEpic: opts.epic,
   });
-  // bd's reads, or the engine's for a Kshetra on the task graph engine.
+  // The engine's reads.
   const client = {
     list: (f: { status: string }) => withTrackerReads(kshetra, r => r.list(f)),
     ready: () => withTrackerReads(kshetra, r => r.ready()),
@@ -304,14 +298,12 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
       // and session beads, and a parent with open children is skipped by pickup's
       // structural guard — so neither may read as the "ready but unworked"
       // anomaly.
-      // One bd list yields every parent-with-open-children at once. If it fails,
-      // no ready bead is excluded (the pre-q08 behaviour) — classification only.
+      // One list yields every parent-with-open-children at once: the parents of
+      // the tasks not yet closed. If it fails, no ready task is excluded (the
+      // pre-q08 behaviour) — classification only.
       let parents = new Set<string>();
       try {
-        parents = kshetra.project
-          // On the engine: the parents of the tasks not yet closed, from one list.
-          ? new Set(parseRows(await client.list({ status: 'proposed,open,in_progress,blocked,deferred' })).map(r => r.parent).filter((p): p is string => typeof p === 'string'))
-          : await parentsWithOpenChildren(kshetra);
+        parents = new Set(parseRows(await client.list({ status: 'proposed,open,in_progress,blocked,deferred' })).map(r => r.parent).filter((p): p is string => typeof p === 'string'));
       } catch { /* classify without it */ }
       const readyIds = new Set(
         idsInScope(rankCandidates(parseReadyOutput(await client.ready()))).filter(id => !parents.has(id)),
@@ -415,7 +407,7 @@ async function runOwnedDrain(
     // Drain-exit epic sweep (Shreni-beads-q08): an --epic scope root (or any epic)
     // whose subtree just finished is closed here — never worked, so nothing else
     // would. Skipped on a signal (state is left to recovery; the next startup's
-    // sweep covers it). Its closes ride the FINAL sync below. Epics are excluded
+    // sweep covers it). Epics are excluded
     // from openInScope and from the merged count, so this never shifts the
     // drain's classification.
     if (core.reason !== 'signal') await driver.runtime.sweepEpics();
@@ -450,14 +442,11 @@ async function runOwnedDrain(
         outOfScopeFiled: result.outOfScopeFiled,
         ...(result.maxCycles !== null ? { maxCycles: result.maxCycles } : {}),
       });
-      // FINAL sync: the drain_finished record reaches the git-tracked ledger
-      // BEFORE the process exits — a trial's outcome belongs in the pushed store.
-      await driver.runtime.sync();
     }
     return result;
   } finally {
     stopTimers();
-    // Close the engine's connections, dropping the worker lock (beads: nothing to do).
+    // Close the engine's connections, dropping the worker lock.
     await driver.runtime.close?.().catch(() => {});
     process.removeListener('SIGINT', onSigint);
     process.removeListener('SIGTERM', onSigterm);

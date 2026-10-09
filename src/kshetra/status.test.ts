@@ -3,7 +3,7 @@ import type { KshetraConfig } from './config';
 
 // ── module mocks ─────────────────────────────────────────────────────────────
 // assembleKshetraStatus reads liveness (../cli/pid), runtime state (./state) and
-// bead queues (../sthapathi/beads). Mock those so the shared module can be tested
+// task queues (the engine's reads). Mock those so the shared module can be tested
 // in isolation — exactly how Phalaka will consume it, importing directly from
 // '../kshetra/status' rather than through the CLI.
 
@@ -19,8 +19,9 @@ vi.mock('./state', () => ({ loadState: mockLoadState }));
 
 const mockBdList = vi.fn<(filters: { status?: string; label?: string }) => Promise<string>>();
 const mockBdReady = vi.fn<() => Promise<string>>();
-vi.mock('../sthapathi/beads', () => ({
-  bd: vi.fn(() => ({ list: mockBdList, ready: mockBdReady })),
+// The engine's reads (withTrackerReads), as the status assembly makes them.
+vi.mock('../policy/sthapathi/reads', () => ({
+  withTrackerReads: (_k: unknown, fn: (r: unknown) => unknown) => fn({ list: mockBdList, ready: mockBdReady }),
 }));
 
 const { assembleKshetraStatus } = await import('./status');
@@ -29,7 +30,7 @@ const KSHETRA = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}', prFollowupMaxRounds: 4 },
-  beads: { path: '/projects/myapp-beads', remote: '', mode: 'embedded' },
+  project: '00000000-0000-0000-0000-000000000001',
   stack: { language: 'typescript' },
   conventions: {},
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },

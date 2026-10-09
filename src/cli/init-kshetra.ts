@@ -1,17 +1,14 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import {
-  writeFileSync, appendFileSync, symlinkSync,
-  existsSync, mkdirSync, readFileSync, readlinkSync, chmodSync, rmSync,
-} from 'fs';
-import { resolve, join, dirname, basename } from 'path';
+import { writeFileSync, appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { resolve, join } from 'path';
 import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
 import { ragIndexDir } from '../kshetra/state-locations';
 import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
 import { GATES_DEFAULTS, loadKshetraConfig, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
 import { setupInstructions } from './task';
-import { LEGACY_SECTION } from '../policy/init/instructions';
+import { onBeads } from '../policy/migrate/kshetra';
 import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
 import { detectToolchain, suggestPack, type DetectedStack } from './detect-toolchain';
 import { createInterface } from 'readline';
@@ -23,7 +20,6 @@ import {
   PROVIDER_REGISTRY,
 } from '../agents/providers/registry';
 import { checkProviderInstalled, promptProvider, commandExists } from './provider-preflight';
-import { untrackInteractions } from './beads-gitignore';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
 
 const execAsync = promisify(execFile);
@@ -41,7 +37,6 @@ export interface InitKshetraOpts {
   path: string;
   org?: string;
   language?: string;
-  beadsPath?: string;
   // CLI-facing provider name (claude|codex|gemini). Defaults to claude. An
   // invalid name fails with the valid set (§3.5).
   provider?: string;
@@ -62,9 +57,8 @@ export interface InitKshetraOpts {
   noPack?: boolean;
   upgrade?: boolean;
   // The task graph engine (policy spec, "Init"): the Database phase, and the
-  // Project phase that registers the project and returns its uuid. Without it
-  // the Kshetra is set up as before, on beads.
-  engine?: InitEngine;
+  // Project phase that registers the project and returns its uuid.
+  engine: InitEngine;
   // A tracker config this Kshetra replaces (tracker to Kshetra): removed once
   // kshetra.yaml carries its project.
   replaces?: string;
@@ -75,7 +69,8 @@ export interface InitEngine {
   database(database: string): Promise<void>;
   /**
    * Registers the project, or finds the one `existing` names; returns its uuid.
-   * With `beads` holding issues and no project yet, imports them instead (the Import phase).
+   * With `beads` holding issues and no project yet (a tracker over a repo's
+   * .beads), imports them instead (the Import phase).
    */
   project(input: { database: string; existing?: string; repoUrl: string; beads?: { dir: string; repo: string; configPath: string } }): Promise<string>;
 }
@@ -144,7 +139,7 @@ async function exec(cmd: string, args: string[], opts: { cwd?: string; env?: Nod
 // The zero-repo on-ramp: `shreni init` in a brand-new directory. If the path
 // already has an `origin` remote this is a no-op (the yds.1 wrapper path,
 // byte-identical). Otherwise: git-init if needed, create the app GitHub repo
-// via gh (mirroring the beads-repo flow), wire `origin`, make an initial
+// via gh, wire `origin`, make an initial
 // commit on an unborn HEAD, and push — so the Config phase's origin
 // requirement is satisfied instead of enforced-and-failed.
 export async function ensureAppRepo(
@@ -187,128 +182,16 @@ export async function ensureAppRepo(
   await exec('git', ['push', '-u', 'origin', branch], { cwd: repoPath });
 }
 
-// ── Step 1: Create GitHub beads repo ─────────────────────────────────────────
+// ── Update .gitignore ─────────────────────────────────────────────────
 
-export async function createGitHubRepo(
-  resolveOwner: () => Promise<string>,
-  slug: string,
-): Promise<string> {
-  const org = await resolveOwner();
-  const repoName = `${slug}-beads`;
-  const remote = `git@github.com:${org}/${repoName}.git`;
-  try {
-    await exec('gh', ['repo', 'view', `${org}/${repoName}`], {});
-    return remote; // already exists
-  } catch {
-    await exec('gh', ['repo', 'create', `${org}/${repoName}`, '--private', '--confirm'], {});
-    return remote;
-  }
-}
-
-// ── Step 2: Clone beads repo ──────────────────────────────────────────────────
-
-export async function cloneBeadsRepo(remoteUrl: string, localPath: string): Promise<void> {
-  if (existsSync(localPath)) return;
-  await exec('git', ['clone', remoteUrl, localPath]);
-}
-
-// ── Step 3: bd init --stealth ─────────────────────────────────────────────────
-
-export async function initBeadsDb(beadsPath: string): Promise<void> {
-  if (existsSync(join(beadsPath, '.dolt')) || existsSync(join(beadsPath, 'embeddeddolt'))) return;
-  await exec('bd', ['init', '--stealth'], {
-    cwd: beadsPath,
-    env: { ...process.env, BEADS_DIR: beadsPath },
-  });
-}
-
-// ── Step 3.5: Commit + push the beads repo (yds.13) ──────────────────────────
-
-// `bd init --stealth` deliberately does no git ops, so without this step the
-// embedded dolt db exists only locally and the freshly created <slug>-beads
-// GitHub repo stays empty. Idempotent: a clean tree skips the commit, pushing
-// an up-to-date branch is a no-op, and a --beads-path repo with no origin
-// remote skips the push with a note instead of failing.
-export async function pushBeadsRepo(beadsPath: string): Promise<void> {
-  let remote = '';
-  try {
-    remote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: beadsPath });
-  } catch {
-    // no origin remote — handled below
-  }
-  if (!remote) {
-    console.log(`  beads repo at ${beadsPath} has no origin remote — skipping push`);
-    return;
-  }
-  const dirty = await exec('git', ['status', '--porcelain'], { cwd: beadsPath });
-  if (dirty) {
-    await exec('git', ['add', '-A'], { cwd: beadsPath });
-    await exec('git', ['commit', '-m', 'chore: init beads db (shreni init)'], { cwd: beadsPath });
-  }
-  try {
-    await exec('git', ['rev-parse', 'HEAD'], { cwd: beadsPath });
-  } catch {
-    return; // unborn HEAD and nothing committed — nothing to push
-  }
-  const branch = await exec('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: beadsPath });
-  await exec('git', ['push', '-u', 'origin', branch], { cwd: beadsPath });
-}
-
-// ── Step 3.6: Silence bd's per-invocation warnings ────────────────────────────
-
-// `git clone` / `bd init` leave the beads repo dir at the default 0755 and never
-// set `beads.role`, so every `bd` command against the Kshetra prints two
-// warnings: a permissions nag (recommends 0700) and a `beads.role not
-// configured` nag (GH#2950). Tighten the dir to 0700 and stamp the role into the
-// repo's local git config so both go quiet. Idempotent: chmod to an already-0700
-// dir is a no-op, and `git config` overwrites in place — safe to re-run on an
-// existing Kshetra. `role` defaults to 'maintainer' (bd's own recommendation for
-// the DB owner); pass 'contributor' for a read-mostly checkout. Best-effort: this
-// only quiets cosmetic warnings, so a chmod/config failure warns and continues
-// rather than wedging an otherwise-complete init.
-export async function hardenBeadsRepo(beadsPath: string, role = 'maintainer'): Promise<void> {
-  if (!existsSync(beadsPath)) return; // nothing materialized — nothing to harden
-  try {
-    chmodSync(beadsPath, 0o700);
-    await exec('git', ['config', 'beads.role', role], { cwd: beadsPath });
-  } catch (err) {
-    console.log(`  could not harden beads repo at ${beadsPath} (bd may warn) — ${(err as Error).message}`);
-  }
-}
-
-// ── Step 4: Create .beads symlink ─────────────────────────────────────────────
-
-export function createBeadsSymlink(repoPath: string, beadsPath: string): void {
-  const symlinkPath = join(repoPath, '.beads');
-  const target = resolve(beadsPath);
-  try {
-    const current = readlinkSync(symlinkPath);
-    if (resolve(current) === target) return;
-    throw new Error(`.beads symlink exists but points to "${current}" instead of "${target}"`);
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'EINVAL') {
-      throw new Error(
-        `.beads already exists as a directory at "${symlinkPath}". ` +
-        `Remove it first: rm -rf "${symlinkPath}"`
-      );
-    }
-    if (code !== 'ENOENT') throw err;
-    symlinkSync(target, symlinkPath);
-  }
-}
-
-// ── Step 5: Update .gitignore ─────────────────────────────────────────────────
-
-// Entries init keeps out of the repo. `.beads` is a machine-local symlink;
-// `.shreni/kshetra.yaml` holds ABSOLUTE machine-specific repo/beads paths so it
-// must not be committed; `.shreni/repo-map.md` is a deterministic cache Shreni
+// Entries init keeps out of the repo. `.shreni/kshetra.yaml` holds ABSOLUTE
+// machine-specific paths so it must not be committed; `.shreni/repo-map.md` is a deterministic cache Shreni
 // regenerates on every merge (src/kshetra/repo-map.ts) — committing it only
 // churns the tree and, worse, its post-merge regen leaves it dirty and wedges
 // preFlightCheck. All are ignored by exact path, NOT as `.shreni/`, so the
 // tracked conventions docs (.shreni/style-guide.md, .shreni/arch.md) stay
 // committable.
-const GITIGNORE_MARKERS = ['.beads', `${SHRENI_DIR}/kshetra.yaml`, `${SHRENI_DIR}/repo-map.md`];
+const GITIGNORE_MARKERS = [`${SHRENI_DIR}/kshetra.yaml`, `${SHRENI_DIR}/repo-map.md`];
 
 export function addToGitignore(repoPath: string): void {
   const gitignorePath = join(repoPath, '.gitignore');
@@ -326,16 +209,7 @@ export function addToGitignore(repoPath: string): void {
   }
 }
 
-// ── Step 6: bd setup claude ───────────────────────────────────────────────────
-
-export async function setupClaudeHooks(repoPath: string, beadsPath: string): Promise<void> {
-  await exec('bd', ['setup', 'claude'], {
-    cwd: repoPath,
-    env: { ...process.env, BEADS_DIR: beadsPath },
-  });
-}
-
-// ── Step 7: Generate kshetra.yaml ─────────────────────────────────────────────
+// ── Generate kshetra.yaml ─────────────────────────────────────────────
 
 // Build the stack YAML block from a detected profile: always the language, plus
 // any populated toolchain fields (packageManager + the build/test/lint commands
@@ -649,8 +523,6 @@ export function generateKshetraYaml(opts: {
   slug: string;
   repoPath: string;
   repoRemote: string;
-  beadsPath: string;
-  beadsRemote: string;
   // The base branch the whole loop builds on (uvu.3). Defaults to 'main' when
   // the interview did not resolve a custom value (non-TTY / scripted runs).
   mainBranch?: string;
@@ -699,11 +571,6 @@ export function generateKshetraYaml(opts: {
       // config stays clean and back-compatible.
       ...(opts.mergePolicy === 'pr' ? { mergePolicy: 'pr' } : {}),
     },
-    beads: {
-      path: opts.beadsPath,
-      remote: opts.beadsRemote,
-      mode: 'embedded',
-    },
     stack: opts.packStack ? stackBlockFromConfig(opts.packStack) : stackBlock(stack),
     ...(opts.pack ? { pack: opts.pack } : {}),
     ...(Object.keys(conventions).length ? { conventions } : {}),
@@ -729,7 +596,7 @@ export function generateKshetraYaml(opts: {
 
 // Write the config to the canonical <repo>/.shreni/kshetra.yaml (not the repo
 // root — migrate.ts moves any legacy root file here). The loader uses
-// repo.path/beads.path verbatim, so the caller must pass a YAML with absolute
+// repo.path verbatim, so the caller must pass a YAML with absolute
 // paths already baked in (the orchestrator resolves them before generating).
 export function writeKshetraConfig(repoPath: string, content: string): string {
   const shreniDir = join(repoPath, SHRENI_DIR);
@@ -766,20 +633,7 @@ export function scaffoldConventions(repoPath: string): { styleGuide: string; arc
   return { styleGuide: STYLE_GUIDE_FILE, architecture: ARCH_FILE };
 }
 
-// ── Step 8: Append SHRENI INTEGRATION to CLAUDE.md ───────────────────────────
-
-export const SHRENI_SECTION = LEGACY_SECTION;
-
-export function appendShreniIntegration(repoPath: string): void {
-  const claudePath = join(repoPath, 'CLAUDE.md');
-  if (existsSync(claudePath)) {
-    const content = readFileSync(claudePath, 'utf8');
-    if (content.includes('SHRENI INTEGRATION')) return;
-  }
-  appendFileSync(claudePath, SHRENI_SECTION, 'utf8');
-}
-
-// ── Step 9: RAG index stub ────────────────────────────────────────────────────
+// ── RAG index stub ────────────────────────────────────────────────────
 
 export function createRagIndexStub(slug: string): void {
   const ragDir = ragIndexDir(slug);
@@ -790,7 +644,7 @@ export function createRagIndexStub(slug: string): void {
   }
 }
 
-// ── Step 10: Register ─────────────────────────────────────────────────────────
+// ── Register ─────────────────────────────────────────────────────────
 
 export function registerWithSthapathi(slug: string, configPath: string): void {
   registerKshetra(slug, configPath);
@@ -816,12 +670,10 @@ function buildReRunCommand(opts: InitKshetraOpts): string {
   if (opts.provider) parts.push(`--provider ${opts.provider}`);
   if (opts.model) parts.push(`--model ${opts.model}`);
   if (opts.language) parts.push(`--language ${opts.language}`);
-  if (opts.beadsPath) parts.push(`--beads-path ${opts.beadsPath}`);
   if (opts.mergePolicy) parts.push(`--merge-policy ${opts.mergePolicy}`);
   if (opts.pack) parts.push(`--pack ${opts.pack}`);
   if (opts.noPack) parts.push('--no-pack');
   if (opts.upgrade) parts.push('--upgrade');
-  if (!opts.engine) parts.push('--on-beads');
   return parts.join(' ');
 }
 
@@ -888,7 +740,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
 
   // --upgrade is a narrow re-application, not a re-init: update stack values +
   // provenance in the existing config, print template diffs (docs stay
-  // user-owned, ARD OQ1), and stop — no repo/beads/register phases.
+  // user-owned, ARD OQ1), and stop — no repo/database/register phases.
   if (opts.upgrade && pack && packStack) {
     const configPath = join(repoPath, SHRENI_DIR, 'kshetra.yaml');
     if (!existsSync(configPath)) {
@@ -899,9 +751,6 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     await printPackTemplateDiffs(pack, repoPath);
     return;
   }
-  const beadsPath = opts.beadsPath
-    ? resolve(opts.beadsPath)
-    : resolve(join(dirname(repoPath), `${basename(repoPath)}-beads`));
   const reRunCmd = buildReRunCommand(opts);
 
   // ── Preflight (§3.5) — provider selection + install hard gate + detection ────
@@ -998,7 +847,6 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     console.log(`  provider:    ${providerLabel}`);
     console.log(`  mergePolicy: ${mergePolicy ?? 'push'}${mergePolicy ? '' : ' (default)'}`);
     console.log(`  repo:        ${repoPath}`);
-    console.log(`  beads repo:  ${beadsPath}`);
     console.log(`  config:      ${configTarget}`);
     if (pack) console.log(`  pack:        ${pack.name}@${pack.version}`);
     console.log(`  conventions: ${join(repoPath, STYLE_GUIDE_FILE)}, ${join(repoPath, ARCH_FILE)}${pack ? `, ${join(repoPath, REVIEW_GUIDE_FILE)}` : ''}`);
@@ -1006,9 +854,9 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     return;
   }
 
-  // Owner resolution is deferred AND memoized: a run whose app repo and beads
-  // repo already have origins (the certification harness's local bare remotes,
-  // or any pre-wired repo) never needs an owner, so it must not fail for lack
+  // Owner resolution is deferred AND memoized: a run whose app repo already
+  // has an origin (the certification harness's local bare remote, or any
+  // pre-wired repo) never needs an owner, so it must not fail for lack
   // of one. Resolve lazily — only when a repo actually has to be created — and
   // cache so at most one `gh api user` call happens across the phases.
   let orgCache: string | undefined;
@@ -1016,14 +864,18 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
 
   // ── Mutating phases ──────────────────────────────────────────────────────────
   // Shared state threaded between phases via closures.
-  let beadsRemote = '';
   let configPath = configTarget;
   // repo.mainBranch (uvu.3): resolved in the Base branch phase (after origin
   // exists), consumed by generateKshetraYaml in the Config phase.
   let mainBranch = 'main';
-  // On the engine: the database and project the config names, kept on a re-run;
-  // a tracker's when this Kshetra replaces one.
+  // The database and project the config names, kept on a re-run; a tracker's
+  // when this Kshetra replaces one.
   const own = readProjectFields(configTarget);
+  // A Kshetra still on beads is moved by shreni migrate, which imports its tasks;
+  // init would register an empty project and leave them behind.
+  if (existsSync(configTarget) && !own.project && onBeads({ repo: { path: repoPath } }, configTarget)) {
+    throw new Error(`${opts.slug} is still on beads; run shreni migrate ${opts.slug} to move its tasks to the engine, then init again if needed`);
+  }
   const replaced = opts.replaces ? readProjectFields(opts.replaces) : {};
   const kept = { project: own.project ?? replaced.project, database: own.database ?? replaced.database };
   const database = kept.database ?? 'local';
@@ -1051,60 +903,10 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         });
       },
     },
-    ...(engine ? [{
+    {
       name: 'Database',
       recovery: `run shreni db check to see what the database needs.`,
       run: () => engine.database(database),
-    }] : []),
-    {
-      name: 'Beads repo',
-      recovery:
-        `ensure \`gh\` is authenticated (gh auth status) and you can push to GitHub, ` +
-        `or pass --beads-path to point at an existing beads repo.`,
-      run: async () => {
-        if (opts.beadsPath && existsSync(beadsPath)) {
-          console.log(`  using existing beads repo at ${beadsPath} — skipping create/clone`);
-          try {
-            beadsRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: beadsPath });
-          } catch {
-            beadsRemote = '';
-          }
-        } else {
-          beadsRemote = await createGitHubRepo(getOrg, opts.slug);
-          await cloneBeadsRepo(beadsRemote, beadsPath);
-        }
-        await initBeadsDb(beadsPath);
-        // Track interactions.jsonl from day one (4a2.7): bd's fresh .gitignore
-        // ignores it, but it is real bd field-change provenance that nothing else
-        // carries into git. Remove that ignore BEFORE pushBeadsRepo so the change
-        // rides in the init commit. Idempotent; a no-op if bd's layout ever drops
-        // the line. Note: Step 5's .gitignore edit is a DIFFERENT file (the
-        // PROJECT repo's .gitignore, for `.shreni`); this is the beads repo's.
-        // Best-effort: this is a durability convenience, so a .gitignore hiccup
-        // must never wedge an otherwise-complete Kshetra init; the line can be
-        // removed by hand later.
-        try {
-          if (untrackInteractions(beadsPath) === 'changed') {
-            console.log('  beads repo now tracks interactions.jsonl (was gitignored)');
-          }
-        } catch (err) {
-          console.warn(`  could not un-ignore interactions.jsonl (remove that line from the beads repo's .gitignore by hand): ${(err as Error).message}`);
-        }
-        await hardenBeadsRepo(beadsPath);
-        await pushBeadsRepo(beadsPath);
-      },
-    },
-    {
-      name: 'Repo wiring',
-      recovery:
-        `if .beads exists as a real directory, remove it (rm -rf .beads); ` +
-        `ensure \`bd\` is installed for the Claude Code hooks.`,
-      run: async () => {
-        createBeadsSymlink(repoPath, beadsPath);
-        addToGitignore(repoPath);
-        // On the engine the prime hooks come with the instructions block (Config).
-        if (!engine) await setupClaudeHooks(repoPath, beadsPath);
-      },
     },
     {
       name: 'Config',
@@ -1113,7 +915,8 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         `(git -C ${repoPath} remote get-url origin).`,
       run: async () => {
         repoRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
-        // repoPath/beadsPath are already absolute; the loader does NOT expand ~ or
+        addToGitignore(repoPath);
+        // repoPath is already absolute; the loader does NOT expand ~ or
         // resolve relatives, so init bakes absolute paths in.
         // A pack materializes its own conventions templates (skip-and-warn);
         // otherwise the generic stubs are scaffolded as before.
@@ -1124,8 +927,6 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           slug: opts.slug,
           repoPath,
           repoRemote,
-          beadsPath,
-          beadsRemote,
           mainBranch,
           stack,
           packStack,
@@ -1134,24 +935,20 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           agents,
           mergePolicy,
           gates,
-          // Kept whenever the config names them, so a run without the engine never unlinks it.
-          ...(engine || kept.project ? { database, project: kept.project } : {}),
+          database,
+          project: kept.project,
         });
         configPath = writeKshetraConfig(repoPath, yamlContent);
-        if (engine) {
-          // The Kshetra block in its provider's file, and the prime hooks (policy spec, "Instructions for agent sessions").
-          for (const l of setupInstructions({ kind: 'kshetra', path: configPath, config: loadKshetraConfig(configPath) })) console.log(`  ${l}`);
-        } else {
-          appendShreniIntegration(repoPath);
-        }
+        // The Kshetra block in its provider's file, and the prime hooks (policy spec, "Instructions for agent sessions").
+        for (const l of setupInstructions({ kind: 'kshetra', path: configPath, config: loadKshetraConfig(configPath) })) console.log(`  ${l}`);
         createRagIndexStub(opts.slug);
       },
     },
-    ...(engine ? [{
+    {
       name: 'Project',
       recovery: `run shreni db check; if the config names a project this database lacks, fix database: or delete project:.`,
       run: async () => {
-        const id = await engine.project({ database, existing: kept.project, repoUrl: repoRemote, beads: { dir: beadsPath, repo: repoPath, configPath } });
+        const id = await engine.project({ database, existing: kept.project, repoUrl: repoRemote });
         recordProjectId(configPath, id);
         // The repo is one kind of project or the other, never both.
         if (opts.replaces && existsSync(opts.replaces)) {
@@ -1159,7 +956,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
           console.log(`  removed ${opts.replaces}; commit its removal`);
         }
       },
-    }] : []),
+    },
     {
       name: 'Register',
       recovery: `check that ~/.shreni/registry.json is writable.`,
@@ -1178,6 +975,5 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   console.log(`\n✓ Initialization done — Shreni is now ready to work on "${opts.slug}".`);
   console.log(`  provider:   ${providerLabel}`);
   console.log(`  config:     ${configPath}`);
-  console.log(`  beads repo: ${beadsPath}`);
   console.log(`\nRun \`shreni start\` to begin.`);
 }

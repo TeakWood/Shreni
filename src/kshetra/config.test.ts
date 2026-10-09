@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { loadKshetraConfig, KshetraConfigError, resolveAgentModel } from './config.js';
+import { loadKshetraConfig, KshetraConfigError, resolveAgentModel, legacyBeadsPath, requireProject, NotMigratedError } from './config.js';
 
 const VALID_YAML = `
 id: myapp
@@ -47,8 +47,32 @@ describe('loadKshetraConfig', () => {
     expect(config.id).toBe('myapp');
     expect(config.name).toBe('Myapp');
     expect(config.repo.mainBranch).toBe('main');
-    expect(config.beads.mode).toBe('embedded');
     expect(config.stack.language).toBe('typescript');
+  });
+
+  it('loads an old config with a beads: block, stripping the key', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML);
+    const config = loadKshetraConfig(path);
+    expect(config.id).toBe('myapp');
+    expect('beads' in config).toBe(false);
+  });
+
+  it('legacyBeadsPath reads beads.path straight from the file', () => {
+    const path = join(dir, 'kshetra.yaml');
+    writeFileSync(path, VALID_YAML);
+    expect(legacyBeadsPath(path)).toBe('/projects/myapp-beads');
+    writeFileSync(path, VALID_YAML.replace(/beads:\n(  .*\n)+/, ''));
+    expect(legacyBeadsPath(path)).toBeUndefined();
+    writeFileSync(path, 'beads: [unclosed');
+    expect(legacyBeadsPath(path)).toBeUndefined();
+    expect(legacyBeadsPath(join(dir, 'missing.yaml'))).toBeUndefined();
+  });
+
+  it('requireProject returns the project, or names shreni migrate', () => {
+    expect(requireProject({ id: 'x', project: 'p1' })).toBe('p1');
+    expect(() => requireProject({ id: 'x' })).toThrow(NotMigratedError);
+    expect(() => requireProject({ id: 'x' })).toThrow('x has no task graph project: run shreni migrate x');
   });
 
   it('accepts a pack provenance line and rejects a malformed one', () => {
@@ -69,7 +93,8 @@ describe('loadKshetraConfig', () => {
     const path = join(dir, 'kshetra.yaml');
     writeFileSync(path, VALID_YAML + '\nwatchdog:\n  stuckThresholdMs: 600000\n  maxOutcomeRepeat: 3\n  maxRecoverAttempts: 2\n');
     const config = loadKshetraConfig(path);
-    expect(config.watchdog).toEqual({ stuckThresholdMs: 600000, maxOutcomeRepeat: 3, maxRecoverAttempts: 2 });
+    // maxRecoverAttempts is gone (the engine's lease expiry caps retries): an old config still loads, without it.
+    expect(config.watchdog).toEqual({ stuckThresholdMs: 600000, maxOutcomeRepeat: 3 });
   });
 
   it('rejects an invalid watchdog value (maxOutcomeRepeat < 1)', () => {

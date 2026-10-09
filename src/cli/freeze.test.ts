@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { execFileSync } from 'child_process';
 
 const HOME = join(tmpdir(), `shreni-freeze-home-${process.pid}`);
 const WORK = join(tmpdir(), `shreni-freeze-work-${process.pid}`);
@@ -12,36 +11,46 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: () => HOME };
 });
 
+// The task graph engine is faked: freezeEngine writes the "project" (a list of
+// tasks and memories) as engine.json and returns its stats, as the real one
+// does from the project's bundle (that path is covered by freeze-engine.test.ts).
+const engine = vi.hoisted(() => ({
+  tasks: [] as { id: string; status: string }[],
+  memories: 0,
+  force: undefined as boolean | undefined,
+}));
+vi.mock('../policy/sthapathi/snapshot', async () => {
+  const { writeFileSync } = await import('fs');
+  const { join } = await import('path');
+  const { createHash } = await import('crypto');
+  return {
+    freezeEngine: async (k: { project: string }, outDir: string, opts: { force?: boolean } = {}) => {
+      engine.force = opts.force;
+      writeFileSync(join(outDir, 'engine.json'), JSON.stringify(engine));
+      const ids = engine.tasks.map(t => t.id).sort();
+      return {
+        info: { projectId: k.project, lastEventId: '42', eventCount: 3, snapshotPath: 'engine.json' },
+        stats: {
+          beadCount: ids.length, memoryCount: engine.memories,
+          openCount: engine.tasks.filter(t => t.status !== 'closed').length,
+          closedCount: engine.tasks.filter(t => t.status === 'closed').length,
+          beadIdHash: 'sha256:' + createHash('sha256').update(ids.join('\n')).digest('hex'),
+        },
+      };
+    },
+  };
+});
+
 const { runFreeze, resolveFreezeOutDir } = await import('./freeze.js');
 const { makeContext } = await import('./registry.js');
 
 const KID = 'testk';
-const beadsPath = join(WORK, 'beads');
+const PROJECT = '0b9d6f4e-6a43-4c1e-9d77-2f6f3c1a9e10';
 const repoPath = join(WORK, 'repo');
+const ledger = () => join(HOME, '.shreni', 'kshetra', KID, 'ledger.jsonl');
 
 function ctx(args: string[]) {
   return makeContext(args);
-}
-
-function seedBeads(issues: object[]): void {
-  mkdirSync(beadsPath, { recursive: true });
-  writeFileSync(
-    join(beadsPath, 'issues.jsonl'),
-    issues.map(i => JSON.stringify(i)).join('\n') + '\n',
-  );
-  writeFileSync(
-    join(beadsPath, 'export-state.json'),
-    JSON.stringify({ last_dolt_commit: 'dolt-xyz', issues: issues.length }),
-  );
-  writeFileSync(join(beadsPath, 'ledger.jsonl'), JSON.stringify({ kind: 'task_done', beadId: 'testk-2' }) + '\n');
-  // Make it a real git repo so headSha is captured.
-  execFileSync('git', ['-C', beadsPath, 'init', '-q']);
-  execFileSync('git', ['-C', beadsPath, 'add', '-A']);
-  execFileSync('git', [
-    '-C', beadsPath,
-    '-c', 'user.email=t@e.st', '-c', 'user.name=Test',
-    'commit', '-q', '-m', 'seed',
-  ]);
 }
 
 beforeEach(() => {
@@ -50,11 +59,9 @@ beforeEach(() => {
   mkdirSync(HOME, { recursive: true });
   mkdirSync(repoPath, { recursive: true });
 
-  seedBeads([
-    { _type: 'issue', id: 'testk-1', status: 'open' },
-    { _type: 'issue', id: 'testk-2', status: 'closed' },
-    { _type: 'memory', key: 'm1', value: 'insight' },
-  ]);
+  engine.tasks = [{ id: 'testk-1', status: 'open' }, { id: 'testk-2', status: 'closed' }];
+  engine.memories = 1;
+  engine.force = undefined;
 
   // kshetra.yaml + registry
   const cfgPath = join(WORK, 'kshetra.yaml');
@@ -63,11 +70,9 @@ beforeEach(() => {
     [
       `id: ${KID}`,
       'name: TestK',
+      `project: ${PROJECT}`,
       'repo:',
       `  path: ${repoPath}`,
-      "  remote: ''",
-      'beads:',
-      `  path: ${beadsPath}`,
       "  remote: ''",
       'stack:',
       '  language: typescript',
@@ -79,9 +84,10 @@ beforeEach(() => {
     JSON.stringify({ kshetras: [{ id: KID, configPath: cfgPath, registeredAt: 'now' }] }),
   );
 
-  // machine-side runtime dir + rag index
+  // machine-side runtime dir (with its ledger) + rag index
   mkdirSync(join(HOME, '.shreni', 'kshetra', KID), { recursive: true });
   writeFileSync(join(HOME, '.shreni', 'kshetra', KID, 'activity.jsonl'), '{"t":"x"}\n');
+  writeFileSync(ledger(), JSON.stringify({ kind: 'task_done', beadId: 'testk-2' }) + '\n');
   mkdirSync(join(HOME, '.shreni', 'rag', KID), { recursive: true });
   writeFileSync(join(HOME, '.shreni', 'rag', KID, 'index.json'), '{"chunks":[]}');
 
@@ -111,13 +117,17 @@ describe('runFreeze', () => {
     expect(m.beads.beadCount).toBe(2);
     expect(m.beads.memoryCount).toBe(1);
     expect(m.beads.closedCount).toBe(1);
-    expect(m.beads.lastDoltCommit).toBe('dolt-xyz');
-    expect(m.beads.headSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(m.beads.lastDoltCommit).toBeNull();
+    expect(m.beads.headSha).toBeNull();
+    expect(m.schemaVersion).toBe(2);
+    expect(m.engine).toEqual({ projectId: PROJECT, lastEventId: '42', eventCount: 3, snapshotPath: 'engine.json' });
     expect(m.labels).toEqual({ arm: 'A' });
     expect(m.repoPath).toBe(repoPath);
 
-    // beads + runtime + rag copied
-    expect(existsSync(join(out, 'beads', 'issues.jsonl'))).toBe(true);
+    // the project bundle + runtime + rag copied; no beads location
+    expect(existsSync(join(out, 'engine.json'))).toBe(true);
+    expect(existsSync(join(out, 'beads'))).toBe(false);
+    expect(m.locations.map((l: { key: string }) => l.key)).not.toContain('beads');
     expect(existsSync(join(out, 'runtime', 'activity.jsonl'))).toBe(true);
     expect(existsSync(join(out, 'rag', 'index.json'))).toBe(true);
     expect(m.rag.present).toBe(true);
@@ -139,17 +149,18 @@ describe('runFreeze', () => {
     const m = JSON.parse(readFileSync(join(out, 'manifest.json'), 'utf8'));
     expect(m.snapshotId).toMatch(/^snap:[0-9a-f]{32}$/);
 
-    // The snapshot's OWN ledger predates the freeze (copied before the append)...
-    expect(existsSync(join(out, 'beads', 'ledger.jsonl'))).toBe(true);
-    expect(readFileSync(join(out, 'beads', 'ledger.jsonl'), 'utf8')).not.toContain('state_frozen');
+    // The snapshot's OWN ledger (in the runtime dir) predates the freeze (copied before the append)...
+    expect(existsSync(join(out, 'runtime', 'ledger.jsonl'))).toBe(true);
+    expect(readFileSync(join(out, 'runtime', 'ledger.jsonl'), 'utf8')).not.toContain('state_frozen');
     // ...but the LIVE ledger records it.
-    const live = readFileSync(join(beadsPath, 'ledger.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    const live = readFileSync(ledger(), 'utf8').trim().split('\n').map(l => JSON.parse(l));
     const frozen = live.find(e => e.kind === 'state_frozen');
     expect(frozen).toBeTruthy();
     expect(frozen.payload.snapshotId).toBe(m.snapshotId);
     expect(frozen.payload.beadCount).toBe(2);
     expect(frozen.payload.memoryCount).toBe(1);
     expect(frozen.payload.labels).toEqual({ arm: 'A' });
+    expect(frozen.payload.lastEventId).toBe('42');
     expect(frozen.beadId).toBe(''); // kshetra-level, not bead-level
   });
 
@@ -178,9 +189,19 @@ describe('runFreeze', () => {
     await expect(runFreeze(ctx(['--kshetra', KID, '--out', join(WORK, 'a')]))).rejects.toThrow(
       /alive/i,
     );
-    // --force overrides
+    // --force overrides, and reaches the engine freeze (which ignores the worker lock)
     await runFreeze(ctx(['--kshetra', KID, '--out', join(WORK, 'b'), '--force']));
     expect(existsSync(join(WORK, 'b', 'manifest.json'))).toBe(true);
+    expect(engine.force).toBe(true);
+  });
+
+  it('refuses a Kshetra with no project, naming shreni migrate', async () => {
+    const cfgPath = join(WORK, 'kshetra.yaml');
+    writeFileSync(cfgPath, readFileSync(cfgPath, 'utf8').replace(/^project:.*\n/m, ''));
+    await expect(runFreeze(ctx(['--kshetra', KID, '--out', join(WORK, 'c')]))).rejects.toThrow(
+      /run shreni migrate testk/,
+    );
+    expect(existsSync(join(WORK, 'c'))).toBe(false);
   });
 
   it('refuses a missing kshetra, missing flags, and a non-empty out dir', async () => {

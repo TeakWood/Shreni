@@ -2,22 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { PrStatus, PrReview, PrCheck, PrCommit } from './gh.js';
 
-// bd is mocked so readWatermark / selectFollowup can be driven from fixtures.
-const mockShow = vi.fn<() => Promise<string>>();
-const mockAddNote = vi.fn<() => Promise<string>>();
-const mockList = vi.fn<() => Promise<string>>();
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ show: mockShow, addNote: mockAddNote, list: mockList })),
-}));
-
 const {
   resolvePrFollowup,
   parseWatermark,
   formatWatermark,
-  readWatermark,
-  writeWatermark,
   detectPrFeedback,
-  selectFollowup,
   PR_NEEDS_FOLLOWUP_LABEL,
 } = await import('./pr-followup.js');
 
@@ -46,9 +35,6 @@ function commit(over: Partial<PrCommit> = {}): PrCommit {
 const SELF = ['shreni-bot'];
 
 beforeEach(() => {
-  mockShow.mockReset();
-  mockAddNote.mockReset();
-  mockList.mockReset();
   delete process.env.SHRENI_PR_FOLLOWUP;
 });
 afterEach(() => {
@@ -85,30 +71,6 @@ describe('watermark parse/format', () => {
       formatWatermark({ head: 'new222', round: 3, at: '2026-07-29T14:00:00Z' }),
     ].join('\n');
     expect(parseWatermark(notes)).toEqual({ head: 'new222', round: 3, at: '2026-07-29T14:00:00Z' });
-  });
-});
-
-describe('readWatermark / writeWatermark', () => {
-  it('reads the watermark from bd show --json notes', async () => {
-    mockShow.mockResolvedValue(
-      JSON.stringify({ id: 'b1', notes: formatWatermark({ head: 'h1', round: 2, at: '2026-07-29T09:00:00Z' }) }),
-    );
-    expect(await readWatermark(KSHETRA, 'b1')).toEqual({ head: 'h1', round: 2, at: '2026-07-29T09:00:00Z' });
-  });
-  it('tolerates a bd show that returns a JSON array', async () => {
-    mockShow.mockResolvedValue(JSON.stringify([{ id: 'b1', notes: 'pr-followup-head:zz pr-followup-round:0 pr-followup-at:t' }]));
-    expect((await readWatermark(KSHETRA, 'b1')).head).toBe('zz');
-  });
-  it('returns a zeroed watermark when bd show fails or has no notes', async () => {
-    mockShow.mockRejectedValue(new Error('bd unavailable'));
-    expect(await readWatermark(KSHETRA, 'b1')).toEqual({ head: null, round: 0, at: null });
-    mockShow.mockResolvedValue(JSON.stringify({ id: 'b1' }));
-    expect(await readWatermark(KSHETRA, 'b1')).toEqual({ head: null, round: 0, at: null });
-  });
-  it('writeWatermark appends a formatted note', async () => {
-    mockAddNote.mockResolvedValue('ok');
-    await writeWatermark(KSHETRA, 'b1', { head: 'h9', round: 1, at: '2026-07-29T15:00:00Z' });
-    expect(mockAddNote).toHaveBeenCalledWith('b1', 'pr-followup-head:h9 pr-followup-round:1 pr-followup-at:2026-07-29T15:00:00Z');
   });
 });
 
@@ -259,37 +221,6 @@ describe('detectPrFeedback', () => {
     });
     expect(fb?.triggers).toEqual(['changes_requested', 'failing_check', 'foreign_commit']);
     expect(fb?.round).toBe(0); // new review resets even with other triggers present
-  });
-});
-
-describe('selectFollowup', () => {
-  const K = { repo: { prFollowup: true } } as unknown as KshetraConfig;
-
-  it('returns null when follow-up is disabled', async () => {
-    expect(await selectFollowup({ repo: { prFollowup: false } } as unknown as KshetraConfig)).toBeNull();
-    expect(mockList).not.toHaveBeenCalled();
-  });
-
-  it('queries in_progress + pr-needs-followup and returns the first bead marked followup', async () => {
-    mockList.mockResolvedValue(
-      JSON.stringify([
-        { id: 'proj-1', title: 'First PR', priority: 2 },
-        { id: 'proj-2', title: 'Second PR', priority: 1 },
-      ]),
-    );
-    const t = await selectFollowup(K);
-    expect(mockList).toHaveBeenCalledWith({ status: 'in_progress', label: 'pr-needs-followup' });
-    expect(t).toMatchObject({ id: 'proj-1', slug: 'first-pr', followup: true, status: 'in_progress' });
-  });
-
-  it('returns null when no bead carries the label', async () => {
-    mockList.mockResolvedValue('[]');
-    expect(await selectFollowup(K)).toBeNull();
-  });
-
-  it('degrades to null when bd list throws', async () => {
-    mockList.mockRejectedValue(new Error('bd down'));
-    expect(await selectFollowup(K)).toBeNull();
   });
 });
 

@@ -1,9 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { KshetraConfig } from '../kshetra/config.js';
 
-// Mock execFile before importing the accessor so all `bd` calls go through the spy.
-const execFileMock = vi.fn();
-vi.mock('child_process', () => ({ execFile: execFileMock }));
+// The engine's reads, as withTrackerReads hands them over: every list/show goes
+// through these spies, recorded with the Kshetra and the options it was read with.
+type Call = { kshetra: string; shared?: boolean; op: 'list' | 'show'; arg: unknown };
+const reads = vi.hoisted(() => ({
+  calls: [] as { kshetra: string; shared?: boolean; op: 'list' | 'show'; arg: unknown }[],
+  // Each read takes the next result; the last one repeats.
+  results: [] as ({ ok: string } | { err: string })[],
+}));
+vi.mock('../policy/sthapathi/reads.js', () => ({
+  withTrackerReads: async (k: { id: string }, fn: (r: unknown) => Promise<unknown>, opts: { shared?: boolean } = {}) => {
+    const answer = (op: 'list' | 'show', arg: unknown) => {
+      reads.calls.push({ kshetra: k.id, shared: opts.shared, op, arg });
+      const r = reads.results.length > 1 ? reads.results.shift()! : reads.results[0];
+      if (!r) return Promise.resolve('[]');
+      return 'err' in r ? Promise.reject(new Error(r.err)) : Promise.resolve(r.ok);
+    };
+    return fn({ list: (f: unknown) => answer('list', f), show: (id: string) => answer('show', id) });
+  },
+}));
 
 const {
   beadsRead,
@@ -18,18 +34,18 @@ const {
 const KSHETRA: KshetraConfig = {
   id: 'myapp',
   name: 'Myapp',
+  project: '0b9d6f4e-6a43-4c1e-9d77-2f6f3c1a9e10',
   repo: { path: '/projects/myapp', remote: 'git@github.com:TeakWood/myapp.git', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/projects/myapp-beads', remote: 'git@github.com:TeakWood/myapp-beads.git', mode: 'embedded' },
   stack: { language: 'typescript' },
   conventions: {},
   agents: { provider: 'anthropic', model: 'claude-sonnet-4', maxRoundsPerBead: 3 },
   priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
-};
+} as unknown as KshetraConfig;
 
 const KSHETRA_B: KshetraConfig = {
   ...KSHETRA,
   id: 'mandira',
-  beads: { ...KSHETRA.beads, path: '/projects/mandira-beads' },
+  project: '5d1f2a6b-8c3e-4f70-a1b2-c3d4e5f60718',
 };
 
 const LIST_JSON = JSON.stringify([
@@ -69,25 +85,20 @@ const SHOW_JSON = JSON.stringify([
 ]);
 
 function mockSuccess(stdout: string) {
-  execFileMock.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
-    cb(null, { stdout, stderr: '' });
-  });
+  reads.results = [{ ok: stdout }];
 }
 
-function mockFailure(stderr: string) {
-  const err = Object.assign(new Error('Command failed'), { stderr });
-  execFileMock.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
-    cb(err, { stdout: '', stderr });
-  });
+function mockFailure(message: string) {
+  reads.results = [{ err: message }];
 }
 
-function lastCall(): { cmd: string; args: string[]; env: NodeJS.ProcessEnv } {
-  const [cmd, args, opts] = execFileMock.mock.lastCall!;
-  return { cmd, args, env: (opts as { env: NodeJS.ProcessEnv }).env };
+function lastCall(): Call {
+  return reads.calls[reads.calls.length - 1]!;
 }
 
 beforeEach(() => {
-  execFileMock.mockReset();
+  reads.calls = [];
+  reads.results = [];
   clearBeadsReadCache();
 });
 
@@ -108,12 +119,10 @@ describe('isValidBeadId', () => {
 });
 
 describe('beadsRead().list', () => {
-  it('runs `bd list --json` with BEADS_DIR set to the kshetra beads path', async () => {
+  it('lists through the engine\'s reads, on the shared connection Phalaka keeps', async () => {
     mockSuccess(LIST_JSON);
     const tasks = await beadsRead(KSHETRA).list();
-    expect(lastCall().cmd).toBe('bd');
-    expect(lastCall().args).toEqual(['list', '--json', '--limit', '0']);
-    expect(lastCall().env['BEADS_DIR']).toBe('/projects/myapp-beads');
+    expect(lastCall()).toEqual({ kshetra: 'myapp', shared: true, op: 'list', arg: {} });
     expect(tasks).toEqual([
       {
         id: 'proj-1',
@@ -127,28 +136,22 @@ describe('beadsRead().list', () => {
     ]);
   });
 
-  it('passes a status filter through to bd', async () => {
+  it('passes a status filter through to the read', async () => {
     mockSuccess('[]');
     await beadsRead(KSHETRA).list({ status: 'closed' });
-    expect(lastCall().args).toEqual(['list', '--json', '--status', 'closed', '--limit', '0']);
+    expect(lastCall().arg).toEqual({ status: 'closed' });
   });
 
-  it('passes a label filter through to bd', async () => {
+  it('passes a label filter through to the read', async () => {
     mockSuccess('[]');
     await beadsRead(KSHETRA).list({ label: 'pr-needs-followup' });
-    expect(lastCall().args).toEqual(['list', '--json', '--label', 'pr-needs-followup', '--limit', '0']);
+    expect(lastCall().arg).toEqual({ label: 'pr-needs-followup' });
   });
 
-  // bd list returns at most 50 rows without `--limit 0`; the board and the
-  // per-kshetra counts (closed: N) must see every bead (8ym).
-  it.each([{}, { status: 'closed' }, { label: 'pr-needs-followup' }, { status: 'open', label: 'x' }])(
-    'lifts bd\'s 50-row cap on every list (%o)',
-    async filters => {
-      mockSuccess('[]');
-      await beadsRead(KSHETRA).list(filters);
-      expect(lastCall().args.slice(-2)).toEqual(['--limit', '0']);
-    },
-  );
+  it('wraps a failed read in BeadsReadError', async () => {
+    mockFailure('connect ECONNREFUSED');
+    await expect(beadsRead(KSHETRA).list()).rejects.toBeInstanceOf(BeadsReadError);
+  });
 
   it('exposes no mutation methods on the surface', () => {
     mockSuccess('[]');
@@ -164,7 +167,7 @@ describe('beadsRead().show', () => {
   it('parses full detail including dependencies and blockedBy', async () => {
     mockSuccess(SHOW_JSON);
     const detail = await beadsRead(KSHETRA).show('proj-1');
-    expect(lastCall().args).toEqual(['show', 'proj-1', '--json']);
+    expect(lastCall()).toEqual({ kshetra: 'myapp', shared: true, op: 'show', arg: 'proj-1' });
     expect(detail).toMatchObject({
       id: 'proj-1',
       description: 'Do the thing',
@@ -179,19 +182,19 @@ describe('beadsRead().show', () => {
     expect(detail!.dependencies).toHaveLength(2);
   });
 
-  it('defaults labels to an empty array when bd omits them', async () => {
+  it('defaults labels to an empty array when the row omits them', async () => {
     mockSuccess(JSON.stringify([{ id: 'proj-2', title: 'No labels', status: 'open' }]));
     const detail = await beadsRead(KSHETRA).show('proj-2');
     expect(detail!.labels).toEqual([]);
   });
 
-  it('rejects an invalid bead id without shelling out', async () => {
+  it('rejects an invalid bead id without reading', async () => {
     mockSuccess('[]');
     await expect(beadsRead(KSHETRA).show('--status closed')).rejects.toBeInstanceOf(BeadsReadError);
-    expect(execFileMock).not.toHaveBeenCalled();
+    expect(reads.calls).toHaveLength(0);
   });
 
-  it('returns null when bd reports no matching bead', async () => {
+  it('returns null when the read finds no matching task', async () => {
     mockSuccess('[]');
     expect(await beadsRead(KSHETRA).show('proj-404')).toBeNull();
   });
@@ -205,11 +208,11 @@ describe('TTL cache', () => {
     vi.useRealTimers();
   });
 
-  it('serves a cache hit within the TTL (no second bd call)', async () => {
+  it('serves a cache hit within the TTL (no second read)', async () => {
     mockSuccess(LIST_JSON);
     await beadsRead(KSHETRA).list();
     await beadsRead(KSHETRA).list();
-    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(reads.calls).toHaveLength(1);
   });
 
   it('re-fetches after the TTL expires (cache miss)', async () => {
@@ -217,29 +220,29 @@ describe('TTL cache', () => {
     await beadsRead(KSHETRA).list();
     vi.advanceTimersByTime(LIST_CACHE_TTL_MS + 1);
     await beadsRead(KSHETRA).list();
-    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(reads.calls).toHaveLength(2);
   });
 
   it('keys the cache per Kshetra (no cross-contamination)', async () => {
     mockSuccess(LIST_JSON);
     await beadsRead(KSHETRA).list();
     await beadsRead(KSHETRA_B).list();
-    expect(execFileMock).toHaveBeenCalledTimes(2);
-    expect(lastCall().env['BEADS_DIR']).toBe('/projects/mandira-beads');
+    expect(reads.calls).toHaveLength(2);
+    expect(lastCall().kshetra).toBe('mandira');
   });
 
   it('keys list and show separately and by status filter', async () => {
     mockSuccess(LIST_JSON);
     await beadsRead(KSHETRA).list();
     await beadsRead(KSHETRA).list({ status: 'closed' });
-    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(reads.calls).toHaveLength(2);
   });
 
   it('keys the cache by label so a label filter never returns the unfiltered slice', async () => {
     mockSuccess(LIST_JSON);
     await beadsRead(KSHETRA).list(); // unfiltered → key '...::default::'
     await beadsRead(KSHETRA).list({ label: 'pr-needs-followup' }); // → key '...::default::pr-needs-followup'
-    expect(execFileMock).toHaveBeenCalledTimes(2); // distinct keys, not a stale hit
+    expect(reads.calls).toHaveLength(2); // distinct keys, not a stale hit
   });
 });
 
@@ -248,17 +251,12 @@ describe('per-Kshetra error isolation', () => {
     mockFailure('database is locked');
     const result = await readKshetraTasks(KSHETRA);
     expect('error' in result).toBe(true);
-    if ('error' in result) expect(result.error).toContain('bd list failed');
+    if ('error' in result) expect(result.error).toContain('task graph read failed: database is locked');
   });
 
   it('one failing Kshetra does not blank the others', async () => {
     // First kshetra fails, second succeeds.
-    execFileMock.mockImplementationOnce((_c: string, _a: string[], _o: unknown, cb: Function) => {
-      cb(Object.assign(new Error('fail'), { stderr: 'boom' }), { stdout: '', stderr: 'boom' });
-    });
-    execFileMock.mockImplementationOnce((_c: string, _a: string[], _o: unknown, cb: Function) => {
-      cb(null, { stdout: LIST_JSON, stderr: '' });
-    });
+    reads.results = [{ err: 'boom' }, { ok: LIST_JSON }];
 
     const results = await readAllKshetraTasks([KSHETRA, KSHETRA_B]);
     expect(results).toHaveLength(2);

@@ -14,11 +14,9 @@ vi.mock('./git.js', () => ({
   git: vi.fn(() => ({ headSha: mockHeadSha })),
 }));
 
-const mockList = vi.fn<() => Promise<string>>();
-const mockCreate = vi.fn<() => Promise<string>>();
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ list: mockList, create: mockCreate })),
-}));
+// The task store files the repair task (as system, only while none is open).
+const mockEnsureHealthTask = vi.fn<(title: string, priority: number) => Promise<boolean>>();
+vi.mock('./task-store.js', () => ({ engineStore: vi.fn(() => ({ ensureHealthTask: mockEnsureHealthTask })) }));
 
 const mockGetBaseline = vi.fn<() => number>();
 vi.mock('../kshetra/state.js', () => ({
@@ -43,7 +41,6 @@ const KSHETRA: KshetraConfig = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: 'r', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/projects/myapp-beads', remote: 'r', mode: 'embedded' },
   stack: { language: 'typescript', testRunner: 'pnpm test' },
   conventions: {},
   agents: { model: 'claude-sonnet-4', maxRoundsPerBead: 3 },
@@ -71,8 +68,7 @@ beforeEach(() => {
   invalidateHealth(KSHETRA);
   mockHeadSha.mockResolvedValue('sha-aaa');
   mockGetBaseline.mockReturnValue(0);
-  mockList.mockResolvedValue('[]');
-  mockCreate.mockResolvedValue('');
+  mockEnsureHealthTask.mockResolvedValue(true);
 });
 
 // ── parseFailCount ────────────────────────────────────────────────────────────
@@ -174,19 +170,23 @@ describe('checkHealth', () => {
 // ── ensureHealthBead ──────────────────────────────────────────────────────────
 
 describe('ensureHealthBead', () => {
-  it('creates a P0 health bead when none is open', async () => {
+  it('asks the store for a P0 health task naming the failure count', async () => {
     const created = await ensureHealthBead(KSHETRA, 3);
     expect(created).toBe(true);
-    expect(mockCreate).toHaveBeenCalledTimes(1);
-    const [title, priority] = mockCreate.mock.calls[0] as unknown as [string, number, string];
+    expect(mockEnsureHealthTask).toHaveBeenCalledTimes(1);
+    const [title, priority] = mockEnsureHealthTask.mock.calls[0];
     expect(title.startsWith(HEALTH_BEAD_PREFIX)).toBe(true);
+    expect(title).toContain('(3 failing)');
     expect(priority).toBe(0);
   });
 
-  it('does not duplicate when a health bead already exists', async () => {
-    mockList.mockResolvedValue(JSON.stringify([{ id: 'h-1', title: `${HEALTH_BEAD_PREFIX} Restore green test suite` }]));
-    const created = await ensureHealthBead(KSHETRA, 3);
-    expect(created).toBe(false);
-    expect(mockCreate).not.toHaveBeenCalled();
+  it('reports false when the store already has one open', async () => {
+    mockEnsureHealthTask.mockResolvedValue(false);
+    expect(await ensureHealthBead(KSHETRA, 3)).toBe(false);
+  });
+
+  it('names an unknown failure count as such', async () => {
+    await ensureHealthBead(KSHETRA, -1);
+    expect(mockEnsureHealthTask.mock.calls[0][0]).toContain('(an unknown number of failing)');
   });
 });

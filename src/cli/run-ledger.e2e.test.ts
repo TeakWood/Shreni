@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { existsSync, readFileSync } from 'fs';
 import type { KshetraConfig } from '../kshetra/config';
 import type { Task } from '../sthapathi/types';
 
@@ -10,17 +8,18 @@ import type { Task } from '../sthapathi/types';
 // now `drain --max-cycles 1` over the real worker runtime. This test drives BOTH
 // paths through the real runtime (createWorkerRuntime → ledger sink, onPhase →
 // state.json, heartbeat) and the real activity log, writing a REAL ledger.jsonl.
-// Only the leaves that would touch git, bd, agents or the network are stubbed.
+// Only the leaves that would touch git, the database, agents or the network are
+// stubbed: the engine connection, its queue/lock, and the hooks' claim.
 
 function kshetra(id: string): KshetraConfig {
   return {
     id, name: id,
     repo: { path: `/p/${id}`, remote: '', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-    beads: { path: mkdtempSync(join(tmpdir(), `shreni-e2e-${id}-`)), remote: '', mode: 'embedded' },
+    project: `00000000-0000-0000-0000-00000000000${id === 'e2e-run' ? 1 : 2}`, database: 'local',
     stack: { language: 'typescript' }, conventions: {},
     agents: { model: 'm', maxRoundsPerBead: 3 },
     priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
-  };
+  } as unknown as KshetraConfig;
 }
 const K_RUN = kshetra('e2e-run');
 const K_DRAIN = kshetra('e2e-drain');
@@ -31,31 +30,46 @@ vi.mock('../ext/loader', () => ({ loadExtension: async () => false, DEFAULT_EXT_
 vi.mock('../sthapathi/lot-manifest', () => ({
   collectLotManifest: async () => ({ subject: {}, process: {} }),
 }));
-vi.mock('../sthapathi/recover', () => ({ recoverKshetra: async () => [], scheduleResume: async () => {} }));
+vi.mock('../sthapathi/recover', () => ({ resetWorkTree: async () => {} }));
 vi.mock('../sthapathi/repo-map-migration', () => ({ untrackCommittedRepoMap: async () => false }));
 vi.mock('../sthapathi/watchdog', () => ({ runWatchdogOnce: async () => {} }));
 vi.mock('../sthapathi/merge', () => ({ reconcilePullRequests: async () => {} }));
-vi.mock('../sthapathi/pr-followup', () => ({ selectFollowup: async () => null }));
-vi.mock('../sthapathi/beads', () => ({
-  syncBeads: async () => {},
-  // Every bead is closed by the time the exit sequence asks → 'complete'.
-  bd: () => ({ list: async () => '[]', ready: async () => '[]', children: async () => '[]' }),
+// Every task is done by the time the exit sequence asks → 'complete'.
+vi.mock('../policy/sthapathi/reads', () => ({
+  withTrackerReads: (_k: unknown, fn: (r: unknown) => unknown) =>
+    fn({ list: async () => '[]', ready: async () => '[]', children: async () => '[]' }),
 }));
+// The engine connection, the worker lock and the queue: stubs (no database).
+vi.mock('../policy/sthapathi/connect', () => ({
+  openKshetraEngine: async () => ({ shreni: { tg: { project: () => ({ as: () => ({}) }) } }, close: async () => {} }),
+}));
+vi.mock('../policy/sthapathi/leases', async importOriginal => ({
+  ...(await importOriginal<typeof import('../policy/sthapathi/leases')>()),
+  takeWorkerLock: async () => ({ held: async () => true, release: async () => {} }),
+  EngineQueue: class { async peek() { return null; } },
+}));
+vi.mock('../policy/sthapathi/task-store', () => ({ engineTaskStore: () => ({}) }));
+vi.mock('../policy/sthapathi/epics', () => ({ reconcileContainers: async () => ({ completed: [] }) }));
 
-// One ready bead per kshetra. prepareTask claims it (as the real one does, by
-// emitting task_claimed); the "agent loop" merges it and records what
-// `shreni status` would read from state.json at that moment.
+// One ready task per kshetra. prepareTask claims it (as the real hooks do, the
+// claim emitting task_claimed); runTask hands it to the worker's run, whose
+// "agent loop" merges it and records what `shreni status` would read from
+// state.json at that moment.
 const served = new Set<string>();
-vi.mock('../sthapathi/pickup', async importOriginal => ({
-  ...(await importOriginal<typeof import('../sthapathi/pickup')>()),
-  selectNext: async (k: KshetraConfig): Promise<Task | null> =>
-    served.has(k.id) ? null : { id: `${k.id}-b1`, title: 'the bead', priority: 2 } as Task,
-  prepareTask: async (t: Task, k: KshetraConfig): Promise<Task> => {
-    served.add(k.id);
-    const { emit } = await import('../sthapathi/activity-log');
-    emit({ type: 'task_claimed', kshetra: k.id, beadId: t.id, title: t.title });
-    return t;
-  },
+vi.mock('../policy/sthapathi/hooks', () => ({
+  engineHooks: (deps: { run(t: Task, k: KshetraConfig, s: AbortSignal): Promise<void> }) => ({
+    claims: new Map(),
+    endClaim: () => {},
+    selectNext: async (k: KshetraConfig): Promise<Task | null> =>
+      served.has(k.id) ? null : { id: `${k.id}-b1`, title: 'the bead', priority: 2 } as Task,
+    prepareTask: async (t: Task, k: KshetraConfig): Promise<Task> => {
+      served.add(k.id);
+      const { emit } = await import('../sthapathi/activity-log');
+      emit({ type: 'task_claimed', kshetra: k.id, beadId: t.id, title: t.title });
+      return t;
+    },
+    runTask: (t: Task, k: KshetraConfig) => deps.run(t, k, new AbortController().signal),
+  }),
 }));
 
 const persistedDuringWork = new Map<string, { statePhase: unknown; lastActivityTo: unknown }>();
@@ -80,6 +94,7 @@ function phaseEvents(raw: string): Record<string, unknown>[] {
 }
 
 const { runDrain } = await import('./drain');
+const { ledgerPath } = await import('../kshetra/state-locations');
 const { parseLedgerLines } = await import('../ext/ledger');
 const { logPath, heartbeatPath } = await import('../sthapathi/activity-log');
 const { loadState } = await import('../kshetra/state');
@@ -96,7 +111,7 @@ beforeAll(async () => {
   drainResult = await runDrain(K_DRAIN.id, { intervalMs: 1 }, undefined, noDelay);
 });
 
-const ledger = (k: KshetraConfig) => parseLedgerLines(readFileSync(join(k.beads.path, 'ledger.jsonl'), 'utf8'));
+const ledger = (k: KshetraConfig) => parseLedgerLines(readFileSync(ledgerPath(k), 'utf8'));
 
 describe('shreni run through the real worker runtime (end-to-end)', () => {
   it('works the bead and exits through drain\'s exit sequence', () => {

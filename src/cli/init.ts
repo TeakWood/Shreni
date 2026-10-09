@@ -15,7 +15,7 @@ import { ensureMigrated, migrateDeps, realProbe } from './db';
 import { readPid, isAlive } from './pid';
 import { setupInstructions } from './task';
 import { migrateOffBeads } from '../policy/migrate/kshetra';
-import { defaultMigrateDeps, migrationsDir, preImportDump } from './migrate';
+import { migrationsDir, preImportDump } from './migrate';
 
 export interface InitOpts {
   mode?: string;
@@ -25,7 +25,6 @@ export interface InitOpts {
   path?: string;
   org?: string;
   language?: string;
-  beadsPath?: string;
   provider?: string;
   model?: string;
   mergePolicy?: 'push' | 'pr';
@@ -33,8 +32,6 @@ export interface InitOpts {
   pack?: string;
   noPack?: boolean;
   upgrade?: boolean;
-  /** A Kshetra left on beads, with no database or project: what the certification scripts need until beads goes. */
-  onBeads?: boolean;
   /** Imports existing beads without asking, after the dry run passes. */
   yes?: boolean;
 }
@@ -70,8 +67,7 @@ export interface EngineIo {
   probe: DbProbe;
   open: typeof openKshetraEngine;
   env: NodeJS.ProcessEnv;
-  /** What the Import phase uses: bd export, the pre-import dump, and where migrations are recorded. */
-  exportBeads(beadsDir: string): Promise<boolean>;
+  /** What the Import phase uses: the pre-import dump, and where migrations are recorded. */
   dump(database: string): Promise<string>;
   manifestsDir: string;
 }
@@ -87,7 +83,7 @@ export function initEngine(
   deps: Pick<InitDeps, 'interactive' | 'ask' | 'print'>, project: { name: string; mode: ProjectMode; yes?: boolean },
   io: EngineIo = {
     probe: realProbe(), open: openKshetraEngine, env: process.env,
-    exportBeads: defaultMigrateDeps().exportBeads, dump: preImportDump, manifestsDir: migrationsDir(),
+    dump: preImportDump, manifestsDir: migrationsDir(),
   },
 ): InitEngine {
   return {
@@ -122,7 +118,7 @@ export function initEngine(
             id: project.name, name: project.name, mode: project.mode, repo: beads.repo, beadsDir: beads.dir,
             configPath: beads.configPath, database, repoUrl: repoUrl || undefined, touches: [], instructions: () => {},
           }, {
-            exportBeads: io.exportBeads, backup: () => io.dump(database), interactive: deps.interactive, ask: deps.ask,
+            backup: () => io.dump(database), interactive: deps.interactive, ask: deps.ask,
             print: l => deps.print(`  ${l}`), manifestsDir: io.manifestsDir,
           // Init offers no undo: a rerun finds the project the config now names, and the pre-import dump is the way back.
           }, { yes: project.yes, keepManifest: false });
@@ -195,7 +191,6 @@ async function confirmByName(deps: InitDeps, name: string, what: string): Promis
 // .shreni/tracker.yaml, and is never registered, so no worker can start on it.
 export async function runInit(opts: InitOpts, deps: InitDeps = defaultInitDeps()): Promise<void> {
   const mode = await resolveMode(opts, deps);
-  if (opts.onBeads && mode !== 'kshetra') throw new Error('--on-beads is for a Kshetra');
   const rawPath = opts.path ?? (deps.interactive() ? await withDefault(deps, 'Repo path', process.cwd()) : process.cwd());
   const path = resolve(rawPath);
   const trackerPath = join(path, SHRENI_DIR, 'tracker.yaml');
@@ -208,17 +203,16 @@ export async function runInit(opts: InitOpts, deps: InitDeps = defaultInitDeps()
   const slug = opts.slug ?? (deps.interactive() ? await withDefault(deps, mode === 'kshetra' ? 'Kshetra slug' : 'Project name', slugDefault) : slugDefault);
 
   if (mode === 'kshetra') {
-    if (opts.onBeads && isTracker) throw new Error(`${path} is a tracker project; --on-beads can't make it a Kshetra`);
     // Tracker to Kshetra: only ever asked for, and confirmed by name. A run
     // stopped part way has both files, and resumes without asking again.
     if (isTracker && !isKshetra && !opts.dryRun) {
       await confirmByName(deps, current!.name, `${path} is a tracker project; making it a Kshetra lets Shreni's workers take its tasks`);
     }
     return deps.kshetra({
-      slug, path, org: opts.org, language: opts.language, beadsPath: opts.beadsPath, provider: opts.provider,
+      slug, path, org: opts.org, language: opts.language, provider: opts.provider,
       model: opts.model, mergePolicy: opts.mergePolicy, dryRun: opts.dryRun, pack: opts.pack, noPack: opts.noPack,
       upgrade: opts.upgrade,
-      ...(opts.onBeads ? {} : { engine: deps.engine({ name: slug, mode: 'kshetra', yes: opts.yes }) }),
+      engine: deps.engine({ name: slug, mode: 'kshetra', yes: opts.yes }),
       ...(isTracker ? { replaces: trackerPath } : {}),
     });
   }

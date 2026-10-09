@@ -18,30 +18,26 @@ const mockPrView = vi.fn<() => Promise<{ state: string; url: string } | null>>()
 const mockPrStatus = vi.fn<() => Promise<unknown>>();
 vi.mock('./gh.js', () => ({ gh: vi.fn(() => ({ prCreate: mockPrCreate, prView: mockPrView, prStatus: mockPrStatus })) }));
 
-const mockAddNote = vi.fn<() => Promise<string>>();
-const mockAddLabel = vi.fn<() => Promise<string>>();
-const mockRemoveLabel = vi.fn<() => Promise<string>>();
-const mockClose = vi.fn<() => Promise<string>>();
-const mockFlag = vi.fn<() => Promise<string>>();
-const mockList = vi.fn<() => Promise<string>>();
-const mockShow = vi.fn<(id?: string) => Promise<string>>();
-// Direct children, read by the q08 epic auto-close (the REAL epics.ts runs).
-const mockChildren = vi.fn<(id?: string) => Promise<string>>(async () => '[]');
-const mockSyncBeads = vi.fn<() => Promise<void>>();
-vi.mock('./beads.js', async (importOriginal) => ({
-  // parseAcceptanceCriteria is a pure parser — use the real implementation.
-  ...(await importOriginal<typeof import('./beads.js')>()),
-  bd: vi.fn(() => ({
-    addNote: mockAddNote,
-    addLabel: mockAddLabel,
-    removeLabel: mockRemoveLabel,
-    close: mockClose,
+// The task store (the engine): openPrAndDefer records the PR; reconcile walks
+// the tasks waiting on their PRs.
+const mockDeferForPr = vi.fn<(id: string, url: string) => Promise<void>>();
+const mockFlag = vi.fn<(id: string, reason: string) => Promise<void>>();
+const mockListAwaitingMerge = vi.fn<() => Promise<{ id: string; title: string; slug: string }[]>>();
+const mockFinish = vi.fn<(id: string, reason: string) => Promise<void>>();
+const mockPrDeclined = vi.fn<(id: string, reason: string) => Promise<void>>();
+const mockNeedsFollowup = vi.fn<(id: string) => Promise<void>>();
+const mockReadWatermark = vi.fn<(id: string) => Promise<{ head: string | null; round: number; at: string | null }>>();
+vi.mock('./task-store.js', () => ({
+  engineStore: vi.fn(() => ({
+    deferForPr: mockDeferForPr,
     flag: mockFlag,
-    list: mockList,
-    show: mockShow,
-    children: mockChildren,
+    listAwaitingMerge: mockListAwaitingMerge,
+    finish: mockFinish,
+    prDeclined: mockPrDeclined,
+    needsFollowup: mockNeedsFollowup,
+    readWatermark: mockReadWatermark,
   })),
-  syncBeads: mockSyncBeads,
+  trackerFor: vi.fn(() => ({ addNote: vi.fn(async () => ''), flag: vi.fn(async () => '') })),
 }));
 
 const mockClearBeadAttempts = vi.fn();
@@ -54,8 +50,7 @@ vi.mock('./parikshaka-dispatch.js', () => ({ dispatchParikshakaAsync: vi.fn() })
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
-const { resolveMergePolicy, openPrAndDefer, buildPrBody, reconcilePullRequests, parseAwaitingMerge, AWAITING_MERGE_LABEL, resetDeferredEpicLog } =
-  await import('./merge.js');
+const { resolveMergePolicy, openPrAndDefer, buildPrBody, reconcilePullRequests } = await import('./merge.js');
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -68,7 +63,6 @@ const KSHETRA: KshetraConfig = {
     mainBranch: 'main',
     branchPattern: 'bead-{id}/{slug}',
   },
-  beads: { path: '/projects/myapp-beads', remote: 'git@github.com:TeakWood/myapp-beads.git', mode: 'embedded' },
   stack: { language: 'typescript' },
   conventions: {},
   agents: { provider: 'anthropic', model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
@@ -126,6 +120,8 @@ const TASK_DETAILS = JSON.stringify([
 beforeEach(() => {
   vi.clearAllMocks();
   delete process.env.SHRENI_MERGE_POLICY;
+  mockListAwaitingMerge.mockResolvedValue([]);
+  mockReadWatermark.mockResolvedValue({ head: null, round: 0, at: null });
 });
 
 afterEach(() => {
@@ -183,17 +179,17 @@ describe('openPrAndDefer', () => {
     expect(prArgs.body).not.toContain('harden the login check');
   });
 
-  it('labels the bead awaiting-merge and does NOT close it or delete the branch', async () => {
+  it('records the PR on the task (deferForPr) and does NOT finish it or delete the branch', async () => {
     await openPrAndDefer(TASK, KSHETRA, OUTPUT, FEEDBACK, TASK_DETAILS);
-    expect(mockAddLabel).toHaveBeenCalledWith('proj-42', AWAITING_MERGE_LABEL);
-    expect(mockClose).not.toHaveBeenCalled();
+    expect(mockDeferForPr).toHaveBeenCalledWith('proj-42', 'https://github.com/TeakWood/myapp/pull/1');
+    expect(mockFinish).not.toHaveBeenCalled();
     expect(mockDeleteBranch).not.toHaveBeenCalled();
   });
 
-  it('records the PR url as a bead note and syncs', async () => {
-    await openPrAndDefer(TASK, KSHETRA, OUTPUT, FEEDBACK, TASK_DETAILS);
-    expect(mockAddNote).toHaveBeenCalledWith('proj-42', expect.stringContaining('pull/1'));
-    expect(mockSyncBeads).toHaveBeenCalled();
+  it('flags the task with the PR when recording it fails, rather than throwing', async () => {
+    mockDeferForPr.mockRejectedValue(new Error('db down'));
+    await expect(openPrAndDefer(TASK, KSHETRA, OUTPUT, FEEDBACK, TASK_DETAILS)).resolves.toBeUndefined();
+    expect(mockFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining('pull/1'));
   });
 });
 
@@ -237,176 +233,71 @@ describe('buildPrBody', () => {
   });
 });
 
-describe('parseAwaitingMerge', () => {
-  it('reconstructs the branch slug deterministically from the title', () => {
-    const beads = parseAwaitingMerge(JSON.stringify([{ id: 'proj-42', title: 'Fix Auth Bug!' }]));
-    expect(beads).toEqual([{ id: 'proj-42', title: 'Fix Auth Bug!', slug: 'fix-auth-bug' }]);
-  });
-
-  it('tolerates malformed JSON and non-arrays', () => {
-    expect(parseAwaitingMerge('not json')).toEqual([]);
-    expect(parseAwaitingMerge('{}')).toEqual([]);
-  });
-});
+const WAITING = [{ id: 'proj-42', title: 'Fix auth', slug: 'fix-auth' }];
 
 describe('reconcilePullRequests', () => {
-  it('does nothing when there are no awaiting-merge beads', async () => {
-    mockList.mockResolvedValue('[]');
+  it('does nothing when no task waits on a PR', async () => {
     await reconcilePullRequests(KSHETRA);
     expect(mockPrView).not.toHaveBeenCalled();
-    expect(mockClose).not.toHaveBeenCalled();
+    expect(mockFinish).not.toHaveBeenCalled();
   });
 
-  it('queries in_progress beads filtered to the awaiting-merge label', async () => {
-    mockList.mockResolvedValue('[]');
-    await reconcilePullRequests(KSHETRA);
-    expect(mockList).toHaveBeenCalledWith({ status: 'in_progress', label: AWAITING_MERGE_LABEL });
-  });
-
-  it('closes the bead and drops the branch when the PR merged', async () => {
-    mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+  it('finishes the task and drops the branch when the PR merged', async () => {
+    mockListAwaitingMerge.mockResolvedValue(WAITING);
     mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
     await reconcilePullRequests(KSHETRA);
-    expect(mockClose).toHaveBeenCalledWith('proj-42', expect.stringContaining('Merged via PR'));
+    expect(mockFinish).toHaveBeenCalledWith('proj-42', expect.stringContaining('Merged via PR'));
     expect(mockClearBeadAttempts).toHaveBeenCalledWith(KSHETRA, 'proj-42');
     expect(mockDeleteBranch).toHaveBeenCalledWith('bead-proj-42/fix-auth', { force: true });
     expect(mockPush).toHaveBeenCalledWith('origin', '--delete', 'bead-proj-42/fix-auth');
   });
 
-  it('blocks the bead and clears the label when the PR was closed unmerged', async () => {
-    mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-    mockPrView.mockResolvedValue({ state: 'CLOSED', url: 'https://x/pull/1' });
-    await reconcilePullRequests(KSHETRA);
-    expect(mockRemoveLabel).toHaveBeenCalledWith('proj-42', AWAITING_MERGE_LABEL);
-    expect(mockFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining('closed without merging'));
-    expect(mockClose).not.toHaveBeenCalled();
+  it('flags the task when finish is refused after the PR merged', async () => {
+    mockListAwaitingMerge.mockResolvedValue(WAITING);
+    mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+    mockFinish.mockRejectedValue(new Error('a manual check waits'));
+    await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
+    expect(mockFlag).toHaveBeenCalledWith('proj-42', expect.stringContaining('finish failed: a manual check waits'));
   });
 
-  it('leaves the bead untouched while the PR is still open', async () => {
-    mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+  it('declines the task when the PR was closed unmerged', async () => {
+    mockListAwaitingMerge.mockResolvedValue(WAITING);
+    mockPrView.mockResolvedValue({ state: 'CLOSED', url: 'https://x/pull/1' });
+    await reconcilePullRequests(KSHETRA);
+    expect(mockPrDeclined).toHaveBeenCalledWith('proj-42', expect.stringContaining('closed without merging'));
+    expect(mockFinish).not.toHaveBeenCalled();
+  });
+
+  it('leaves the task untouched while the PR is still open', async () => {
+    mockListAwaitingMerge.mockResolvedValue(WAITING);
     mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
     await reconcilePullRequests(KSHETRA);
-    expect(mockClose).not.toHaveBeenCalled();
-    expect(mockFlag).not.toHaveBeenCalled();
+    expect(mockFinish).not.toHaveBeenCalled();
+    expect(mockPrDeclined).not.toHaveBeenCalled();
     expect(mockDeleteBranch).not.toHaveBeenCalled();
   });
 
   it('survives a merged-branch delete that already happened (auto-delete)', async () => {
-    mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+    mockListAwaitingMerge.mockResolvedValue(WAITING);
     mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
     mockDeleteBranch.mockRejectedValueOnce(new Error('branch not found'));
     mockPush.mockRejectedValueOnce(new Error('remote ref does not exist'));
     await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
-    expect(mockClose).toHaveBeenCalled();
+    expect(mockFinish).toHaveBeenCalled();
   });
 
-  // Shreni-beads-q08: a child landing via PR may complete its epic.
-  describe('epic auto-close on the PR path (q08)', () => {
-    function epicGraph(siblingStatus: string): void {
-      const rows: Record<string, Record<string, unknown>> = {
-        'proj-40': { id: 'proj-40', status: 'open', issue_type: 'epic' },
-        'proj-41': { id: 'proj-41', status: siblingStatus, issue_type: 'task', parent: 'proj-40' },
-        'proj-42': { id: 'proj-42', status: 'closed', issue_type: 'task', parent: 'proj-40' },
-      };
-      mockShow.mockImplementation(async (id?: string) => JSON.stringify([rows[id ?? '']]));
-      mockChildren.mockImplementation(async (id?: string) =>
-        JSON.stringify(Object.values(rows).filter(r => r.parent === id)));
-    }
-
-    afterEach(() => {
-      mockShow.mockReset();
-      mockChildren.mockReset();
-      mockChildren.mockResolvedValue('[]');
-    });
-
-    it('closes the epic once its last child merges via PR, before the beads sync', async () => {
-      epicGraph('closed');
-      const order: string[] = [];
-      mockClose.mockImplementation(async (id: string) => { order.push(`close:${id}`); return ''; });
-      mockSyncBeads.mockImplementation(async () => { order.push('sync'); });
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
-      await reconcilePullRequests(KSHETRA);
-      expect(mockClose).toHaveBeenCalledWith('proj-40', 'all 2 children closed: proj-41, proj-42');
-      expect(order).toEqual(['close:proj-42', 'close:proj-40', 'sync']);
-    });
-
-    it('leaves the epic open while a sibling child is still open', async () => {
-      epicGraph('in_progress');
-      mockClose.mockResolvedValue('');
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
-      await reconcilePullRequests(KSHETRA);
-      expect(mockClose).toHaveBeenCalledTimes(1);
-      expect(mockClose).toHaveBeenCalledWith('proj-42', expect.stringContaining('Merged via PR'));
-    });
-  });
-
-  // A merged epic bead whose children are still open (bug dpi): bd refuses to
-  // close it. Reconcile must defer, not throw, so the pass keeps running and the
-  // log doesn't fill with a stack every 5 minutes.
-  describe('merged epic with open children', () => {
-    const epicErr = () => Object.assign(
-      new Error('bd close failed: cannot close epic proj-42: 3 open child issue(s); close children first or use --force to override'),
-      { name: 'BeadsError' },
-    );
-
-    beforeEach(() => resetDeferredEpicLog());
-
-    it('defers the close (keeps label, no branch delete, no throw)', async () => {
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
-      mockClose.mockRejectedValue(epicErr());
-      await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
-      expect(mockClose).toHaveBeenCalledWith('proj-42', expect.stringContaining('Merged via PR'));
-      expect(mockRemoveLabel).not.toHaveBeenCalled(); // awaiting-merge kept
-      expect(mockDeleteBranch).not.toHaveBeenCalled();
-      expect(mockClearBeadAttempts).not.toHaveBeenCalled();
-    });
-
-    it('logs once at info across repeated passes, not every pass', async () => {
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
-      mockClose.mockRejectedValue(epicErr());
-      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-      await reconcilePullRequests(KSHETRA);
-      await reconcilePullRequests(KSHETRA);
-      const deferLogs = log.mock.calls.filter(c => String(c[0]).includes('open children'));
-      expect(deferLogs).toHaveLength(1);
-      log.mockRestore();
-    });
-
-    it('still closes and cleans up once the children have landed', async () => {
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
-      mockClose.mockRejectedValueOnce(epicErr()); // pass 1: children open
-      await reconcilePullRequests(KSHETRA);
-      mockClose.mockResolvedValue('closed'); // pass 2: children now done
-      await reconcilePullRequests(KSHETRA);
-      expect(mockClearBeadAttempts).toHaveBeenCalledWith(KSHETRA, 'proj-42');
-      expect(mockDeleteBranch).toHaveBeenCalledWith('bead-proj-42/fix-auth', { force: true });
-    });
-
-    it('does not abort reconciliation of other beads in the same pass', async () => {
-      mockList.mockResolvedValue(JSON.stringify([
-        { id: 'proj-42', title: 'Epic auth' },
-        { id: 'proj-99', title: 'Fix login' },
-      ]));
-      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
-      // proj-42 (processed first) is the wedged epic; proj-99 must still close.
-      mockClose.mockRejectedValueOnce(epicErr());
-      mockClose.mockResolvedValue('closed');
-      await reconcilePullRequests(KSHETRA);
-      expect(mockClose).toHaveBeenCalledWith('proj-99', expect.stringContaining('Merged via PR'));
-      expect(mockClearBeadAttempts).toHaveBeenCalledWith(KSHETRA, 'proj-99');
-    });
-
-    it('rethrows a non-epic close failure (unchanged behavior)', async () => {
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
-      mockClose.mockRejectedValue(new Error('bd close failed: database is locked'));
-      await expect(reconcilePullRequests(KSHETRA)).rejects.toThrow('database is locked');
-    });
+  it('one task\'s failure does not hold up the rest of the pass', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockListAwaitingMerge.mockResolvedValue([
+      { id: 'proj-42', title: 'Epic auth', slug: 'epic-auth' },
+      { id: 'proj-99', title: 'Fix login', slug: 'fix-login' },
+    ]);
+    mockPrView.mockResolvedValue({ state: 'MERGED', url: 'https://x/pull/1' });
+    mockFinish.mockRejectedValueOnce(new Error('refused'));
+    mockFlag.mockRejectedValueOnce(new Error('database is locked'));
+    await expect(reconcilePullRequests(KSHETRA)).resolves.toBeUndefined();
+    expect(mockFinish).toHaveBeenCalledWith('proj-99', expect.stringContaining('Merged via PR'));
+    expect(mockClearBeadAttempts).toHaveBeenCalledWith(KSHETRA, 'proj-99');
   });
 
   // Active follow-up detection (epic hjw): OPEN is no longer an unconditional
@@ -425,50 +316,37 @@ describe('reconcilePullRequests', () => {
       commits: [],
     };
 
-    it('stamps pr-needs-followup on an OPEN PR with unaddressed feedback', async () => {
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
+    beforeEach(() => {
+      mockListAwaitingMerge.mockResolvedValue(WAITING);
       mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
-      mockPrStatus.mockResolvedValue(openWithReview);
-      mockShow.mockResolvedValue(JSON.stringify({ id: 'proj-42' })); // no notes → zeroed watermark
-      await reconcilePullRequests(KSHETRA_FU);
-      expect(mockAddLabel).toHaveBeenCalledWith('proj-42', 'pr-needs-followup');
     });
 
-    it('does NOT stamp when the policy is off (default)', async () => {
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
+    it('reopens the task for a follow-up on an OPEN PR with unaddressed feedback', async () => {
+      mockPrStatus.mockResolvedValue(openWithReview);
+      await reconcilePullRequests(KSHETRA_FU);
+      expect(mockNeedsFollowup).toHaveBeenCalledWith('proj-42');
+    });
+
+    it('does NOT reopen when the policy is off (default)', async () => {
       await reconcilePullRequests(KSHETRA); // KSHETRA has no prFollowup → off
       expect(mockPrStatus).not.toHaveBeenCalled();
-      expect(mockAddLabel).not.toHaveBeenCalled();
+      expect(mockNeedsFollowup).not.toHaveBeenCalled();
     });
 
-    it('does NOT stamp on a foreign commit when prFollowupSelfLogins is empty (default)', async () => {
-      // With no self-identity configured we cannot tell our own pushes apart from
-      // a collaborator's, so detection strips commits and a foreign tip alone
-      // never stamps (a CHANGES_REQUESTED review still would).
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
+    it('does NOT reopen on a foreign commit when prFollowupSelfLogins is empty (default)', async () => {
       mockPrStatus.mockResolvedValue({
-        state: 'OPEN',
-        url: 'https://x/pull/1',
-        reviews: [],
-        checks: [],
+        state: 'OPEN', url: 'https://x/pull/1', reviews: [], checks: [],
         commits: [{ sha: 'ccc', author: 'collaborator' }],
       });
-      mockShow.mockResolvedValue(JSON.stringify({ id: 'proj-42' }));
       await reconcilePullRequests(KSHETRA_FU); // selfLogins: []
-      expect(mockAddLabel).not.toHaveBeenCalled();
+      expect(mockNeedsFollowup).not.toHaveBeenCalled();
     });
 
-    it('does NOT stamp when the feedback is already addressed (watermark newer)', async () => {
-      mockList.mockResolvedValue(JSON.stringify([{ id: 'proj-42', title: 'Fix auth' }]));
-      mockPrView.mockResolvedValue({ state: 'OPEN', url: 'https://x/pull/1' });
+    it('does NOT reopen when the feedback is already addressed (watermark newer)', async () => {
       mockPrStatus.mockResolvedValue(openWithReview);
-      mockShow.mockResolvedValue(
-        JSON.stringify({ id: 'proj-42', notes: 'pr-followup-head:h pr-followup-round:1 pr-followup-at:2026-07-29T23:00:00Z' }),
-      );
+      mockReadWatermark.mockResolvedValue({ head: 'h', round: 1, at: '2026-07-29T23:00:00Z' });
       await reconcilePullRequests(KSHETRA_FU);
-      expect(mockAddLabel).not.toHaveBeenCalled();
+      expect(mockNeedsFollowup).not.toHaveBeenCalled();
     });
   });
 });

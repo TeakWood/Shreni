@@ -1,13 +1,13 @@
 /**
- * Tier 2 — full end-to-end smoke against a REAL provider (Shreni-beads-k3n.4).
+ * Tier 2 — full end-to-end smoke against a REAL provider.
  *
- * Usage:  pnpm e2e:full            (requires `pnpm build` first + ANTHROPIC_API_KEY)
+ * Usage:  pnpm e2e:full   (requires `pnpm build` first, ANTHROPIC_API_KEY and SHRENI_DATABASE_URL)
  *
- * The top of the test ladder. Tier 0 runs the mocked unit suite; Tier 1
- * (e2e-hermetic.test.ts) exercises the real bd+git seam but STUBS the LLM turn.
+ * The top of the test ladder. The lower tiers (ci.yml) run the mocked unit
+ * suite and the integration tier, which STUB the LLM turn.
  * This tier stubs nothing: it drives one genuine Silpi ↔ Viharapala pass against
  * a live provider on a throwaway Kshetra with a single trivial task, and asserts
- * a real squash-merge to main + the bead closed. It is the only rung that
+ * a real squash-merge to main + the task done. It is the only rung that
  * catches drift in the provider-CLI envelope (adapter parsing, tool-call shape,
  * the agent actually landing a usable diff), which no mock can.
  *
@@ -15,21 +15,21 @@
  * workflow (.github/workflows/e2e-nightly.yml) runs it on a schedule and alerts
  * on failure rather than blocking any branch.
  *
- * Everything is local: the fixture repo and the beads repo both push to bare
- * repos inside the workspace, so this needs no GitHub access — only the claude
- * CLI with credentials (ANTHROPIC_API_KEY), bd, and git. Absent the key it skips
- * cleanly with exit 0 so the workflow is green-when-unconfigured, not red.
+ * The fixture repo pushes to a bare repo inside the workspace, so this needs no
+ * GitHub access — only the claude CLI with credentials (ANTHROPIC_API_KEY), git,
+ * and a Postgres for the task graph (SHRENI_DATABASE_URL). Absent the key it
+ * skips cleanly with exit 0 so the workflow is green-when-unconfigured, not red.
  */
 import { execFileSync, spawn } from 'child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { tmpdir, homedir } from 'os';
-import { parseBeadIds, parseBeadStatus } from '../src/cert/assertions.js';
 import { unregisterKshetra } from '../src/kshetra/registry.js';
+import { openKshetraTasks, type KshetraTasks } from './lib/engine-backlog.js';
 
 const REPO_ROOT = resolve(__dirname, '..');
 const SHRENI = join(REPO_ROOT, 'dist', 'cli', 'index.js');
-// One trivial bead on a hosted runner is ~6-7 min of real agent latency; budget
+// One trivial task on a hosted runner is ~6-7 min of real agent latency; budget
 // generously but hard-cap so a hung provider call can't run the job forever. The
 // workflow's job timeout is the outer backstop.
 const TIMEOUT_MS = Number(process.env['SHRENI_E2E_TIMEOUT_MS'] ?? 12 * 60_000);
@@ -38,7 +38,7 @@ const POLL_MS = 10_000;
 // The single trivial unit of work. Language-agnostic on purpose: with
 // stack.language 'unknown' the test/lint/build gates skip-and-pass, so the pass
 // hinges only on the agent landing this file and the reviewer approving — the
-// provider seam, not a toolchain. The assertion checks BOTH the bead closing and
+// provider seam, not a toolchain. The assertion checks BOTH the task finishing and
 // this exact file arriving on main.
 const TASK_FILE = 'GREETING.txt';
 const TASK_CONTENT = 'hello from shreni e2e';
@@ -85,6 +85,10 @@ async function main(): Promise<void> {
     console.error(`Missing ${SHRENI} — run \`pnpm build\` first.`);
     process.exit(2);
   }
+  if (!process.env['SHRENI_DATABASE_URL']) {
+    console.error('SHRENI_DATABASE_URL is not set — the Kshetra runs on a Postgres database.');
+    process.exit(2);
+  }
 
   const work = mkdtempSync(join(tmpdir(), 'shreni-e2e-full-'));
   // Unique per run so concurrent/nightly invocations never collide in the
@@ -92,63 +96,58 @@ async function main(): Promise<void> {
   // keeps successive local runs distinct.
   const slug = `e2e-full-${Date.now()}`;
   const repoDir = join(work, 'repo');
-  const beadsDir = join(work, 'beads');
   console.log(`▶ Tier 2 e2e in ${work} (kshetra ${slug})`);
 
   let worker: ReturnType<typeof spawn> | undefined;
+  let tasks: KshetraTasks | undefined;
   let registered = false;
   try {
-    // 1. Fixture repo + beads repo, both wired to local bare origins.
+    // 1. Fixture repo, wired to a local bare origin.
     gitRepoWithLocalOrigin(repoDir, join(work, 'repo-origin.git'));
     writeFileSync(join(repoDir, 'README.md'), '# e2e fixture\n');
     sh('git', ['add', '-A'], { cwd: repoDir });
     sh('git', ['commit', '-m', 'fixture: readme'], { cwd: repoDir });
     sh('git', ['push', 'origin', 'main'], { cwd: repoDir });
-    gitRepoWithLocalOrigin(beadsDir, join(work, 'beads-origin.git'));
 
-    // 2. Init the Kshetra. --no-pack + --language unknown → the toolchain has no
-    //    build/test/lint command, so the gates skip-and-pass and the run turns
-    //    purely on the provider landing the diff. The local beads origin means
-    //    init reuses it instead of creating a GitHub repo.
-    console.log('▶ shreni init --mode kshetra --on-beads --provider claude');
-    sh('node', [SHRENI, 'init', '--mode', 'kshetra', '--on-beads',
-      '--slug', slug, '--path', repoDir, '--no-pack', '--language', 'unknown',
-      '--beads-path', beadsDir, '--provider', 'claude',
+    // 2. Init the Kshetra, with its database and project on SHRENI_DATABASE_URL.
+    //    --no-pack + --language unknown → the toolchain has no build/test/lint
+    //    command, so the gates skip-and-pass and the run turns purely on the
+    //    provider landing the diff.
+    console.log('▶ shreni init --mode kshetra --provider claude');
+    sh('node', [SHRENI, 'init', '--mode', 'kshetra',
+      '--slug', slug, '--path', repoDir, '--no-pack', '--language', 'unknown', '--provider', 'claude',
     ]);
     registered = true;
 
-    // 3. File the single trivial bead (P1 so it's picked up promptly).
-    const bdEnv = { ...process.env, BEADS_DIR: beadsDir };
-    sh('bd', ['create', TASK_TITLE, '-d', TASK_DESC, '-t', 'task', '-p', '1'], { cwd: repoDir, env: bdEnv });
-    const beadIds = parseBeadIds(sh('bd', ['list', '--status=open'], { cwd: repoDir, env: bdEnv }));
-    if (beadIds.length !== 1) {
-      throw new Error(`expected exactly 1 open bead after filing the task, got ${beadIds.length}: ${beadIds.join(', ')}`);
-    }
-    const beadId = beadIds[0];
-    console.log(`▶ filed ${beadId} — running the worker`);
+    // 3. File the single trivial task through the engine as the system role, so
+    //    it lands open (P1 so it's picked up promptly).
+    tasks = await openKshetraTasks(join(repoDir, '.shreni', 'kshetra.yaml'));
+    const [taskId] = await tasks.file([{ title: TASK_TITLE, description: TASK_DESC, priority: 1 }]);
+    console.log(`▶ filed ${taskId} — running the worker`);
 
-    // 4. Run the worker (the real deployment path) until the bead closes or the
+    // 4. Run the worker (the real deployment path) until the task is done or the
     //    budget runs out.
     worker = spawn('node', [SHRENI, '__worker', slug], { stdio: 'inherit' });
     const deadline = Date.now() + TIMEOUT_MS;
-    let status: string | null = null;
-    while (status !== 'CLOSED') {
+    let state: string | undefined;
+    while (state !== 'done') {
       if (Date.now() > deadline) {
-        throw new Error(`timed out after ${TIMEOUT_MS}ms — ${beadId} is still ${status ?? 'open'}`);
+        throw new Error(`timed out after ${TIMEOUT_MS}ms — ${taskId} is still ${state ?? 'open'}`);
       }
       await sleep(POLL_MS);
-      status = parseBeadStatus(sh('bd', ['show', beadId], { cwd: repoDir, env: bdEnv }));
+      state = (await tasks.states([taskId])).get(taskId);
+      if (state === 'cancelled') throw new Error(`${taskId} was cancelled`);
     }
     worker.kill('SIGTERM');
     worker = undefined;
-    console.log(`▶ ${beadId} closed — verifying the merge`);
+    console.log(`▶ ${taskId} done — verifying the merge`);
 
     // 5. Assertions: the change really landed on main as a squash commit, and
     //    the file the task asked for is present with the right content.
     const failures: string[] = [];
     const log = sh('git', ['log', '--oneline', 'main'], { cwd: repoDir });
-    if (!log.includes(`bead-${beadId}`)) {
-      failures.push(`no "bead-${beadId}" squash commit on main`);
+    if (!log.includes(`bead-${taskId}`)) {
+      failures.push(`no "bead-${taskId}" squash commit on main`);
     }
     const landed = join(repoDir, TASK_FILE);
     if (!existsSync(landed)) {
@@ -171,9 +170,10 @@ async function main(): Promise<void> {
       for (const f of failures) console.error(`  - ${f}`);
       process.exit(1);
     }
-    console.log(`\n✓ Tier 2 e2e PASSED — ${beadId} merged to main and closed via a real provider pass.`);
+    console.log(`\n✓ Tier 2 e2e PASSED — ${taskId} merged to main and done via a real provider pass.`);
   } finally {
     worker?.kill('SIGTERM');
+    await tasks?.close().catch(() => {});
     if (registered) {
       try {
         unregisterKshetra(slug);

@@ -1,21 +1,15 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { PrStatus, PrReview, PrCheck, PrCommit } from './gh.js';
-import type { Task } from './types.js';
-import { bd } from './beads.js';
-import { engineStore, type EngineTaskStore } from './task-store.js';
-import { toSlug } from './pickup.js';
 
-// NOTE: this module is deliberately a LEAF — it imports only bd + pure helpers,
+// NOTE: this module is deliberately a LEAF — it imports only pure helpers,
 // never the agent/dispatch graph — so merge.ts (detection) and the worker
 // (selection) can import it without a cycle. The bounded Silpi↔Viharapala loop
 // lives in pr-followup-loop.ts, and the side-effectful WORK+FINALIZE path in
 // pr-followup-run.ts, both of which import THIS module (not the reverse).
 
-// Label stamped on an awaiting-merge bead whose OPEN PR has unaddressed feedback.
-// Detection (hjw.5) stamps it on the 5-min reconcile pass; selection picks it
-// ahead of `bd ready` so in-flight PRs finish before new WIP starts. Distinct
-// from AWAITING_MERGE_LABEL, which stays on the bead throughout — this label is
-// added when there is work to do and removed once a follow-up round lands.
+// The label the reads give a task whose OPEN PR has unaddressed feedback: on
+// the engine, a boosted task reopened by followUp (policy/sthapathi/reads.ts),
+// so status and Phalaka can show it.
 export const PR_NEEDS_FOLLOWUP_LABEL = 'pr-needs-followup';
 
 // Check conclusions that count as "failing" for a required check. gh reports a
@@ -40,8 +34,8 @@ export function resolvePrFollowup(kshetra: KshetraConfig): boolean {
   return kshetra.repo.prFollowup;
 }
 
-// Idempotency watermark, persisted as bd notes on the awaiting-merge bead so it
-// survives worker restarts (G6). `head` is the PR head sha last addressed, `at`
+// Idempotency watermark, persisted on the attempt's evidence so it survives
+// worker restarts (G6). `head` is the PR head sha last addressed, `at`
 // the time we last pushed a follow-up, and `round` the number of rounds spent on
 // the CURRENT feedback event. A new human review resets `round` (D8).
 export interface PrWatermark {
@@ -79,37 +73,6 @@ export function parseWatermark(notes: string | undefined): PrWatermark {
 
 export function formatWatermark(w: PrWatermark): string {
   return `pr-followup-head:${w.head ?? ''} pr-followup-round:${w.round} pr-followup-at:${w.at ?? ''}`;
-}
-
-// Read the watermark off a bead's notes via `bd show --json`. Best-effort: any
-// failure or absent notes yields a zeroed watermark (head/at null, round 0), so
-// a bead that has never been followed up is treated as "everything is new".
-export async function readWatermark(
-  kshetra: KshetraConfig, beadId: string, store: EngineTaskStore | undefined = engineStore(kshetra),
-): Promise<PrWatermark> {
-  if (store) return store.readWatermark(beadId);
-  try {
-    const raw = await bd(kshetra).show(beadId);
-    const parsed = JSON.parse(raw) as unknown;
-    const obj = Array.isArray(parsed) ? parsed[0] : parsed;
-    const notes = (obj as { notes?: unknown } | null)?.notes;
-    return parseWatermark(typeof notes === 'string' ? notes : undefined);
-  } catch {
-    return parseWatermark(undefined);
-  }
-}
-
-// Persist the watermark as a bead note. Append-only (bd notes accumulate); the
-// parse side always reads the latest, so re-writing is safe.
-export async function writeWatermark(
-  kshetra: KshetraConfig, beadId: string, w: PrWatermark, store: EngineTaskStore | undefined = engineStore(kshetra),
-): Promise<string> {
-  if (store) {
-    // On the engine the watermark lives on the attempt's evidence, not in notes.
-    await store.writeWatermark(beadId, w);
-    return '';
-  }
-  return bd(kshetra).addNote(beadId, formatWatermark(w));
 }
 
 export type PrTrigger = 'changes_requested' | 'failing_check' | 'foreign_commit';
@@ -207,50 +170,4 @@ export function detectPrFeedback(input: DetectInput): PrFeedback | null {
   const round = changesRequested.length ? 0 : watermark.round;
 
   return { triggers, changesRequested, failingChecks, foreignCommits, round };
-}
-
-// Parse `bd list --json` (in_progress + pr-needs-followup) into Tasks. bd carries
-// no slug, so it is rebuilt from the title via the same toSlug used to name the
-// branch — mirroring parseAwaitingMerge in merge.ts.
-function parseFollowupBeads(raw: string): Task[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const out: Task[] = [];
-  for (const item of parsed as Record<string, unknown>[]) {
-    if (typeof item.id !== 'string' || typeof item.title !== 'string') continue;
-    out.push({
-      id: item.id,
-      slug: toSlug(item.title),
-      title: item.title,
-      status: 'in_progress',
-      priority: typeof item.priority === 'number' ? item.priority : 2,
-      notes: typeof item.notes === 'string' ? item.notes : undefined,
-      followup: true,
-    });
-  }
-  return out;
-}
-
-// SELECT (read-only, cheap — a single bd label query, NO gh call): pick a bead
-// whose OPEN PR has been stamped pr-needs-followup by the reconcile pass, ahead
-// of `bd ready` (ARD §4.1 — finish in-flight PRs before opening new WIP). The
-// worker's selectNext hook calls this first and falls through to the normal ready
-// queue when it returns null. Returns the bead marked `followup` so PREPARE/WORK
-// take the follow-up branch of the lifecycle. Off (null) when follow-up is
-// disabled. Never throws — a bd hiccup degrades to "no follow-up this tick".
-export async function selectFollowup(kshetra: KshetraConfig): Promise<Task | null> {
-  if (!resolvePrFollowup(kshetra)) return null;
-  let raw: string;
-  try {
-    raw = await bd(kshetra).list({ status: 'in_progress', label: PR_NEEDS_FOLLOWUP_LABEL });
-  } catch {
-    return null;
-  }
-  const beads = parseFollowupBeads(raw);
-  return beads[0] ?? null;
 }

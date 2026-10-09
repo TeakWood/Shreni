@@ -6,7 +6,7 @@ import { engineTaskStore } from './task-store';
 import { registerEngineStore, unregisterEngineStore, trackerFor } from '../../sthapathi/task-store';
 import { ensureHealthBead } from '../../sthapathi/health';
 import { fileCoverageGaps } from '../../sthapathi/parikshaka-dispatch';
-import { parseAcceptanceCriteria } from '../../sthapathi/beads';
+import { parseAcceptanceCriteria } from '../../sthapathi/task-json';
 import type { KshetraConfig } from '../../kshetra/config.js';
 import type { Claim } from '../../taskgraph';
 import type { ParikshakaOutput } from '../../sthapathi/types';

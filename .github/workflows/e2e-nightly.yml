@@ -1,7 +1,7 @@
-# Tier 2 — full end-to-end smoke against a REAL provider (Shreni-beads-k3n.4).
+# Tier 2 — full end-to-end smoke against a REAL provider.
 #
-# The top of the E2E test ladder (Shreni-beads-k3n). Tiers 0 and 1 (ci.yml) gate
-# every push/PR: the mocked unit suite and the hermetic bd+git harness that STUBS
+# The top of the E2E test ladder. The lower tiers (ci.yml) gate
+# every push/PR: the mocked unit suite and the integration tier, which STUB
 # the LLM turn. This tier stubs nothing — it drives one genuine Silpi ↔ Viharapala
 # pass against a live provider on a throwaway Kshetra with a single trivial task
 # and asserts a real squash-merge to main. It is the only rung that catches drift
@@ -22,12 +22,29 @@ on:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    # One trivial bead is ~6-7 min of real agent latency on a hosted runner; the
+    # One trivial task is ~6-7 min of real agent latency on a hosted runner; the
     # harness's own SHRENI_E2E_TIMEOUT_MS (12 min) caps a hung provider call, and
     # this job timeout is the outer backstop so nothing bills indefinitely.
     timeout-minutes: 20
+    # The task graph's database: init sets the throwaway Kshetra up on it, the
+    # harness files its task into it, and the worker claims from it.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: shreni
+          POSTGRES_PASSWORD: shreni
+          POSTGRES_DB: shreni
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shreni -d shreni"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SHRENI_DATABASE_URL: postgres://shreni:shreni@localhost:5432/shreni
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -37,17 +54,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - name: Install bd + claude CLIs
-        # @beads/bd's postinstall SKIPS the release-binary download when CI is set
-        # (GitHub Actions sets CI=true), so a plain `npm i -g` leaves the wrapper
-        # without its binary and every bd call aborts with "bd binary not found".
-        # Clear CI for the bd install so the postinstall downloads it, then assert
-        # `bd version` so a silent miss fails HERE, not mid-run. The claude CLI is
-        # the provider the smoke drives.
-        run: |
-          npm install -g @anthropic-ai/claude-code
-          CI= npm install -g @beads/bd
-          bd version
+      - name: Install the claude CLI
+        # The provider the smoke drives.
+        run: npm install -g @anthropic-ai/claude-code
       - name: Git identity for fixture commits
         run: |
           git config --global user.name "shreni-e2e"

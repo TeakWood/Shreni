@@ -166,10 +166,10 @@ describe('runSilpi', () => {
     expect(opts.systemPrompt).toContain('does NOT apply to you: implement');
   });
 
-  it('system prompt tells Silpi not to call bd commands', async () => {
+  it('system prompt tells Silpi not to call shreni task commands', async () => {
     await runSilpi(CONTEXT, 1);
     const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
-    expect(opts.systemPrompt.toLowerCase()).toContain('bd');
+    expect(opts.systemPrompt).toContain('Do NOT call `shreni task` commands');
   });
 
   it('includes SKILLS section with the cross-project universalSkills', async () => {

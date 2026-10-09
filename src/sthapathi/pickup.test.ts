@@ -4,17 +4,6 @@ import type { Task } from './types.js';
 
 // ── module mocks (hoisted) ───────────────────────────────────────────────────
 
-const mockReady = vi.fn<() => Promise<string>>();
-const mockClaim = vi.fn<() => Promise<string>>();
-const mockSyncBeads = vi.fn<() => Promise<void>>();
-// Direct children of a bead (`bd().children`), read by the q08 structural guard.
-const mockChildren = vi.fn<(id: string) => Promise<string>>();
-
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ ready: mockReady, claim: mockClaim, children: mockChildren })),
-  syncBeads: mockSyncBeads,
-}));
-
 const mockStatus = vi.fn<() => Promise<{ modified: string[]; staged: string[]; untracked: string[] }>>();
 const mockBranchExists = vi.fn<() => Promise<boolean>>();
 const mockRemoteBranchExists = vi.fn<() => Promise<boolean>>();
@@ -57,8 +46,10 @@ vi.mock('./activity-log.js', async (orig) => {
 
 // ── imports after mocks ──────────────────────────────────────────────────────
 
-const { parseReadyOutput, pickNext, preFlightCheck, selectNext, prepareTask, PreFlightError, MISSING_BASE_BRANCH_REASON } =
+const { parseReadyOutput, rankCandidates, preFlightCheck, preFlightFresh, PreFlightError, BaseRedError, MISSING_BASE_BRANCH_REASON } =
   await import('./pickup.js');
+// What pickup would take first: the best-ranked candidate.
+const pickNext = (tasks: Task[]): Task | null => rankCandidates(tasks)[0] ?? null;
 // state + notifications are real, but src/test-setup.ts redirects HOME to a
 // throwaway temp dir, so these read/write a per-run sandbox — never ~/.shreni.
 const { loadState } = await import('../kshetra/state.js');
@@ -70,7 +61,6 @@ const KSHETRA: KshetraConfig = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: 'git@github.com:TeakWood/myapp.git', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-  beads: { path: '/projects/myapp-beads', remote: 'git@github.com:TeakWood/myapp-beads.git', mode: 'embedded' },
   stack: { language: 'typescript' },
   conventions: {},
   agents: { model: 'claude-sonnet-4', maxRoundsPerBead: 3 },
@@ -90,10 +80,6 @@ function makeIssue(overrides: Partial<Record<string, unknown>> = {}): Record<str
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockReady.mockResolvedValue('[]');
-  mockChildren.mockResolvedValue('[]');
-  mockClaim.mockResolvedValue('');
-  mockSyncBeads.mockResolvedValue(undefined);
   mockStatus.mockResolvedValue({ modified: [], staged: [], untracked: [] });
   mockDiscardPath.mockResolvedValue(undefined);
   mockBranchExists.mockResolvedValue(false);
@@ -379,185 +365,56 @@ describe('preFlightCheck', () => {
       expect(readNotifications(k.id)).toHaveLength(1);
     });
 
-    it('prepareTask returns null (no claim) when the base branch is missing', async () => {
+    it('preFlightFresh refuses (the claim is given back) before the health gate when the base branch is missing', async () => {
       const k = ksh('base-prepare');
       mockRemoteBranchExists.mockResolvedValue(false);
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const result = await prepareTask(TASK, k);
-      expect(result).toBeNull();
-      expect(mockClaim).not.toHaveBeenCalled();
-      warn.mockRestore();
+      await expect(preFlightFresh(TASK, k)).rejects.toThrow(PreFlightError);
+      expect(mockCheckHealth).not.toHaveBeenCalled();
     });
   });
 });
 
 // ── pickup ────────────────────────────────────────────────────────────────────
 
-describe('selectNext (read-only)', () => {
-  it('returns null when bd ready returns no tasks', async () => {
-    mockReady.mockResolvedValue('[]');
-    expect(await selectNext(KSHETRA)).toBeNull();
-  });
-
-  it('returns the highest-priority ready task', async () => {
-    const p0Issue = makeIssue({ id: 'p0-task', title: 'P0 hotfix', priority: 0 });
-    const p2Issue = makeIssue({ id: 'p2-task', title: 'Add feature', priority: 2 });
-    mockReady.mockResolvedValue(JSON.stringify([p2Issue, p0Issue]));
-    const result = await selectNext(KSHETRA);
-    expect(result?.id).toBe('p0-task');
-  });
-
-  // -- structural guard (Shreni-beads-q08) --
-  it('skips a candidate with OPEN children (a mis-typed parent) and returns the next eligible bead', async () => {
-    const parent = makeIssue({ id: 'feat', title: 'Mis-typed parent', priority: 0, issue_type: 'feature' });
-    const leaf = makeIssue({ id: 'leaf', title: 'Leaf task', priority: 2, issue_type: 'task' });
-    mockReady.mockResolvedValue(JSON.stringify([parent, leaf]));
-    mockChildren.mockImplementation(async (id: string) =>
-      id === 'feat' ? JSON.stringify([makeIssue({ id: 'feat.1', status: 'open' }), makeIssue({ id: 'feat.2', status: 'closed' })]) : '[]',
-    );
-    const result = await selectNext(KSHETRA);
-    expect(result?.id).toBe('leaf');
-  });
-
-  it('still picks a leaf feature with no children (an arm-A monolithic bead)', async () => {
-    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'mono', title: 'Monolithic', issue_type: 'feature' })]));
-    expect((await selectNext(KSHETRA))?.id).toBe('mono');
-    expect(mockChildren).toHaveBeenCalledWith('mono');
-  });
-
-  it('picks a parent whose children are ALL closed (only OPEN children block)', async () => {
-    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'p', issue_type: 'feature' })]));
-    mockChildren.mockResolvedValue(JSON.stringify([makeIssue({ id: 'p.1', status: 'closed' })]));
-    expect((await selectNext(KSHETRA))?.id).toBe('p');
-  });
-
-  it('never returns an epic from the ready queue, and never looks up its children', async () => {
-    mockReady.mockResolvedValue(JSON.stringify([
-      makeIssue({ id: 'ep', title: 'Epic', priority: 0, issue_type: 'epic' }),
-      makeIssue({ id: 't', title: 'Task', priority: 2, issue_type: 'task' }),
-    ]));
-    expect((await selectNext(KSHETRA))?.id).toBe('t');
-    expect(mockChildren).not.toHaveBeenCalledWith('ep');
-  });
-
-  it('returns null when every candidate is a parent with open children', async () => {
-    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'a', issue_type: 'feature' }), makeIssue({ id: 'b', issue_type: 'task' })]));
-    mockChildren.mockResolvedValue(JSON.stringify([makeIssue({ id: 'kid', status: 'in_progress' })]));
-    expect(await selectNext(KSHETRA)).toBeNull();
-  });
-
-  it('checks children lazily, only until a workable candidate is found', async () => {
-    mockReady.mockResolvedValue(JSON.stringify([
-      makeIssue({ id: 'first', priority: 0 }),
-      makeIssue({ id: 'second', priority: 1 }),
-    ]));
-    expect((await selectNext(KSHETRA))?.id).toBe('first');
-    expect(mockChildren).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips a candidate whose children lookup fails (conservative) and falls through', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'x', priority: 0 }), makeIssue({ id: 'y', priority: 1 })]));
-    mockChildren.mockImplementation(async (id: string) => { if (id === 'x') throw new Error('bd list failed'); return '[]'; });
-    expect((await selectNext(KSHETRA))?.id).toBe('y');
-    warn.mockRestore();
-  });
-
-  it('throws (not "no work") when nothing is workable and a children lookup failed', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    mockReady.mockResolvedValue(JSON.stringify([makeIssue({ id: 'x' })]));
-    mockChildren.mockRejectedValue(new Error('bd list failed: db locked'));
-    await expect(selectNext(KSHETRA)).rejects.toThrow('db locked');
-    warn.mockRestore();
-  });
-
-  it('performs NO git ops, no claim, and no beads sync (pure read)', async () => {
-    mockReady.mockResolvedValue(JSON.stringify([makeIssue()]));
-    await selectNext(KSHETRA);
-    expect(mockSyncBeads).not.toHaveBeenCalled();
-    expect(mockCheckout).not.toHaveBeenCalled();
-    expect(mockPull).not.toHaveBeenCalled();
-    expect(mockStatus).not.toHaveBeenCalled();
-    expect(mockClaim).not.toHaveBeenCalled();
-  });
-});
-
-describe('prepareTask (the only mutator)', () => {
+describe('preFlightFresh (the engine\'s preflight for a fresh task)', () => {
   const TASK: Task = { id: 'proj-123', slug: 'fix-login-bug', title: 'Fix login bug', status: 'pending', priority: 2 };
 
-  it('syncs beads before touching the work tree', async () => {
-    const order: string[] = [];
-    mockSyncBeads.mockImplementation(async () => { order.push('sync'); });
-    mockCheckout.mockImplementation(async () => { order.push('checkout'); });
-    await prepareTask(TASK, KSHETRA);
-    expect(order.indexOf('sync')).toBeLessThan(order.indexOf('checkout'));
+  it('passes when the work tree is clean and the base suite is green', async () => {
+    await expect(preFlightFresh(TASK, KSHETRA)).resolves.toBeUndefined();
+    expect(mockEnsureHealthBead).not.toHaveBeenCalled();
   });
 
-  it('claims the task and returns it when preflight + health pass', async () => {
-    const result = await prepareTask(TASK, KSHETRA);
-    expect(mockClaim).toHaveBeenCalledWith('proj-123');
-    expect(result?.id).toBe('proj-123');
-  });
-
-  it('returns null (without claiming) when preFlightCheck fails', async () => {
+  it('refuses with PreFlightError, before the health gate, when the tree is dirty', async () => {
     mockStatus.mockResolvedValue({ modified: ['src/dirty.ts'], staged: [], untracked: [] });
-    const result = await prepareTask(TASK, KSHETRA);
-    expect(result).toBeNull();
-    expect(mockClaim).not.toHaveBeenCalled();
+    await expect(preFlightFresh(TASK, KSHETRA)).rejects.toThrow(PreFlightError);
+    expect(mockCheckHealth).not.toHaveBeenCalled();
   });
 
-  it('logs a warning naming the bead and reason when preflight rejects', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    mockBranchExists.mockResolvedValue(true); // leftover branch → preflight rejects
-    await prepareTask(TASK, KSHETRA);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('proj-123'));
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('branch already exists'));
-    warn.mockRestore();
+  it('refuses when the task branch is left over', async () => {
+    mockBranchExists.mockResolvedValue(true);
+    await expect(preFlightFresh(TASK, KSHETRA)).rejects.toThrow('branch already exists');
   });
 
-  it('rethrows non-PreFlightError exceptions from preFlightCheck', async () => {
+  it('rethrows a non-PreFlightError from git as it is', async () => {
     mockStatus.mockRejectedValue(new Error('git crash'));
-    await expect(prepareTask(TASK, KSHETRA)).rejects.toThrow('git crash');
+    await expect(preFlightFresh(TASK, KSHETRA)).rejects.toThrow('git crash');
   });
 
-  it('claim is NOT called before preFlightCheck passes', async () => {
-    const callOrder: string[] = [];
-    mockStatus.mockImplementation(async () => { callOrder.push('status'); return { modified: [], staged: [], untracked: [] }; });
-    mockClaim.mockImplementation(async () => { callOrder.push('claim'); return ''; });
-    await prepareTask(TASK, KSHETRA);
-    expect(callOrder.indexOf('status')).toBeLessThan(callOrder.indexOf('claim'));
-  });
-
-  // ── health gate ──────────────────────────────────────────────────────────
-
-  it('does not claim a feature task when the base suite is red', async () => {
+  it('refuses with BaseRedError and queues one health repair when the base suite is red', async () => {
     mockCheckHealth.mockResolvedValue({ green: false, failCount: 3, baseline: 0, sha: 'sha' });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const result = await prepareTask(TASK, KSHETRA);
-    expect(result).toBeNull();
-    expect(mockClaim).not.toHaveBeenCalled();
+    await expect(preFlightFresh(TASK, KSHETRA)).rejects.toThrow(BaseRedError);
     expect(mockEnsureHealthBead).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });
 
-  it('claims normally when the base suite is green', async () => {
-    mockCheckHealth.mockResolvedValue({ green: true, failCount: 0, baseline: 0, sha: 'sha' });
-    const result = await prepareTask(TASK, KSHETRA);
-    expect(result?.id).toBe('proj-123');
-    expect(mockClaim).toHaveBeenCalledWith('proj-123');
-    expect(mockEnsureHealthBead).not.toHaveBeenCalled();
-  });
-
-  it('under enforcement ablation, claims on a red suite without a health bead, recording the suppression (epic 8wi)', async () => {
+  it('under enforcement ablation, passes on a red suite without a health task, recording the suppression (epic 8wi)', async () => {
     emitSpy.mockClear();
     mockCheckHealth.mockResolvedValue({ green: false, failCount: 3, baseline: 0, sha: 'sha' });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const ablated = { ...KSHETRA, ablation: { enforcement: 'off' } } as unknown as KshetraConfig;
-    const result = await prepareTask(TASK, ablated);
-    expect(result?.id).toBe('proj-123');                 // claimed despite the red suite
-    expect(mockClaim).toHaveBeenCalledWith('proj-123');
-    expect(mockEnsureHealthBead).not.toHaveBeenCalled(); // no repair bead created
-    // A decision-grade suppression record so the ledger shows work claimed on red.
+    await expect(preFlightFresh(TASK, ablated)).resolves.toBeUndefined();
+    expect(mockEnsureHealthBead).not.toHaveBeenCalled();
     const suppression = emitSpy.mock.calls
       .map((c: unknown[]) => c[0] as { type: string; gate?: string; verdict?: string; ablations?: string[] })
       .find(e => e.type === 'gate_result' && e.gate === 'pickup-health');
@@ -565,44 +422,10 @@ describe('prepareTask (the only mutator)', () => {
     warn.mockRestore();
   });
 
-  it('a health bead bypasses the gate and is claimed even when the suite is red', async () => {
+  it('a health task bypasses the gate even when the suite is red', async () => {
     mockIsHealthBead.mockReturnValue(true);
-    const result = await prepareTask(TASK, KSHETRA);
-    expect(result?.id).toBe('proj-123');
-    expect(mockClaim).toHaveBeenCalledWith('proj-123');
+    mockCheckHealth.mockResolvedValue({ green: false, failCount: 3, baseline: 0, sha: 'sha' });
+    await expect(preFlightFresh(TASK, KSHETRA)).resolves.toBeUndefined();
     expect(mockCheckHealth).not.toHaveBeenCalled();
-  });
-
-  // ── PR follow-up PREPARE (epic hjw) ────────────────────────────────────────
-  describe('follow-up bead', () => {
-    const FU: Task = { id: 'proj-9', slug: 'fix-thing', title: 'Fix thing', status: 'in_progress', priority: 2, followup: true };
-
-    it('re-syncs the existing branch from origin and does NOT claim or preflight', async () => {
-      const result = await prepareTask(FU, KSHETRA);
-      expect(result?.id).toBe('proj-9');
-      expect(mockFetch).toHaveBeenCalledWith('origin', 'bead-proj-9/fix-thing');
-      expect(mockCheckout).toHaveBeenCalledWith('bead-proj-9/fix-thing');
-      expect(mockResetHard).toHaveBeenCalledWith('origin/bead-proj-9/fix-thing');
-      // no fresh-work machinery: no claim, no health gate, no branch-exists guard
-      expect(mockClaim).not.toHaveBeenCalled();
-      expect(mockCheckHealth).not.toHaveBeenCalled();
-      expect(mockBranchExists).not.toHaveBeenCalled();
-    });
-
-    it('fetches origin BEFORE resetting the branch to it', async () => {
-      const order: string[] = [];
-      mockFetch.mockImplementation(async () => { order.push('fetch'); });
-      mockResetHard.mockImplementation(async () => { order.push('reset'); });
-      await prepareTask(FU, KSHETRA);
-      expect(order).toEqual(['fetch', 'reset']);
-    });
-
-    it('returns null (idles) when the branch can no longer be adopted', async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      mockFetch.mockRejectedValue(new Error('couldn’t find remote ref'));
-      const result = await prepareTask(FU, KSHETRA);
-      expect(result).toBeNull();
-      warn.mockRestore();
-    });
   });
 });

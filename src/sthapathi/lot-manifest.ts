@@ -1,5 +1,5 @@
 // Lot-manifest collectors (epic yrk / Study B2, yrk.3): gather the two sections
-// of worker_started — SUBJECT (what was changed: repo, beads state, resolved
+// of worker_started — SUBJECT (what was changed: repo, task store state, resolved
 // config) and PROCESS (what did the changing: Shreni build, extension, provider
 // CLI versions, tools). Every field is an ALLOWLISTED value; the whole config is
 // never serialised (decision 7 — it may reference credentials). Collection is
@@ -8,7 +8,6 @@
 
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
-import { join } from 'path';
 import { execFile } from 'child_process';
 import { git } from './git.js';
 import { getBuildIdentity, type BuildIdentity } from './build-info.js';
@@ -178,27 +177,17 @@ export function collectConfig(kshetra: KshetraConfig): Record<string, unknown> {
   };
 }
 
-// beads state today: the beads repo HEAD + the last Dolt commit recorded in
-// export-state.json at the beads repo root. B4 (freeze/restore) will add a tag.
+// The task store's state (the manifest's `beads` section, by its historical
+// name): the project's last event id is its version. The read opens the
+// database, so it is bounded, and a failure is recorded as an error rather than
+// as null, which is an event-less project's id.
 export async function collectBeads(kshetra: KshetraConfig): Promise<Record<string, unknown>> {
-  // On the task graph engine the project's last event id is its version. The
-  // read opens the database, so it is bounded, and a failure is recorded as an
-  // error rather than as null, which is an event-less project's id.
-  if (kshetra.project) {
-    try {
-      const lastEventId = await withDeadline(withTrackerReads(kshetra, r => r.lastEventId()), ENGINE_READ_TIMEOUT_MS);
-      return { engine: { projectId: kshetra.project, lastEventId } };
-    } catch (err) {
-      return { engine: { projectId: kshetra.project, lastEventId: null, error: (err as Error).message } };
-    }
+  try {
+    const lastEventId = await withDeadline(withTrackerReads(kshetra, r => r.lastEventId()), ENGINE_READ_TIMEOUT_MS);
+    return { engine: { projectId: kshetra.project ?? null, lastEventId } };
+  } catch (err) {
+    return { engine: { projectId: kshetra.project ?? null, lastEventId: null, error: (err as Error).message } };
   }
-  const headSha = await safe(() => git(kshetra.beads.path).headSha());
-  const lastDoltCommit = safeSync(() => {
-    const raw = readFileSync(join(kshetra.beads.path, 'export-state.json'), 'utf8');
-    const parsed = JSON.parse(raw) as { last_dolt_commit?: unknown };
-    return typeof parsed.last_dolt_commit === 'string' ? parsed.last_dolt_commit : null;
-  });
-  return { headSha, lastDoltCommit };
 }
 
 async function collectSubject(kshetra: KshetraConfig): Promise<Record<string, unknown>> {
@@ -262,15 +251,12 @@ async function collectProcess(
   ext: ExtensionIdentityInput,
   opts: LotManifestOpts,
 ): Promise<Record<string, unknown>> {
-  const [providers, bd] = await Promise.all([
-    collectProviders(kshetra),
-    probe('bd', ['--version']),
-  ]);
+  const providers = await collectProviders(kshetra);
   return {
     shreni: getBuildIdentity() as BuildIdentity,
     extension: collectExtensionIdentity(ext),
     providers,
-    tools: { bd, node: process.version },
+    tools: { node: process.version },
     // Whether --allow-ablation was passed (epic 8wi / Study B1) — recorded so an
     // audit sees the flag that let an ablated Kshetra run.
     allowAblation: opts.allowAblation ?? false,

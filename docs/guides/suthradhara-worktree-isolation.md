@@ -39,8 +39,8 @@ What now lives **inside the worktree** (the launched-session model):
 
 What stays **shared** (not in the worktree):
 
-- **The beads DB.** Filing always targets the one shared dolt DB via an absolute
-  `BEADS_DIR` (see below).
+- **The task graph.** Filing always targets the Kshetra's project in its database,
+  named by `SHRENI_KSHETRA` and the session's plan `SHRENI_PLAN` (see below).
 
 ---
 
@@ -89,29 +89,28 @@ such dir present at start or stop time is a leak from a dead session.
 
 The interactive `claude` session is spawned with `cwd` = the worktree
 (`lifecycle.ts` `defaultSpawn`, `stdio` inherited), so the model's Read/Grep, its
-design-doc `Write`, and its `bd`/`git` all run in the isolated tree. `SpawnSpec`
+design-doc `Write`, and its `shreni plan`/`git` all run in the isolated tree. `SpawnSpec`
 carries no `cwd`; `lifecycle.ts` binds it at spawn time (`session.ts` builds the
 spec).
 
 ---
 
-## The `BEADS_DIR` invariant
+## The `SHRENI_KSHETRA` / `SHRENI_PLAN` invariant
 
-**A worktree does not contain `.beads/`.** The `.beads/` symlink is gitignored, so
-a fresh checkout (worktree included) never gets it — cwd-based auto-discovery
-would fail from inside a worktree.
+**A worktree does not contain `.shreni/kshetra.yaml`.** The config is gitignored, so
+a fresh checkout (worktree included) never gets it — cwd-based discovery of the
+project would fail from inside a worktree.
 
-The fix, and the invariant to preserve: **always pass an absolute
-`BEADS_DIR = kshetra.beads.path`** to any `bd` invocation. `buildPlanningSession`
-(`session.ts`) injects it into the launched session's env, so every `bd` call — the
-grounding reads and the completion-protocol `bd create` / `bd dep add` / `bd export`
-the session runs itself — resolves to the one shared dolt DB regardless of cwd.
-Never rely on the `.beads` symlink resolving from a worktree — pass the absolute
-dir.
+The fix, and the invariant to preserve: `buildPlanningSession` (`session.ts`)
+injects **`SHRENI_KSHETRA`** (the Kshetra id, which the registry resolves to its
+config) and **`SHRENI_PLAN`** (the session's plan) into the launched session's env,
+so every `shreni task` read and every completion-protocol `shreni plan task add` /
+`dep add` / `validate` the session runs itself resolves to the Kshetra's project
+regardless of cwd. Everything Suthradhara files lands `proposed` in that plan, for
+the developer to approve; there is nothing to sync.
 
-If you add a new `bd` call anywhere on the Suthradhara path, set `BEADS_DIR`
-explicitly. A read that "works from the repo root" will silently fail from a
-worktree.
+If you add a new `shreni` call on the Suthradhara path, rely on that env, never on
+cwd. A read that "works from the repo root" will silently fail from a worktree.
 
 ---
 
@@ -133,12 +132,11 @@ A crashed or `kill -9`'d session leaves a worktree directory and a
   rm -rf ~/.shreni/worktrees/<kshetra-id>/suthradhara-*   # last resort: stale dirs
   ```
 
-### `bd` reads fail inside an intake session (`no beads database found`)
+### `shreni task` / `shreni plan` fail inside an intake session (no project found)
 
-The session is running in a worktree with no `.beads` symlink and no `BEADS_DIR`.
-Confirm `buildPlanningSession` (`session.ts`) still injects
-`BEADS_DIR: kshetra.beads.path` into the session env, and that any new `bd` call on
-the path sets it too.
+The session is running in a worktree with no `.shreni/kshetra.yaml` and no
+`SHRENI_KSHETRA`. Confirm `buildPlanningSession` (`session.ts`) still injects
+`SHRENI_KSHETRA` and `SHRENI_PLAN` into the session env.
 
 ### The design doc doesn't appear for Silpi
 

@@ -1,6 +1,6 @@
 # Task Lifecycle and Policy
 
-> **Status:** design, October 2026. Being built under `src/policy/` alongside the [task graph engine](task-graph-engine.md); none of it has shipped, and Shreni still runs on beads today.
+> **Status:** October 2026. Built under `src/policy/` alongside the [task graph engine](task-graph-engine.md), which every Kshetra now runs on. Beads remains only as a source to import from: `shreni migrate` moves a Kshetra still on beads (init refuses one and points there), and init imports a tracker repo's `.beads` data.
 
 This spec is Shreni's side of the task graph: the lifecycle it declares, who may do what, how plans get approved, which validators run, and how Sthapathi works the queue. Its code lives under `src/policy/`, one folder per area it governs, such as `src/policy/sthapathi/` for the worker's rules. The engine that enforces all of it is in [Task Graph Engine](task-graph-engine.md).
 
@@ -296,7 +296,7 @@ A project can be tracked without ever being worked: Shreni keeps its task graph,
 | Base branch | yes | no: no worker merges |
 | Database: reach the server, create the database if missing, apply migrations (The database) | yes | yes |
 | Project: register it in the database, with its uuid, `id_prefix` and mode | yes | yes |
-| Import: if `.beads` exists, a dry run, confirmation, then the import | yes | yes |
+| Import: if `.beads` holds an export (`issues.jsonl`), a dry run, confirmation, then the import | through `shreni migrate`, which init points to | yes |
 | Instructions: Shreni's block in each provider's instruction file, and the `prime` hooks | the Kshetra block | the tracker block |
 | Config | `kshetra.yaml`, conventions, the RAG stub | `tracker.yaml` only (Project config) |
 | Register in `~/.shreni/registry.json` | yes | no: never registered, so no worker can start |
@@ -304,6 +304,8 @@ A project can be tracked without ever being worked: Shreni keeps its task graph,
 The follow-up questions differ too. A Kshetra keeps today's provider, model and preflight questions. A tracker asks only which agent CLIs people use in the repo, to pick the instruction files; it defaults to Claude and skips the preflight. As today, every phase is idempotent, so a re-run after a failure resumes. The project is registered once its config file is written, and the config then records its uuid at once, so a run that stops at an earlier phase leaves no project behind, and a re-run finds the one the config names.
 
 **Instructions.** The Instructions phase writes Shreni's block into each provider's instruction file, in the version that matches the mode. The design and both templates are in [Instructions for agent sessions](#instructions-for-agent-sessions).
+
+**Importing beads.** Both init's Import phase and `shreni migrate <kshetra>` read the beads export committed in the beads directory (`issues.jsonl`, and `interactions.jsonl` when present); neither runs `bd`. The preflight says which file it read, and that the export is only as fresh as its last commit: if `bd` is installed, run `bd export -o <path>` first for the latest.
 
 **Changing mode** is deliberate:
 
@@ -333,11 +335,11 @@ The follow-up questions differ too. A Kshetra keeps today's provider, model and 
 Agent sessions learn the rules from their instruction file, so Shreni writes the rules there and keeps them current. Each repo gets one block in each provider's file, in one of two versions chosen by the project's mode.
 
 - **Which files.** `providerInstructionFile` (`src/agents/providers/registry.ts`) resolves each provider to its file: `CLAUDE.md` for Claude, `AGENTS.md` for Codex, `GEMINI.md` for Gemini. A Kshetra gets its configured provider's file; a tracker gets one for each provider in `tracker.yaml`, Claude by default.
-- **Markers.** The block sits between `<!-- shreni:begin <mode> v<N> -->` and `<!-- shreni:end -->`. Shreni rewrites only what is between them and never touches the rest of the file. The mode in the marker lets init catch a block of the wrong kind; the version lets `prime` catch an old one. Markers inside a code fence are an example, not the block. A begin marker with no end is refused, never guessed at, and a second block is removed, so no stale one survives. In a Kshetra, setup also rewrites any other agent CLI's file that holds a block, so a tracker block from before never lingers; a Kshetra still on beads keeps its old section and `bd` hooks until it moves to the engine.
+- **Markers.** The block sits between `<!-- shreni:begin <mode> v<N> -->` and `<!-- shreni:end -->`. Shreni rewrites only what is between them and never touches the rest of the file. The mode in the marker lets init catch a block of the wrong kind; the version lets `prime` catch an old one. Markers inside a code fence are an example, not the block. A begin marker with no end is refused, never guessed at, and a second block is removed, so no stale one survives. In a Kshetra, setup also rewrites any other agent CLI's file that holds a block, so a tracker block from before never lingers. An old `SHRENI INTEGRATION` section from the beads days is replaced by the block.
 - **One source.** Both versions are templates shipped with Shreni, and `shreni task prime` prints the same text with the project's memories, so the file and the CLI can't drift apart.
 - **Kept current.** Init writes the block, and `shreni task setup` rewrites it on demand, for example after an upgrade changes a template. `prime` warns when the block's version is behind, but never edits a committed file on its own.
-- **Hooks.** For Claude Code, setup also installs the session-start and pre-compaction hooks that run `shreni task prime`, in place of the `bd prime` hooks that `bd setup claude` installs today. Codex and Gemini get the block only.
-- **Replaces** `appendShreniIntegration` (`src/cli/init-kshetra.ts`), which appends `SHRENI INTEGRATION` to `CLAUDE.md` once and never updates it.
+- **Hooks.** For Claude Code, setup also installs the session-start and pre-compaction hooks that run `shreni task prime`, in place of the `bd prime` hooks that `bd setup claude` installed in the beads days. Codex and Gemini get the block only.
+- **Replaces** the old `SHRENI INTEGRATION` section that init once appended to `CLAUDE.md` and never updated: setup swaps that exact text for the block.
 
 **The two versions never mix.** In a Kshetra, Silpi runs natively and reads the same file as a person's session. A Kshetra file must never carry the by-hand workflow, or an agent could start claiming tasks.
 

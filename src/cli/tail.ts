@@ -1,7 +1,8 @@
 import { openSync, readSync, closeSync, existsSync } from 'fs';
 import { loadRegistry } from '../kshetra/registry';
 import { logPath, legacyLogPath } from '../sthapathi/activity-log';
-import { selectNext } from '../sthapathi/pickup';
+import { parseReadyOutput, rankCandidates } from '../sthapathi/pickup';
+import { withTrackerReads } from '../policy/sthapathi/reads';
 import { loadState } from '../kshetra/state';
 import { readPid, isAlive } from './pid';
 import type { KshetraConfig } from '../kshetra/config';
@@ -128,7 +129,7 @@ export interface TailOpts {
 // Print "no tasks in queue" for each idle Kshetra whose ready queue is empty, so
 // an idle worker is distinguishable from a hung one at a glance. A Kshetra with a
 // bead in flight (WORKING/PREPARING) is streaming activity, so it is left alone;
-// a bd failure is swallowed (a tail command must never crash on a read probe).
+// a read failure is swallowed (a tail command must never crash on a read probe).
 async function reportQueueState(targets: KshetraConfig[]): Promise<void> {
   const state = loadState();
   await Promise.all(
@@ -136,9 +137,10 @@ async function reportQueueState(targets: KshetraConfig[]): Promise<void> {
       const phase = state.kshetras[k.id]?.phase;
       if (phase === 'WORKING' || phase === 'PREPARING') return;
       try {
-        if ((await selectNext(k)) === null) console.log(`  [${k.id}] no tasks in queue`);
+        const ready = rankCandidates(parseReadyOutput(await withTrackerReads(k, r => r.ready())));
+        if (ready.length === 0) console.log(`  [${k.id}] no tasks in queue`);
       } catch {
-        /* bd unavailable — skip the probe rather than crash the tail */
+        /* database unreachable — skip the probe rather than crash the tail */
       }
     }),
   );

@@ -10,19 +10,11 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: () => dir };
 });
 
-// Mock bd + syncBeads so we don't need a real beads CLI
-vi.mock('./beads.js', () => ({
-  BeadsError: class BeadsError extends Error {
-    constructor(message: string) {
-      super(message);
-      this.name = 'BeadsError';
-    }
-  },
-  bd: () => ({
-    addNote: vi.fn().mockResolvedValue('ok'),
-    flag: vi.fn().mockResolvedValue('ok'),
-  }),
-  syncBeads: vi.fn().mockResolvedValue(undefined),
+// The task store's tracker: notes and flags land on the engine.
+const mockAddNote = vi.fn().mockResolvedValue('ok');
+const mockFlag = vi.fn().mockResolvedValue('ok');
+vi.mock('./task-store.js', () => ({
+  trackerFor: () => ({ addNote: mockAddNote, flag: mockFlag }),
 }));
 
 // Mock git so branch cleanup doesn't touch a real repo
@@ -50,14 +42,12 @@ vi.mock('./git.js', () => ({
 
 const { handleCycleError, cleanupBranch, ParseError, AgentError, notifyOperator } = await import('./errors.js');
 const { GitError } = await import('./git.js');
-const { BeadsError } = await import('./beads.js');
 const { loadState } = await import('../kshetra/state.js');
 
 const KSHETRA = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main' },
-  beads: { path: '/projects/myapp-beads', remote: '' },
   agents: { maxRoundsPerBead: 5 },
 } as unknown as import('../kshetra/config.js').KshetraConfig;
 
@@ -74,6 +64,8 @@ beforeEach(() => {
   mockBranchExists.mockReset().mockResolvedValue(true);
   mockCheckout.mockReset().mockResolvedValue(undefined);
   mockDeleteBranch.mockReset().mockResolvedValue(undefined);
+  mockAddNote.mockClear();
+  mockFlag.mockClear();
 });
 
 afterEach(() => {
@@ -146,14 +138,9 @@ describe('handleCycleError', () => {
     expect(state.kshetras['myapp'].reason).toBe('git_failed');
   });
 
-  it('pauses manually on BD_FAILED without touching bead', async () => {
-    const bdErr = new (BeadsError as unknown as { new(msg: string): Error })('bd create failed');
-    await handleCycleError(KSHETRA, null, bdErr);
-
-    const state = loadState();
-    expect(state.kshetras['myapp'].paused).toBe(true);
-    expect(state.kshetras['myapp'].requiresManualResume).toBe(true);
-    expect(state.kshetras['myapp'].reason).toBe('bd_failed');
+  it('flags the task through the task store on AGENT_FAILED', async () => {
+    await handleCycleError(KSHETRA, TASK, new AgentError('API_FAILURE', { task: TASK, round: 1 }));
+    expect(mockFlag).toHaveBeenCalledWith('bead-abc', expect.stringContaining('Agent failed'));
   });
 
   it('handles unknown errors without pausing kshetra', async () => {
@@ -191,10 +178,10 @@ describe('handleCycleError', () => {
     expect(mockDeleteBranch).not.toHaveBeenCalled();
   });
 
-  it('does not attempt branch cleanup when there is no task (BD_FAILED)', async () => {
-    const bdErr = new (BeadsError as unknown as { new(msg: string): Error })('bd create failed');
-    await handleCycleError(KSHETRA, null, bdErr);
+  it('does not attempt branch cleanup or flag when there is no task', async () => {
+    await handleCycleError(KSHETRA, null, new Error('the task read failed'));
     expect(mockDeleteBranch).not.toHaveBeenCalled();
+    expect(mockFlag).not.toHaveBeenCalled();
   });
 });
 

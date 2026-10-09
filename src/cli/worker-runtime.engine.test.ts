@@ -8,8 +8,8 @@ import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import type { KshetraConfig } from '../kshetra/config';
 
 // The worker runtime in engine mode (policy spec, "Running work"): a Kshetra
-// whose kshetra.yaml names its engine project is worked through the engine,
-// never through bd. Git, the agents and the lot manifest are stubbed.
+// whose kshetra.yaml names its engine project is worked through the engine;
+// one with no project is refused. Git, the agents and the lot manifest are stubbed.
 
 let shreni: ShreniClient;
 const run = vi.fn(async () => { await new Promise(r => setTimeout(r, 30)); return { approved: true, note: 'ok' }; });
@@ -28,11 +28,10 @@ vi.mock('../sthapathi/health', async orig => ({
 vi.mock('../sthapathi/pickup', async orig => {
   const real = await orig<typeof import('../sthapathi/pickup')>();
   return {
-    ...real, selectNext: vi.fn(), prepareTask: vi.fn(),
+    ...real,
     preFlightFresh: async (task: never, k: never) => { if (!(await real.healthGate(task, k))) throw new real.BaseRedError(task); },
   };
 });
-vi.mock('../sthapathi/beads', async orig => ({ ...(await orig<object>()), syncBeads: vi.fn() }));
 vi.mock('../sthapathi/lot-manifest', async orig => ({ ...(await orig<object>()), collectLotManifest: async () => ({}) }));
 vi.mock('../ext/loader', async orig => ({ ...(await orig<object>()), loadExtension: async () => false }));
 
@@ -46,7 +45,7 @@ async function setup() {
   const kshetra = {
     id: 'web', name: 'web', project: p.id, database: 'local', plan: { validators: {} },
     repo: { path: dir, remote: 'x', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-    beads: { path: dir, remote: 'x', mode: 'embedded' }, stack: { language: 'ts' },
+    stack: { language: 'ts' },
     gates: { build: { level: 'block' }, test: { level: 'block' }, lint: { level: 'warn' } },
     agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
     conventions: {},
@@ -102,7 +101,7 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     await runtime.close();
   });
 
-  it('claims and runs through the engine, takes the worker lock, and never touches bd', async () => {
+  it('claims and runs through the engine and takes the worker lock', async () => {
     run.mockClear();
     const t = await createTestDb();
     shreni = await openShreni({ db: t.db, lifecycle: taskLifecycle });
@@ -116,15 +115,13 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     const kshetra = {
       id: 'web', name: 'web', project: p.id, database: 'local', plan: { validators: {} },
       repo: { path: dir, remote: 'x', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
-      beads: { path: dir, remote: 'x', mode: 'embedded' }, stack: { language: 'ts' },
+      stack: { language: 'ts' },
       gates: { build: { level: 'block' }, test: { level: 'block' }, lint: { level: 'warn' } },
       agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
       conventions: {},
     } as unknown as KshetraConfig;
 
     const { createWorkerRuntime } = await import('./worker-runtime');
-    const pickup = await import('../sthapathi/pickup');
-    const beads = await import('../sthapathi/beads');
     const runtime = createWorkerRuntime(kshetra, { entrypoint: 'drain' });
     await runtime.startup();
     expect(await t.pglite.query<any>(`select count(*)::int n from pg_locks where locktype = 'advisory'`).then(r => r.rows[0].n)).toBe(1);
@@ -133,13 +130,19 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     expect(run).toHaveBeenCalledTimes(1);
     expect(await t.pglite.query<any>(`select task_id, worker from taskgraph.attempts`).then(r => r.rows.map(({ task_id, worker }) => ({ task_id, worker }))))
       .toEqual([{ task_id: task.id, worker: expect.stringMatching(/\/\d+$/) }]);
-    expect(pickup.selectNext).not.toHaveBeenCalled();
-    expect(pickup.prepareTask).not.toHaveBeenCalled();
-    expect(beads.syncBeads).not.toHaveBeenCalled();
 
     // Finishing through the engine lands with merge (T4.5): until then a run that
     // doesn't move its task gives the claim back.
     expect(await t.pglite.query<any>(`select outcome from taskgraph.attempts`).then(r => r.rows)).toEqual([{ outcome: 'release' }]);
     await runtime.close();
+  });
+
+  it('refuses a Kshetra with no project (still on beads), naming shreni migrate', async () => {
+    const { workerPreconditionError } = await import('./worker-runtime');
+    const { kshetra } = await setup();
+    const { project: _p, ...unmigrated } = kshetra as KshetraConfig & { project?: string };
+    expect(workerPreconditionError(unmigrated as KshetraConfig, false)).toBe('web has no task graph project: run shreni migrate web');
+    // With a project it is clear to run (credentials aside).
+    expect(workerPreconditionError(kshetra, false) ?? '').not.toMatch(/shreni migrate/);
   });
 });

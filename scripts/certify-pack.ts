@@ -1,21 +1,23 @@
 /**
- * Pack certification harness (ARD §3.4, Shreni-beads-84m.4).
+ * Pack certification harness (ARD §3.4).
  *
- * Usage:  pnpm certify <pack-name>            (requires `pnpm build` first)
+ * Usage:  pnpm certify <pack-name>   (requires `pnpm build` first, and SHRENI_DATABASE_URL)
  *
  * For one pack: scaffold a throwaway Kshetra from packs/<name>/reference/
- * (the fixture repo, with backlog.sh at its root), run `shreni init --mode kshetra --on-beads
- * --pack <name>` against it, file the fixture backlog, run the worker until
- * the backlog completes, then assert from the activity log + bd + git that:
- *   - every backlog bead merged (task_done approved + bead-<id> commit on main)
+ * (the fixture repo; its backlog.json and optional setup.sh are harness inputs,
+ * not fixture files), run `shreni init --mode kshetra --pack <name>` against it
+ * on the database, run setup.sh, file backlog.json through the task graph engine
+ * as the system role (so the tasks land open), run the worker until every task
+ * is done, then assert from the activity log + the engine + git that:
+ *   - every backlog task merged (task_done approved + bead-<id> commit on main)
  *   - the test/lint gates ran green on the final round (silpi_done fields)
  *   - the build gate command was actually executed (agent_tool_call detail)
  *   - the scripted reviewer rejection happened (viharapala_done REJECT)
  *   - Parikshaka's discovery walk found the fixture's test files
  *
- * Everything is local: both the fixture repo and the beads repo push to bare
- * repos inside the workspace, so certification needs no GitHub access — only
- * the provider CLI (claude) with credentials, bd, and git.
+ * The fixture repo pushes to a bare repo inside the workspace, so certification
+ * needs no GitHub access — only the provider CLI (claude) with credentials, git,
+ * and a Postgres the engine can use (SHRENI_DATABASE_URL; CI runs a service).
  */
 import { execFileSync, spawn } from 'child_process';
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from 'fs';
@@ -27,8 +29,6 @@ import {
   checkBuildGateObserved,
   checkReviewerRejectionObserved,
   checkParikshakaDiscovery,
-  parseBeadIds,
-  parseBeadStatus,
   type CertFailure,
 } from '../src/cert/assertions.js';
 import { loadKshetraConfig } from '../src/kshetra/config.js';
@@ -37,6 +37,7 @@ import { unregisterKshetra } from '../src/kshetra/registry.js';
 import { resolveBuildCommand, resolveTestGlobs, resolveVendorDirs } from '../src/kshetra/toolchain.js';
 import { collectTestFiles } from '../src/sthapathi/parikshaka-dispatch.js';
 import { logPath } from '../src/sthapathi/activity-log.js';
+import { openKshetraTasks, readBacklog, type KshetraTasks } from './lib/engine-backlog.js';
 
 const REPO_ROOT = resolve(__dirname, '..');
 const SHRENI = join(REPO_ROOT, 'dist', 'cli', 'index.js');
@@ -81,58 +82,68 @@ async function main(): Promise<void> {
     console.error(`Missing ${SHRENI} — run \`pnpm build\` first.`);
     process.exit(2);
   }
+  if (!process.env['SHRENI_DATABASE_URL']) {
+    console.error('SHRENI_DATABASE_URL is not set — certification runs the Kshetra on a Postgres database.');
+    process.exit(2);
+  }
   const pack = loadPackByName(packName);
   const fixtureDir = join(pack.dir, 'reference');
-  const backlogScript = join(fixtureDir, 'backlog.sh');
-  if (!existsSync(backlogScript)) {
-    console.error(`Pack "${packName}" has no reference/backlog.sh — nothing to certify.`);
+  const backlogFile = join(fixtureDir, 'backlog.json');
+  const setupScript = join(fixtureDir, 'setup.sh');
+  if (!existsSync(backlogFile)) {
+    console.error(`Pack "${packName}" has no reference/backlog.json — nothing to certify.`);
+    process.exit(2);
+  }
+  const backlog = readBacklog(backlogFile);
+  if (backlog.length < 3 || backlog.length > 5) {
+    console.error(`${backlogFile} lists ${backlog.length} tasks — the certification backlog must be 3–5.`);
     process.exit(2);
   }
 
   const work = mkdtempSync(join(tmpdir(), `shreni-cert-${packName}-`));
   const slug = `cert-${packName}`;
   const repoDir = join(work, 'repo');
-  const beadsDir = join(work, 'beads');
+  const configPath = join(repoDir, '.shreni', 'kshetra.yaml');
   console.log(`▶ certifying ${pack.name}@${pack.version} in ${work}`);
 
   let worker: ReturnType<typeof spawn> | undefined;
+  let tasks: KshetraTasks | undefined;
   try {
-    // 1. Fixture repo + local origins (repo and beads both push locally).
+    // 1. Fixture repo + a local origin. The harness inputs stay out of the repo.
     cpSync(fixtureDir, repoDir, { recursive: true });
-    rmSync(join(repoDir, 'backlog.sh'), { force: true });
+    rmSync(join(repoDir, 'backlog.json'), { force: true });
+    rmSync(join(repoDir, 'setup.sh'), { force: true });
     gitRepoWithLocalOrigin(repoDir, join(work, 'repo-origin.git'));
-    gitRepoWithLocalOrigin(beadsDir, join(work, 'beads-origin.git'));
 
-    // 2. Init the Kshetra from the pack (materialization under test too).
-    console.log('▶ shreni init --mode kshetra --on-beads --pack', packName);
-    sh('node', [SHRENI, 'init', '--mode', 'kshetra', '--on-beads',
-      '--slug', slug, '--path', repoDir, '--pack', packName,
-      '--beads-path', beadsDir, '--provider', 'claude',
+    // 2. Init the Kshetra from the pack (materialization under test too),
+    //    with its database and project on SHRENI_DATABASE_URL.
+    console.log('▶ shreni init --mode kshetra --pack', packName);
+    sh('node', [SHRENI, 'init', '--mode', 'kshetra',
+      '--slug', slug, '--path', repoDir, '--pack', packName, '--provider', 'claude',
     ]);
 
-    // 3. File the fixture backlog and snapshot the bead ids to certify.
-    const bdEnv = { ...process.env, BEADS_DIR: beadsDir };
-    sh('bash', [backlogScript], { cwd: repoDir, env: bdEnv });
-    const beadIds = parseBeadIds(sh('bd', ['list', '--status=open'], { cwd: repoDir, env: bdEnv }));
-    if (beadIds.length < 3 || beadIds.length > 5) {
-      throw new Error(`backlog.sh filed ${beadIds.length} beads — the certification backlog must be 3–5.`);
-    }
-    console.log(`▶ backlog: ${beadIds.join(', ')}`);
+    // 3. Fixture setup (the dependency install the harness doesn't do), then
+    //    file the backlog through the engine and snapshot the ids to certify.
+    if (existsSync(setupScript)) sh('bash', [setupScript], { cwd: repoDir });
+    tasks = await openKshetraTasks(configPath);
+    const taskIds = await tasks.file(backlog);
+    console.log(`▶ backlog: ${taskIds.join(', ')}`);
 
     // 4. Run the worker (the real deployment path — Parikshaka's fire-and-
     //    forget dispatch needs the long-lived process) until every backlog
-    //    bead closes or the budget runs out.
+    //    task is done or the budget runs out.
     worker = spawn('node', [SHRENI, '__worker', slug], { stdio: 'inherit' });
     const deadline = Date.now() + BACKLOG_TIMEOUT_MS;
-    let remaining = beadIds;
+    let remaining = taskIds;
     while (remaining.length > 0) {
       if (Date.now() > deadline) {
-        throw new Error(`timed out after ${BACKLOG_TIMEOUT_MS}ms with open beads: ${remaining.join(', ')}`);
+        throw new Error(`timed out after ${BACKLOG_TIMEOUT_MS}ms with unfinished tasks: ${remaining.join(', ')}`);
       }
       await sleep(POLL_MS);
-      remaining = beadIds.filter(
-        id => parseBeadStatus(sh('bd', ['show', id], { cwd: repoDir, env: bdEnv })) !== 'CLOSED',
-      );
+      const states = await tasks.states(taskIds);
+      const cancelled = taskIds.filter(id => states.get(id) === 'cancelled');
+      if (cancelled.length > 0) throw new Error(`backlog tasks were cancelled: ${cancelled.join(', ')}`);
+      remaining = taskIds.filter(id => states.get(id) !== 'done');
     }
     console.log('▶ backlog complete — waiting for Parikshaka');
 
@@ -149,19 +160,19 @@ async function main(): Promise<void> {
     worker = undefined;
 
     // 6. Assertions.
-    const config = loadKshetraConfig(join(repoDir, '.shreni', 'kshetra.yaml'));
+    const config = loadKshetraConfig(configPath);
     const events = parseActivityLog(readFileSync(activityFile, 'utf8'));
     const expectedTests = await collectTestFiles(repoDir, resolveTestGlobs(config), resolveVendorDirs(config));
 
     const failures: CertFailure[] = [
-      ...checkBeadOutcomes(events, beadIds),
+      ...checkBeadOutcomes(events, taskIds),
       ...checkBuildGateObserved(events, resolveBuildCommand(config)),
       ...checkReviewerRejectionObserved(events),
       ...checkParikshakaDiscovery(events, expectedTests),
     ];
     // Merged means merged: a bead-<id> squash commit is on the fixture main.
     const log = sh('git', ['log', '--oneline', 'main'], { cwd: repoDir });
-    for (const id of beadIds) {
+    for (const id of taskIds) {
       if (!log.includes(`bead-${id}`)) {
         failures.push({ check: 'merged', beadId: id, detail: `no "bead-${id}" squash commit on main` });
       }
@@ -174,9 +185,10 @@ async function main(): Promise<void> {
       }
       process.exit(1);
     }
-    console.log(`\n✓ CERTIFIED ${pack.name}@${pack.version} — ${beadIds.length} beads merged, gates observed, discovery correct.`);
+    console.log(`\n✓ CERTIFIED ${pack.name}@${pack.version} — ${taskIds.length} tasks merged, gates observed, discovery correct.`);
   } finally {
     worker?.kill('SIGTERM');
+    await tasks?.close().catch(() => {});
     try {
       unregisterKshetra(slug);
     } catch {
@@ -184,6 +196,7 @@ async function main(): Promise<void> {
     }
     rmSync(work, { recursive: true, force: true });
     rmSync(join(homedir(), '.shreni', 'kshetra', slug), { recursive: true, force: true });
+    rmSync(join(homedir(), '.shreni', 'rag', slug), { recursive: true, force: true });
   }
 }
 

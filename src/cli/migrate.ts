@@ -1,10 +1,9 @@
-import { execFile } from 'child_process';
 import { homedir } from 'os';
 import { join } from 'path';
 import { createInterface } from 'readline/promises';
 import type { CommandContext } from './registry';
 import { parseArgs, instructionTargets, setupInstructions } from './task';
-import { loadKshetraConfig, type KshetraConfig } from '../kshetra/config';
+import { legacyBeadsPath, loadKshetraConfig, type KshetraConfig } from '../kshetra/config';
 import { loadRegistry, resolveConfigPath } from '../kshetra/registry';
 import { loadUserConfig, resolveDatabase } from '../kshetra/user-config';
 import { isLocal, pgTools, takeDump, WAIT_MS } from '../policy/db/backups';
@@ -38,13 +37,6 @@ export function defaultMigrateDeps(): MigrateDeps {
     },
     kshetras: loadRegistry,
     configPath: resolveConfigPath,
-    exportBeads: beadsDir => new Promise((resolve, reject) => {
-      execFile('bd', ['export', '-o', join(beadsDir, 'issues.jsonl')], { env: { ...process.env, PATH: process.env.PATH, BEADS_DIR: beadsDir } }, (err, _o, stderr) => {
-        if (!err) return resolve(true);
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return resolve(false);
-        reject(new Error(`bd export failed: ${String(stderr).trim() || err.message}`));
-      });
-    }),
     dump: preImportDump,
     interactive: () => !!process.stdin.isTTY && !!process.stdout.isTTY,
     async ask(question) {
@@ -67,11 +59,16 @@ export async function preImportDump(database: string): Promise<string> {
   return `dumped first: ${await takeDump(target, 'pre-import', pgTools, { wait: WAIT_MS })}`;
 }
 
-/** What a Kshetra's migration works on. */
+/**
+ * What a Kshetra's migration works on. The beads data is at the legacy
+ * `beads.path` the config file names (read from the file: the schema no longer
+ * has it), else behind the repo's .beads link.
+ */
 export function kshetraTarget(k: KshetraConfig, configPath: string): MigrateTarget {
   const t = instructionTargets({ kind: 'kshetra', path: configPath, config: k });
+  const beadsDir = legacyBeadsPath(configPath) ?? join(k.repo.path, '.beads');
   return {
-    id: k.id, name: k.id, mode: 'kshetra', repo: k.repo.path, beadsDir: k.beads.path, configPath, project: k.project,
+    id: k.id, name: k.id, mode: 'kshetra', repo: k.repo.path, beadsDir, configPath, project: k.project,
     database: k.database ?? 'local', repoUrl: k.repo.remote,
     touches: [...t.files, ...(t.claude ? [join(t.repo, '.claude', 'settings.json')] : [])],
     instructions: () => { setupInstructions({ kind: 'kshetra', path: configPath, config: loadKshetraConfig(configPath) }); },
@@ -80,7 +77,8 @@ export function kshetraTarget(k: KshetraConfig, configPath: string): MigrateTarg
 
 export async function runMigrateCommand(ctx: CommandContext, overrides: Partial<MigrateDeps> = {}): Promise<void> {
   const deps: MigrateDeps = { ...defaultMigrateDeps(), ...overrides };
-  const a = parseArgs(ctx.args, { command: 'shreni migrate', bool: ['--yes', '--undo'], positionals: 1 });
+  // parseArgs reads past a subcommand at args[0]; this command has none, so one is put back.
+  const a = parseArgs(['migrate', ...ctx.args], { command: 'shreni migrate', bool: ['--yes', '--undo'], positionals: 1 });
   const [id] = a.positionals;
   if (!id) throw new Error(`Usage: shreni migrate ${MIGRATE_USAGE}`);
   await migrateKshetra(id, deps, { yes: a.bools.has('--yes'), undo: a.bools.has('--undo') });

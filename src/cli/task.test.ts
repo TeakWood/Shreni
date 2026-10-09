@@ -568,7 +568,7 @@ describe('shreni task setup and prime', { timeout: PGLITE_TIMEOUT }, () => {
     const { repo, run } = await setup('kshetra');
     const file = join(repo, '.shreni', 'kshetra.yaml');
     writeFileSync(file, readFileSync(file, 'utf8').replace(/^project: .*\n/m, ''));
-    await expect(run('setup')).rejects.toThrow(/Kshetra web is still on beads/);
+    await expect(run('setup')).rejects.toThrow('web has no task graph project: run shreni migrate web');
     expect(existsSync(join(repo, 'CLAUDE.md'))).toBe(false);
 
     const { run: run2, deps: deps2 } = await setup();

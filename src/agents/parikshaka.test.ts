@@ -101,10 +101,10 @@ describe('buildParikshakaSystemPrompt', () => {
     expect(opts.systemPrompt).not.toContain('== PERSONAS ==');
   });
 
-  it('contains the role boundary prohibiting bd calls', async () => {
+  it('contains the role boundary prohibiting shreni task calls', async () => {
     await runParikshaka(makeCtx());
     const opts = mockRunClaudeAgent.mock.calls[0][0] as { systemPrompt: string };
-    expect(opts.systemPrompt).toContain('Do NOT call bd');
+    expect(opts.systemPrompt).toContain('Do NOT call shreni task');
   });
 
   it('declares Parikshaka read-only — must not write, edit, or author files/tests', async () => {

@@ -16,7 +16,7 @@ import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-
 import { timed } from '../sthapathi/timing';
 import { getUsageMeter, getPolicySource, costFor, type UsageMeter, type PolicySource, type PolicyDecision } from '../ext/index';
 import { readSessionUsage, type SessionUsage } from '../suthradhara/usage';
-import { resolveAgentModel, type KshetraConfig } from '../kshetra/config';
+import { requireProject, resolveAgentModel, type KshetraConfig } from '../kshetra/config';
 import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
 import { loadUserConfig } from '../kshetra/user-config';
 import { openKshetraEngine } from '../policy/sthapathi/connect';
@@ -31,7 +31,7 @@ import { planStore, renderPlan, type PlanStore } from '../policy/suthradhara/fil
 export function defaultPlanStore(kshetra: KshetraConfig): PlanStore {
   const user = loadUserConfig().user;
   if (!user) throw new Error('no developer to act as: set user in ~/.shreni/config.yaml, or git config user.email');
-  return planStore(kshetra.project!, user, () => openKshetraEngine(kshetra, { name: 'shreni-suthradhara' }));
+  return planStore(requireProject(kshetra), user, () => openKshetraEngine(kshetra, { name: 'shreni-suthradhara' }));
 }
 
 /** Discards a plan left unused, so it isn't offered for approval; a failure is only logged. */
@@ -155,12 +155,14 @@ export async function runSuthradhara(sub: string | undefined, opts: RunOpts): Pr
   const kshetra = resolveTargetKshetra(opts.args, opts.flagKshetra, opts.cwd, kshetras);
 
   if (sub === 'start') {
+    // A Kshetra not yet on the engine is refused before any question or push.
+    requireProject(kshetra);
     if (!gateFirstLaunch(kshetra, 'launching')) return; // fnd.7: budget gate
     // uvu.6: verify the base branch exists before startSession cuts a worktree
     // from origin/<mainBranch>. Skip when a session is already running — no
     // launch, no cut (mirrors gateFirstLaunch's already-running short-circuit).
     if (!statusSession(kshetra.id).running && !(await ensureBaseBranchForLaunch(kshetra))) return;
-    const plans = kshetra.project ? defaultPlanStore(kshetra) : undefined;
+    const plans = defaultPlanStore(kshetra);
     // The plan exists before the session does; none is made for a launch that won't happen.
     const planId = plans && !statusSession(kshetra.id).running ? await newPlan(plans, kshetra) : undefined;
     let result: Awaited<ReturnType<typeof startSession>>;
@@ -212,6 +214,7 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
     );
   }
 
+  requireProject(kshetra);
   // fnd.7: a resume relaunches an interactive session, so gate it on the budget
   // cap too (via the same first-launch gate the `start` command uses).
   if (!gateFirstLaunch(kshetra, 'resuming')) return;
@@ -220,7 +223,7 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
   if (!statusSession(kshetra.id).running && !(await ensureBaseBranchForLaunch(kshetra))) return;
 
   // On the engine: the session's plan if still open, else a new one, settled before any worktree is cut.
-  const plans = kshetra.project ? defaultPlanStore(kshetra) : undefined;
+  const plans = defaultPlanStore(kshetra);
   // A missing record is resumeSession's to report, with its own message.
   const recorded = (() => { try { return loadSession(sessionId).planId; } catch { return undefined; } })();
   const planId = plans ? await planForResume(plans, kshetra, recorded) : undefined;
@@ -377,7 +380,7 @@ export function renderSummary(kshetra: KshetraConfig, handoff: Handoff | null): 
   } else {
     lines.push(
       '  (no handoff record found — the session may have exited before completing the push.)',
-      `  Check \`${kshetra.project ? 'shreni task list' : 'bd list'}\` and the worktree branch to see what landed.`,
+      `  Check \`shreni task list\` and the worktree branch to see what landed.`,
     );
   }
   return lines;

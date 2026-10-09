@@ -8,8 +8,8 @@ import { exportShreniProject } from '../policy/db/bundle';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import { loadKshetraConfig } from '../kshetra/config';
 import { manifestPath, onBeads } from '../policy/migrate/kshetra';
-import { SHRENI_SECTION } from './init-kshetra';
-import { migrateKshetra, type MigrateDeps } from './migrate';
+import { LEGACY_SECTION as SHRENI_SECTION } from '../policy/init/instructions';
+import { kshetraTarget, migrateKshetra, type MigrateDeps } from './migrate';
 
 // shreni migrate (migration plan, "Upgrading a Kshetra" and "Migration test"):
 // a fixture Kshetra built from the beads importer's fixture moves to the
@@ -58,7 +58,6 @@ async function setup() {
     workerRunning: () => false,
     kshetras: () => [loadKshetraConfig(k.configPath)],
     configPath: () => k.configPath,
-    exportBeads: async () => false,
     dump: async () => 'dumped first: test.dump',
     interactive: () => false,
     ask: async () => { throw new Error('not asked'); },
@@ -84,7 +83,7 @@ describe('shreni migrate', { timeout: PGLITE_TIMEOUT }, () => {
     expect(readFileSync(join(k.repo, 'CLAUDE.md'), 'utf8')).toMatch(/^# Web\n\n<!-- shreni:begin kshetra v1 -->/);
     expect(readFileSync(join(k.repo, '.claude', 'settings.json'), 'utf8')).toContain('shreni task prime');
     expect(existsSync(join(k.beads, 'issues.jsonl'))).toBe(true);
-    expect(onBeads(config)).toBe(false);
+    expect(onBeads(config, k.configPath)).toBeUndefined();
 
     const files = snapshot(k.repo);
     const db = await exportShreniProject(shreni, config.project!);
@@ -100,7 +99,7 @@ describe('shreni migrate', { timeout: PGLITE_TIMEOUT }, () => {
     const { shreni, k, deps } = await setup();
     const before = snapshot(k.repo);
     const issues = readFileSync(join(k.beads, 'issues.jsonl'));
-    expect(onBeads(loadKshetraConfig(k.configPath))).toBe(true);
+    expect(onBeads(loadKshetraConfig(k.configPath), k.configPath)).toBe(k.beads);
 
     await migrateKshetra('web', deps, { yes: true });
     expect(snapshot(k.repo)).not.toEqual(before);
@@ -109,7 +108,7 @@ describe('shreni migrate', { timeout: PGLITE_TIMEOUT }, () => {
     expect(readFileSync(join(k.beads, 'issues.jsonl'))).toEqual(issues);
     expect(await shreni.tg.projects.list()).toEqual([]);
     expect(existsSync(manifestPath(deps, 'web', k.configPath))).toBe(false);
-    expect(onBeads(loadKshetraConfig(k.configPath))).toBe(true);
+    expect(onBeads(loadKshetraConfig(k.configPath), k.configPath)).toBe(k.beads);
   });
 
   it('refuses --undo after the first write to the new store', async () => {
@@ -192,5 +191,49 @@ describe('shreni migrate', { timeout: PGLITE_TIMEOUT }, () => {
 
     await expect(migrateKshetra('web', { ...deps, workerRunning: () => true })).rejects.toThrow(/has a worker running; shreni stop --kshetra web first/);
     await expect(migrateKshetra('nope', deps)).rejects.toThrow(/Kshetra not found: nope/);
+  });
+
+  it('reads the legacy beads.path straight from the YAML, and the committed export, never running bd', async () => {
+    const { k, deps, out } = await setup();
+    const config = loadKshetraConfig(k.configPath);
+    // The schema strips beads:, so the path comes from the file.
+    expect((config as Record<string, unknown>).beads).toBeUndefined();
+    expect(kshetraTarget(config, k.configPath).beadsDir).toBe(k.beads);
+    const path = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      await migrateKshetra('web', deps, { yes: true });
+    } finally {
+      process.env.PATH = path;
+    }
+    const issues = join(k.beads, 'issues.jsonl');
+    expect(out).toContain(`reading the committed ${issues}; if bd is installed, run \`bd export -o ${issues}\` first for the latest`);
+    expect(loadKshetraConfig(k.configPath).project).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('without a beads.path in the config, looks behind the repo\'s .beads link', () => {
+    const k = fixtureKshetra();
+    writeFileSync(k.configPath, readFileSync(k.configPath, 'utf8').replace(/^beads:.*\n/m, ''));
+    expect(kshetraTarget(loadKshetraConfig(k.configPath), k.configPath).beadsDir).toBe(join(k.repo, '.beads'));
+    // start's check looks where migrate does: behind the .beads link when the config names no path.
+    expect(onBeads(loadKshetraConfig(k.configPath), k.configPath)).toBe(join(k.repo, '.beads'));
+  });
+
+  it('runs as the command line gives it: shreni migrate <kshetra> --yes', async () => {
+    const { k, deps } = await setup();
+    const { runMigrateCommand } = await import('./migrate');
+    const { makeContext } = await import('./registry');
+    await runMigrateCommand(makeContext(['web', '--yes']), deps);
+    expect(loadKshetraConfig(k.configPath).project).toMatch(/^[0-9a-f-]{36}$/);
+    await expect(runMigrateCommand(makeContext([]), deps)).rejects.toThrow(/Usage: shreni migrate/);
+  });
+
+  it('onBeads: the beads dir only with no project and an issues.jsonl at the legacy path', () => {
+    const k = fixtureKshetra();
+    expect(onBeads({}, k.configPath)).toBe(k.beads);
+    expect(onBeads({ project: 'p' }, k.configPath)).toBeUndefined();
+    rmSync(join(k.beads, 'issues.jsonl'));
+    expect(onBeads({}, k.configPath)).toBeUndefined();
+    expect(onBeads({}, join(k.root, 'missing.yaml'))).toBeUndefined();
   });
 });

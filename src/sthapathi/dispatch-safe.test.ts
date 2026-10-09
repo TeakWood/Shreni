@@ -6,11 +6,13 @@ import type { Task, AgentContext, SilpiOutput, ViharapalaOutput } from './types.
 
 const mockBdAddNote = vi.fn<() => Promise<string>>();
 
-vi.mock('./beads.js', () => ({
-  bd: vi.fn(() => ({ addNote: mockBdAddNote })),
-  syncBeads: vi.fn(),
-  BeadsError: class BeadsError extends Error {},
-}));
+vi.mock('./task-store.js', () => {
+  const tracker = { addNote: mockBdAddNote };
+  return {
+    trackerFor: vi.fn(() => tracker),
+    engineStore: vi.fn(() => ({ tracker, recordAcceptance: vi.fn(async () => {}) })),
+  };
+});
 
 const mockRunSilpi = vi.fn<() => Promise<SilpiOutput>>();
 vi.mock('../agents/silpi.js', () => ({ runSilpi: mockRunSilpi }));
@@ -39,7 +41,6 @@ const KSHETRA = {
   id: 'myapp',
   name: 'Myapp',
   repo: { path: '/projects/myapp', remote: '', mainBranch: 'main' },
-  beads: { path: '/projects/myapp-beads', remote: '' },
   agents: { model: 'claude-sonnet-4-6', maxRoundsPerBead: 3 },
 } as unknown as KshetraConfig;
 

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { blockProblem, findBlock, installPrimeHooks, renderBlock, writeBlock } from './instructions';
-import { SHRENI_SECTION } from '../../cli/init-kshetra';
+import { LEGACY_SECTION as SHRENI_SECTION } from './instructions';
 
 // Instructions for agent sessions (policy spec): one block per instruction
 // file, between markers naming its mode and version; only that text changes.

@@ -16,14 +16,14 @@ Shreni names its parts in Sanskrit; each maps to a directory under `src/`.
 
 | Component | Code | Role |
 |---|---|---|
-| **Sthapathi** (architect) | [`src/sthapathi/`](src/sthapathi/) | Orchestrator. Owns the task lifecycle, the git workflow, and the poll loop. The only caller of `bd --claim` / `bd close`. |
+| **Sthapathi** (architect) | [`src/sthapathi/`](src/sthapathi/) | Orchestrator. Owns the task lifecycle, the git workflow, and the poll loop. The only claimer and finisher of a Kshetra's tasks. |
 | **Silpi** (craftsman) | [`src/agents/silpi.ts`](src/agents/silpi.ts) | Coding agent. Given a task with injected context, writes implementation + unit tests, runs lint/tests, submits for review. |
 | **Viharapala** (guardian) | [`src/agents/viharapala.ts`](src/agents/viharapala.ts) | Review agent. Judges Silpi's output against acceptance criteria, quality, and coverage; returns `APPROVE` / `REJECT` with structured feedback. |
-| **Parikshaka** (examiner) | [`src/agents/parikshaka.ts`](src/agents/parikshaka.ts) | Test agent. Runs asynchronously after merge; backfills tests for shipped work and files coverage-gap beads. Read-only w.r.t. source. |
+| **Parikshaka** (examiner) | [`src/agents/parikshaka.ts`](src/agents/parikshaka.ts) | Test agent. Runs asynchronously after merge; backfills tests for shipped work and files coverage-gap tasks. Read-only w.r.t. source. |
 | **Phalaka** (panel) | [`src/phalaka/`](src/phalaka/) | Loopback dashboard. Serves worker status, task progress, and stuck-state alerts across all Kshetras. |
 
 The three worker agents (Silpi, Viharapala, Parikshaka) are **never allowed to
-touch the task tracker** — Sthapathi is the sole authority over bead state. Agents
+touch the task tracker** — Sthapathi is the sole authority over task state. Agents
 receive everything they need as injected prompt context and return structured
 output.
 
@@ -32,7 +32,7 @@ output.
 Every project Shreni manages is a **Kshetra** (Sanskrit: *field*). A Kshetra owns:
 
 - its own git repository,
-- its own `bd` (Beads) task database,
+- its own project in the task graph (Postgres), named by uuid in its config,
 - its own configuration, and
 - its own worker process and phase state.
 
@@ -64,9 +64,9 @@ The heart of the system is a small phase machine
 ([`src/sthapathi/index.ts`](src/sthapathi/index.ts)). A worker polls every 30s
 (`DEFAULT_INTERVAL_MS`) and runs one cycle at a time — with one exception: when a
 cycle **completes a task** (`runCycle` returns `'ran'`) the loop re-ticks
-*immediately* instead of waiting out the interval, because the next bead may be
-ready right now and a full interval per bead is pure latency (and, across a
-multi-bead epic, a systematic bias against decomposition). A cycle that finds no
+*immediately* instead of waiting out the interval, because the next task may be
+ready right now and a full interval per task is pure latency (and, across a
+multi-task epic, a systematic bias against decomposition). A cycle that finds no
 work (`'no-work'`) or is rejected at PREPARE (`'declined'`) keeps the full
 interval: `'declined'` is the failure-backoff path, where an early re-tick would
 spin hot. This asymmetry applies to both the daemon and `shreni drain`.
@@ -87,9 +87,8 @@ table in [`src/sthapathi/lifecycle.ts`](src/sthapathi/lifecycle.ts), and
 `setPhase` consults its `canTransition` guard on every phase change. An illegal
 jump — most importantly a *write-only latch* (a phase with no edge back to
 `IDLE`, the Watchdog-ARD bug class) — is a unit-test failure and a runtime
-warning. It is deliberately a lightweight table, not a state-machine library: bd,
-git, and `state.json` stay the durable sources of truth; a heavier engine is
-deferred to post-launch.
+warning. It is deliberately a lightweight table, not a state-machine library: the
+task graph, git, and `state.json` stay the durable sources of truth.
 
 Two invariants make this safe under a repeating timer:
 
@@ -100,31 +99,35 @@ Two invariants make this safe under a repeating timer:
    (never overlapping), so the immediate re-tick on `'ran'` is still a single,
    non-overlapping tick — the same structural guarantee, at zero delay.
 2. **SELECT is read-only; PREPARE is the only mutator.** Choosing the next task
-   performs no git operations and no claim, so polling for work can never check
+   performs no git operations and no claim (it only sweeps expired leases), so polling for work can never check
    out `main` underneath an in-flight agent. Only once a task advances to PREPARE
    does the worker touch the work tree. This separation is what eliminates the
    class of "agent knocked off its branch" failures.
 
 ### SELECT — pick the next task
 
-[`selectNext`](src/sthapathi/pickup.ts) reads `bd ready` and picks the
-highest-priority bead (P0 first, then FIFO within a priority). No side effects.
+The worker's engine hooks ([`src/policy/sthapathi/hooks.ts`](src/policy/sthapathi/hooks.ts))
+sweep expired leases and peek the task graph's ready queue
+([`EngineQueue`](src/policy/sthapathi/leases.ts)): boosted work (a PR follow-up)
+first, then priority (P0 first), then age. Containers (epics) are never work.
+No side effects on the work tree.
 
 ### PREPARE — claim and set up the work tree
 
-[`prepareTask`](src/sthapathi/pickup.ts) is the only mutator in the pickup path.
-In order, it:
+PREPARE is the only mutator in the pickup path. In order, it:
 
-1. syncs the beads DB (commit local → pull --rebase → push),
-2. runs **preflight**: `checkout main`, guard against a dirty tree, `pull --rebase`,
-   and guard against a leftover `bead-{id}/{slug}` branch,
+1. **claims** the next ready task in one call, with a lease the worker
+   heartbeats while it runs (the claim may pick a different task than the peek,
+   if another worker took that one meanwhile),
+2. runs **preflight** ([`preFlightFresh`](src/sthapathi/pickup.ts)): `checkout main`,
+   guard against a dirty tree, `pull --rebase`, and guard against a leftover
+   `bead-{id}/{slug}` branch,
 3. runs the **health gate**: a feature task only starts when the base test suite
    is green (modulo an accepted baseline). A red base does **not** start the task —
-   it queues a P0 `[shreni-health]` repair bead (which is exempt from the gate),
-4. claims the bead (`bd update --claim`).
+   it files a P0 `[shreni-health]` repair task (which is exempt from the gate).
 
-Every rejection is logged and recorded as a *stall* so the watchdog can trip if
-the same rejection repeats — a wedge is never silent.
+A refused preflight gives the claim back and is logged and recorded as a *stall*
+so the watchdog can trip if the same rejection repeats — a wedge is never silent.
 
 ### WORK — the Silpi ↔ Viharapala loop
 
@@ -139,35 +142,35 @@ prepared task on its own `bead-{id}/{slug}` branch:
    `agents.maxRoundsPerBead` rounds (default 3).
 4. On `APPROVE`, the outcome depends on `repo.mergePolicy`
    ([`src/sthapathi/merge.ts`](src/sthapathi/merge.ts)):
-   - `push` (default): the branch is squash-merged to `main` and the bead is closed.
-   - `pr`: the branch is pushed and a pull request is opened; the bead is kept open
-     (labelled `awaiting-merge`) so dependents stay blocked, and is closed later by
-     the reconcile pass only when its PR actually merges. `resolveMergePolicy` lets
+   - `push` (default): the branch is squash-merged to `main` and the task finishes.
+   - `pr`: the branch is pushed and a pull request is opened; the task **waits**
+     on its PR (state `waiting`) so dependents stay blocked, and is finished later
+     by the reconcile pass only when its PR actually merges. `resolveMergePolicy` lets
      `SHRENI_MERGE_POLICY` override the config at runtime.
 
 ### Active PR follow-up loop (`mergePolicy: pr`)
 
-An open `awaiting-merge` PR that draws feedback is not left stranded. The same
-reconcile pass ([`detectAndStampFollowup`](src/sthapathi/merge.ts)) compares the
-PR against a per-bead watermark — failing *required* checks, `CHANGES_REQUESTED`
-reviews, or foreign commits ([`detectPrFeedback`](src/sthapathi/pr-followup.ts))
-— and, when there is unaddressed feedback, labels the bead `pr-needs-followup`.
-The scheduler's [`selectFollowup`](src/sthapathi/pr-followup.ts) then routes that
-bead **back into the single work slot ahead of `bd ready`**, preserving the
-one-task invariant. [`runPrFollowupTask`](src/sthapathi/pr-followup-run.ts) drives
+A waiting PR that draws feedback is not left stranded. The same reconcile pass
+([`src/sthapathi/merge.ts`](src/sthapathi/merge.ts)) compares the PR against a
+per-task watermark — failing *required* checks, `CHANGES_REQUESTED` reviews, or
+foreign commits ([`detectPrFeedback`](src/sthapathi/pr-followup.ts)) — and, when
+there is unaddressed feedback, reopens the task **boosted**, so the claim order
+routes it **back into the single work slot ahead of fresh ready work**,
+preserving the one-task invariant. [`runPrFollowupTask`](src/sthapathi/pr-followup-run.ts) drives
 a bounded pass: the pure producer [`runPrFollowupLoop`](src/sthapathi/pr-followup-loop.ts)
 adapts the human review into the `Feedback` shape Silpi already consumes, runs
 Silpi (code + per-comment `{change|reply|escalate}` triage) and an optional
 Viharapala re-review, and returns `approved | escalated | exhausted`. `finalize`
 owns every side effect — **push before reply** (never auto-resolving a thread),
-advance the watermark, drop the label; `escalate`/`exhausted` flag a human. It is
+advance the watermark, put the task back to waiting on its PR; `escalate`/`exhausted` flag a human. It is
 on by default (`repo.prFollowup`, `SHRENI_PR_FOLLOWUP=off`). Telemetry
 (`pr_followup_round` / `_escalated` / `_exhausted`), `shreni status`, and the
 Phalaka banner surface the loop's activity. Full design: `Shreni-ARD-PR-Followup.md`.
 
 After a successful merge, **Parikshaka** is dispatched asynchronously
 ([`src/sthapathi/parikshaka-dispatch.ts`](src/sthapathi/parikshaka-dispatch.ts)) —
-it backfills tests and files coverage-gap beads without blocking the loop.
+it backfills tests and files coverage-gap tasks (landing proposed, for a human to
+approve) without blocking the loop.
 
 ## The git workflow
 
@@ -175,24 +178,31 @@ Sthapathi owns all git operations ([`src/sthapathi/git.ts`](src/sthapathi/git.ts
 so agents never manipulate history directly:
 
 - Each task gets an isolated branch `bead-{id}/{slug}`.
-- Approved work is **squash-merged** to `main` — one clean commit per bead — or,
+- Approved work is **squash-merged** to `main` — one clean commit per task — or,
   under `mergePolicy: pr`, opened as a pull request and reconciled on merge.
 - `safePush` handles a non-fast-forward push by `pull --rebase`-ing and retrying.
 - Merge conflicts are triaged
   ([`handleMergeConflict`](src/sthapathi/merge.ts)): conflicts confined to the
   task's own files re-dispatch Silpi with conflict context; conflicts in
-  out-of-scope files flag the bead and pause for a human, because that signals the
+  out-of-scope files flag the task and pause for a human, because that signals the
   agent drifted.
 - A [branch-isolation guard](src/sthapathi/guard.ts) enforces that agents cannot
   land commits directly on `main`.
 
-## Task tracking (Beads)
+## Task tracking (the task graph)
 
-Tasks are **beads**, tracked by the `bd` CLI in an embedded, git-synced database
-([`src/sthapathi/beads.ts`](src/sthapathi/beads.ts)). The wrapper is internal-only
-— agents never call `bd`. Sthapathi is the sole caller of `--claim` and `close`,
-which keeps task-state transitions single-writer and auditable. Interactive
-sessions (e.g. Claude Code) may *file* tasks but cannot claim or close them.
+Tasks live in the **task graph engine** ([`src/taskgraph/`](src/taskgraph/)), a
+Postgres store that enforces the graph's rules — no cycles, only approved work is
+claimable, one holder per task under a lease, every change recorded as an event —
+with Shreni's lifecycle, roles and approval layered on top
+([`src/policy/`](src/policy/)); see
+[docs/architecture/task-graph-engine.md](docs/architecture/task-graph-engine.md) and
+[docs/architecture/task-lifecycle.md](docs/architecture/task-lifecycle.md). Agents
+never touch it. Sthapathi alone claims and finishes a Kshetra's tasks, which keeps
+task-state transitions single-writer and auditable. People and interactive sessions
+(e.g. Claude Code) *file* tasks with `shreni task create`; they land `proposed`
+until a developer approves them (`shreni task approve`). A Kshetra set up on the
+older beads tracker moves over with `shreni migrate <kshetra>`.
 
 ## Provider abstraction
 
@@ -245,32 +255,31 @@ operator notification with concrete remediation steps.
 
 Cycle errors are classified and handled
 ([`src/sthapathi/errors.ts`](src/sthapathi/errors.ts)): `API_DOWN` pauses with a
-cooldown and retries; `AGENT_FAILED` / `MALFORMED_OUTPUT` flag the bead and clean
+cooldown and retries; `AGENT_FAILED` / `MALFORMED_OUTPUT` flag the task and clean
 the branch; `GIT_FAILED` keeps the branch for inspection and pauses for a human;
-`BD_FAILED` pauses. Every terminal state also emits an operator notification. The
+a database that stays unreachable past the retry window pauses the Kshetra. Every terminal state also emits an operator notification. The
 notification feed is durable and per-Kshetra — Phalaka polls it.
 
 ### Recovery and self-heal
 
-State can drift across a crash/restart along four axes: the working tree, stale
-`bead-*` branches, orphaned `in_progress` beads, and the persisted phase.
-**RECOVER** ([`src/sthapathi/recover.ts`](src/sthapathi/recover.ts)) reconciles all
-four back to a clean `IDLE` and reopens stranded WIP for a fresh, gated pickup. It
-runs at startup *before the poll loop is armed*, so recovery never races a poll
-tick.
+State can drift across a crash/restart: the working tree, stale `bead-*`
+branches, a task left claimed, and the persisted phase. A claimed task needs no
+reconciling: its **lease** expires and the sweep returns it to the queue, for this
+worker or another. The rest is reset at startup *before the poll loop is armed*
+([`resetWorkTree`](src/sthapathi/recover.ts): a clean `main`, no stale `bead-*`
+branches), so recovery never races a poll tick. A single worker per Kshetra is
+enforced by a session lock in the database.
 
-The same machinery powers **in-process self-heal**
-([`src/sthapathi/self-heal.ts`](src/sthapathi/self-heal.ts)): when `shreni resume`
-clears a stuck worker's pause, an ordered sequence — refresh liveness → abort the
-hung provider subprocess → await the run fully unwinding → RECOVER → refresh
-liveness — heals a wedged worker without a restart. The ordering is load-bearing:
-liveness is refreshed first so the watchdog can't re-trip mid-heal, and a `healing`
-gate makes SELECT return `null` so no poll cycle mutates the tree during recovery.
+The same reset powers **in-process self-heal**: when `shreni resume` clears a
+stuck worker's pause, the worker aborts the hung run, awaits it fully unwinding
+(the run's end gives its claim back), and resets the work tree — healing a wedged
+worker without a restart. A `healing` gate makes SELECT return `null` so no poll
+cycle mutates the tree meanwhile.
 
 ## Local observability: Phalaka
 
 [`Phalaka`](src/phalaka/) is a single-file dashboard served on loopback
-(`127.0.0.1`) by Fastify. It reads worker state, bead data, and the notification
+(`127.0.0.1`) by Fastify. It reads worker state, the task graph, and the notification
 feed, and renders status/progress/stuck alerts across all Kshetras. It is
 token-authenticated (`~/.shreni/shreni.token`) and serves no data off-box. The CLI
 also exposes the same information textually (`shreni status`, `shreni agents`,
@@ -282,7 +291,9 @@ also exposes the same information textually (`shreni status`, `shreni agents`,
 src/
 ├── cli/         # command entry points; worker.ts drives one Kshetra
 ├── sthapathi/   # orchestrator: scheduler, pickup, dispatch, git, merge,
-│                #   watchdog, recover, self-heal, errors, beads wrapper
+│                #   watchdog, recover, self-heal, errors
+├── taskgraph/   # the task graph engine: Postgres store, lifecycle enforcer, leases
+├── policy/      # Shreni's lifecycle, roles, approval, worker hooks, beads importer
 ├── agents/      # silpi, viharapala, parikshaka + provider adapters
 ├── kshetra/     # config schema, registry, runtime state, toolchain defaults
 └── phalaka/     # loopback dashboard (server, api, ui)

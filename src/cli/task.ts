@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'path';
 import { sql } from 'kysely';
 import type { CommandContext } from './registry';
 import type { ActorHandle, ProjectHandle, Task } from '../taskgraph';
-import { loadKshetraConfig } from '../kshetra/config';
+import { loadKshetraConfig, NotMigratedError } from '../kshetra/config';
 import { loadRegistry } from '../kshetra/registry';
 import { loadTrackerConfig, type ProjectConfig } from '../kshetra/project-config';
 import { loadUserConfig, resolveDatabase } from '../kshetra/user-config';
@@ -163,7 +163,7 @@ export function resolveProject(cwd: string, env: NodeJS.ProcessEnv, opts: { requ
   if (!id) return opts.requireProject === false ? findConfigFile(cwd) : findProjectConfig(cwd);
   const k = loadRegistry().find(x => x.id === id);
   if (!k) throw new Error(`SHRENI_KSHETRA names Kshetra ${id}, which isn't registered`);
-  if (!k.project && opts.requireProject !== false) throw new Error(`Kshetra ${id} isn't on the task graph engine`);
+  if (!k.project && opts.requireProject !== false) throw new NotMigratedError(id);
   return { kind: 'kshetra', path: `registry:${id}`, config: k, kshetraId: k.id };
 }
 
@@ -304,10 +304,8 @@ export function setupInstructions(found: FoundConfig<ProjectConfig>): string[] {
 async function setup(ctx: CommandContext, deps: TaskDeps): Promise<void> {
   parseArgs(ctx.args, { command: 'shreni task setup' });
   const found = resolveProject(deps.cwd, deps.env, { requireProject: false });
-  // A Kshetra still on beads keeps its bd rules and hooks until it moves to the engine.
-  if (found.kind === 'kshetra' && !found.config.project) {
-    throw new Error(`Kshetra ${found.kshetraId} is still on beads; its block and hooks come with the move to the engine (shreni init --mode kshetra)`);
-  }
+  // A Kshetra with no project is still on beads: its block and hooks come with shreni migrate.
+  if (found.kind === 'kshetra' && !found.config.project) throw new NotMigratedError(found.kshetraId ?? found.config.name);
   for (const l of setupInstructions(found)) deps.print(l);
 }
 

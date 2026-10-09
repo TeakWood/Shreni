@@ -1,7 +1,6 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import type { PrReview } from './gh.js';
-import { bd, syncBeads } from './beads.js';
 import { engineStore, type EngineTaskStore } from './task-store.js';
 import { git } from './git.js';
 import { gh } from './gh.js';
@@ -9,13 +8,7 @@ import { branchName } from './branch.js';
 import { notifyOperator } from './errors.js';
 import { clearBeadAttempts } from '../kshetra/state.js';
 import { emit as emitTelemetry } from '../telemetry/telemetry.js';
-import {
-  detectPrFeedback,
-  readWatermark,
-  writeWatermark,
-  PR_NEEDS_FOLLOWUP_LABEL,
-  type PrFeedback,
-} from './pr-followup.js';
+import { detectPrFeedback, type PrFeedback } from './pr-followup.js';
 import { runPrFollowupLoop, type PrFollowupInput, type PrFollowupResult } from './pr-followup-loop.js';
 
 // The CHANGES_REQUESTED review to address, or a synthetic one when the trigger is
@@ -55,21 +48,20 @@ function failingCheckSummaries(feedback: PrFeedback): { name: string; summary: s
 // the PR head. Here Sthapathi owns EVERY side effect (ARD §4.2/G4):
 //
 //   read PR status → detect unaddressed feedback → runPrFollowupLoop (produces)
-//   → approved:  push  → prReply (never resolve) → advance watermark → drop label
-//   → escalate/exhaust: drop label → flag human → notify
+//   → approved:  push  → prReply (never resolve) → advance watermark → resubmit
+//   → escalate/exhaust: flag human → notify
 //
-// Push STRICTLY precedes reply; a push failure posts no reply and leaves the
-// label so the next pass retries. Returns the {approved,note} shape the worker's
+// Push STRICTLY precedes reply; a push failure posts no reply and resubmits, so
+// the next reconcile pass detects the same feedback and retries. Returns the {approved,note} shape the worker's
 // error funnel expects.
 export async function runPrFollowupTask(
   kshetra: KshetraConfig,
   task: Task,
   signal?: AbortSignal,
 ): Promise<{ approved: boolean; note: string }> {
-  const bdClient = bd(kshetra);
   const client = gh(kshetra.repo.path);
   const branch = branchName(task);
-  // Captured once: the whole round uses the same store, never falling back to bd mid-flight.
+  // Captured once: the whole round uses the same store.
   const store = engineStore(kshetra);
 
   // Re-read fresh PR state — the 5-min detection may be stale, and we are now
@@ -78,12 +70,12 @@ export async function runPrFollowupTask(
   if (!status || status.state !== 'OPEN') {
     // The PR merged/closed/vanished since detection — drop the follow-up marker
     // and let reconcile handle the terminal state (or re-detect next pass).
-    await clearFollowup(kshetra, task, 'the PR is no longer open; reconcile settles it', store);
+    await store.resubmit(task.id, 'the PR is no longer open; reconcile settles it');
     return { approved: false, note: 'PR no longer open — follow-up skipped' };
   }
 
   const selfLogins = kshetra.repo.prFollowupSelfLogins;
-  const watermark = await readWatermark(kshetra, task.id, store);
+  const watermark = await store.readWatermark(task.id);
   const feedback = detectPrFeedback({
     status: selfLogins.length ? status : { ...status, commits: [] },
     watermark,
@@ -93,7 +85,7 @@ export async function runPrFollowupTask(
   if (!feedback) {
     // Already addressed (e.g. the reviewer approved after our last push) — clear
     // the marker so the bead falls back to plain awaiting-merge.
-    await clearFollowup(kshetra, task, 'no unaddressed feedback', store);
+    await store.resubmit(task.id, 'no unaddressed feedback');
     return { approved: false, note: 'no unaddressed feedback — label cleared' };
   }
 
@@ -112,9 +104,8 @@ async function finalize(
   task: Task,
   branch: string,
   result: PrFollowupResult,
-  store: EngineTaskStore | undefined,
+  store: EngineTaskStore,
 ): Promise<{ approved: boolean; note: string }> {
-  const bdClient = bd(kshetra);
   const g = git(kshetra);
 
   if (result.outcome === 'approved') {
@@ -124,15 +115,10 @@ async function finalize(
       await g.push('origin', branch);
     } catch (err) {
       const note = `PR follow-up push failed: ${(err as Error).message} — no replies posted; will retry next pass`;
-      if (store) {
-        // Back to waiting on the PR; the next reconcile pass detects the same
-        // feedback and reopens it.
-        await store.note(task.id, note);
-        await store.resubmit(task.id, 'follow-up push failed; retry on the next pass');
-      } else {
-        await bdClient.addNote(task.id, note);
-        await syncBeads(kshetra);
-      }
+      // Back to waiting on the PR; the next reconcile pass detects the same
+      // feedback and reopens it.
+      await store.note(task.id, note);
+      await store.resubmit(task.id, 'follow-up push failed; retry on the next pass');
       return { approved: false, note: 'push failed — no reply posted' };
     }
 
@@ -150,22 +136,15 @@ async function finalize(
     try {
       head = await g.headSha();
     } catch { /* leave head null */ }
-    await writeWatermark(kshetra, task.id, { head, round: result.rounds, at: new Date().toISOString() }, store);
-    await clearFollowup(kshetra, task, `PR follow-up pushed (${result.rounds} round(s))`, store);
+    await store.writeWatermark(task.id, { head, round: result.rounds, at: new Date().toISOString() });
+    // Back to waiting on its PR.
+    await store.resubmit(task.id, `PR follow-up pushed (${result.rounds} round(s))`);
     return { approved: true, note: `PR follow-up pushed (${result.rounds} round(s))` };
   }
 
-  // escalated / exhausted → hand to a human (ARD §4.2): drop the follow-up marker
-  // and block the bead. awaiting-merge is deliberately LEFT ON — the PR is still
-  // open and a human may yet merge it; what stops the loop from re-selecting or
-  // re-detecting this bead is the `blocked` status flag() sets (both selectFollowup
-  // and reconcile filter to status:'in_progress'). The branch/PR is left as-is.
-  if (store) {
-    await store.flag(task.id, `PR follow-up ${result.outcome}: ${result.note}. Handed to a human.`);
-  } else {
-    await bdClient.removeLabel(task.id, PR_NEEDS_FOLLOWUP_LABEL);
-    await bdClient.flag(task.id, `PR follow-up ${result.outcome}: ${result.note}. Handed to a human.`);
-  }
+  // escalated / exhausted → hand to a human (ARD §4.2): flag the task. The PR
+  // is still open and a human may yet merge it; the branch/PR is left as-is.
+  await store.flag(task.id, `PR follow-up ${result.outcome}: ${result.note}. Handed to a human.`);
   // A blocked bead is no longer forward progress; clear its recover-attempt count
   // so a later human re-open starts fresh.
   clearBeadAttempts(kshetra, task.id);
@@ -173,19 +152,5 @@ async function finalize(
   // above), so the templated name is a known TelemetryEventName. Count-only.
   emitTelemetry(`pr_followup_${result.outcome}`, { rounds: result.rounds });
   await notifyOperator(kshetra, task, `pr_followup_${result.outcome}`);
-  if (!store) await syncBeads(kshetra);
   return { approved: false, note: `PR follow-up ${result.outcome}` };
-}
-
-/**
- * Ends the follow-up marker: on bd, drop the label (the bead stays
- * awaiting-merge); on the engine, submit the task back to waiting on its PR.
- */
-async function clearFollowup(kshetra: KshetraConfig, task: Task, reason: string, store: EngineTaskStore | undefined): Promise<void> {
-  if (store) {
-    await store.resubmit(task.id, reason);
-    return;
-  }
-  await bd(kshetra).removeLabel(task.id, PR_NEEDS_FOLLOWUP_LABEL);
-  await syncBeads(kshetra);
 }

@@ -21,7 +21,6 @@ import { runFreeze } from './freeze';
 import { runExport } from './export';
 import { runRestore } from './restore';
 import { runSnapshots } from './snapshots';
-import { runSync } from './sync';
 import { runRegister } from './register';
 import { runMigrateCommand, MIGRATE_USAGE, migrateKshetra, defaultMigrateDeps } from './migrate';
 import { verifyHooks } from './verify-hooks';
@@ -38,6 +37,7 @@ import { runTask, TASK_USAGE } from './task';
 import { runPlan, PLAN_USAGE } from './plan';
 import { runDb, DB_USAGE, ensureMigrated, migrateDeps } from './db';
 import { onBeads } from '../policy/migrate/kshetra';
+import { NotMigratedError } from '../kshetra/config';
 import { parseLabels } from './labels';
 import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -49,9 +49,9 @@ const DRAIN_EXIT_CODES =
 const RUN_HELP = [
   'shreni run is `shreni drain --max-cycles 1`: it starts the real worker runtime',
   '(recovery, ledger, persisted phase, heartbeat, timers), works at most one cycle,',
-  'then runs drain\'s exit sequence (final sync, stall classification, drain_finished).',
-  'Startup recovery may first resume WIP beads a crash left in progress, as the worker',
-  'does. Do not run it beside a `shreni start` daemon on the same kshetra. SIGINT/SIGTERM',
+  'then runs drain\'s exit sequence (epic sweep, stall classification, drain_finished).',
+  'Work a crash left claimed comes back when its lease expires, as for the worker.',
+  'Do not run it beside a `shreni start` daemon on the same kshetra. SIGINT/SIGTERM',
   'stop it at the next check-point, after the in-flight task. Use `shreni drain`',
   'directly for --epic scoping or a larger --max-cycles.',
   DRAIN_EXIT_CODES,
@@ -121,12 +121,14 @@ export const COMMANDS: Command[] = [
       }
       // A Kshetra still on beads is moved first (migration plan, "Upgrading a Kshetra"):
       // offered in a terminal; a detached start refuses and prints the command.
-      // One left on beads doesn't stop the others; a worker already running is left as it is.
+      // A Kshetra with no project can't run: it is refused, naming shreni migrate.
+      // One left behind doesn't stop the others; a worker already running is left as it is.
       const left = new Map<string, string>();
       const m = defaultMigrateDeps();
-      for (const k of targets.filter(k => onBeads(k) && !m.workerRunning(k.id))) {
-        if (!m.interactive()) {
-          left.set(k.id, `${k.id} is still on beads; run shreni migrate ${k.id}`);
+      for (const k of targets.filter(k => !k.project && !m.workerRunning(k.id))) {
+        const configPath = m.configPath(k.id);
+        if (!configPath || !onBeads(k, configPath) || !m.interactive()) {
+          left.set(k.id, `${k.id}: not started: ${new NotMigratedError(k.id).message}`);
           continue;
         }
         console.log(`${k.id} is still on beads. Migrating imports its tasks into the database after a dry run and a dump, then removes the .beads link and writes Shreni's block in its instruction file.`);
@@ -351,24 +353,15 @@ export const COMMANDS: Command[] = [
     },
   },
   {
-    name: 'sync',
-    summary: 'Sync the beads database (git pull + push) for the current (or all) kshetras',
-    usage: '[--kshetra <id>] [--all]',
-    run(ctx) {
-      return runSync({ kshetraId: ctx.flag('--kshetra'), all: ctx.has('--all') });
-    },
-  },
-  {
     name: 'init',
     summary: 'Set up a repo: a Kshetra Shreni works, or a tracker project worked by hand',
-    usage: '--mode kshetra|tracker [--slug <id>] [--path <repo-path>] [--providers claude,codex,gemini] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--beads-path <path>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--on-beads] [--yes] [--dry-run]',
+    usage: '--mode kshetra|tracker [--slug <id>] [--path <repo-path>] [--providers claude,codex,gemini] [--provider claude|codex|gemini] [--model <id>] [--org <org>] [--language <lang>] [--merge-policy push|pr] [--pack <name>] [--no-pack] [--upgrade] [--yes] [--dry-run]',
     run(ctx) {
       const mergePolicy = ctx.flag('--merge-policy');
       if (mergePolicy && mergePolicy !== 'push' && mergePolicy !== 'pr') {
         throw new Error(`Invalid --merge-policy "${mergePolicy}": expected "push" or "pr".`);
       }
       return runInit({
-        onBeads: ctx.has('--on-beads'),
         yes: ctx.has('--yes'),
         mode: ctx.flag('--mode') ?? undefined,
         providers: ctx.flag('--providers') ?? undefined,
@@ -376,7 +369,6 @@ export const COMMANDS: Command[] = [
         path: ctx.flag('--path') ?? undefined,
         org: ctx.flag('--org') ?? undefined,
         language: ctx.flag('--language') ?? undefined,
-        beadsPath: ctx.flag('--beads-path') ?? undefined,
         provider: ctx.flag('--provider') ?? undefined,
         model: ctx.flag('--model') ?? undefined,
         mergePolicy: (mergePolicy as 'push' | 'pr' | undefined) ?? undefined,
@@ -440,14 +432,14 @@ export const COMMANDS: Command[] = [
   },
   {
     name: 'verify-hooks',
-    summary: 'Verify the required beads hooks are installed',
+    summary: 'Verify the shreni task prime hooks are installed (in this repo\'s or your .claude/settings.json)',
     run() {
       const result = verifyHooks();
       const ok = (v: boolean) => v ? '✓' : '✗';
-      console.log(`SessionStart hook (bd prime): ${ok(result.sessionStart.present)}`);
-      console.log(`PreCompact hook  (bd prime): ${ok(result.preCompact.present)}`);
+      console.log(`SessionStart hook (shreni task prime): ${ok(result.sessionStart.present)}`);
+      console.log(`PreCompact hook  (shreni task prime): ${ok(result.preCompact.present)}`);
       if (!result.allPresent) {
-        throw new Error('\nOne or more hooks missing. Run `bd setup claude` in your Kshetra to install them.');
+        throw new Error('\nOne or more hooks missing. Run `shreni task setup` in your Kshetra to install them.');
       }
     },
   },
@@ -530,7 +522,7 @@ export const COMMANDS: Command[] = [
   },
   {
     name: 'show',
-    summary: 'Join a bead\'s plan (bd) and execution (ledger) into one timeline',
+    summary: 'Join a task\'s plan (the task store) and execution (ledger) into one timeline',
     usage: '<beadId> [@<id> | --kshetra <id>]',
     run(ctx) {
       return runShow({

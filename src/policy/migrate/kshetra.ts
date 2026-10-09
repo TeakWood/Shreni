@@ -7,6 +7,7 @@ import { importShreniProject, lastEventId } from '../db/bundle';
 import type { ShreniClient } from '../db/client';
 import { dryRun, parseBeadsExport, renderDryRun } from './beads-import';
 import type { ProjectMode } from '../init/project';
+import { legacyBeadsPath } from '../../kshetra/config';
 
 // Moving a project off beads (migration plan, "Upgrading a Kshetra"):
 // preflight, dry run, confirmation, a dump, the import in one transaction,
@@ -33,8 +34,6 @@ export type Manifest = {
 };
 
 export interface MigrateIo {
-  /** Brings issues.jsonl up to date with bd export; false when bd isn't installed. */
-  exportBeads(beadsDir: string): Promise<boolean>;
   /** Dumps the database first, and waits; says where, or why none was taken. */
   backup(): Promise<string>;
   interactive(): boolean;
@@ -131,9 +130,9 @@ export async function migrateOffBeads(
   }
 
   if (!imported) {
-    // Preflight: the beads data current, or the committed export, said so.
-    if (!(await io.exportBeads(t.beadsDir))) io.print(`bd isn't installed: reading the committed ${join(t.beadsDir, 'issues.jsonl')}`);
+    // Preflight: the committed export is what is read; Shreni never runs bd.
     const issuesFile = join(t.beadsDir, 'issues.jsonl');
+    io.print(`reading the committed ${issuesFile}; if bd is installed, run \`bd export -o ${issuesFile}\` first for the latest`);
     if (!existsSync(issuesFile)) throw new Error(`no ${issuesFile}; nothing to import`);
     const interactionsFile = join(t.beadsDir, 'interactions.jsonl');
     const src = parseBeadsExport(readFileSync(issuesFile, 'utf8'), existsSync(interactionsFile) ? readFileSync(interactionsFile, 'utf8') : '');
@@ -254,7 +253,14 @@ export async function undoMigration(
   io.print(`${id} is back on beads`);
 }
 
-/** Whether a Kshetra is still on beads: no project, and a beads export to move. */
-export function onBeads(k: { project?: string; beads?: { path: string } }): boolean {
-  return !k.project && !!k.beads && existsSync(join(k.beads.path, 'issues.jsonl'));
+/**
+ * The beads directory of a Kshetra still on beads: no project, and a beads
+ * export to move, at the legacy `beads.path` its config file names (read from
+ * the file, as the schema no longer has it). Undefined otherwise.
+ */
+export function onBeads(k: { project?: string; repo?: { path: string } }, configPath: string): string | undefined {
+  if (k.project) return undefined;
+  // Where shreni migrate looks too: the legacy beads.path, else the repo's .beads link.
+  const dir = legacyBeadsPath(configPath) ?? (k.repo ? join(k.repo.path, '.beads') : undefined);
+  return dir && existsSync(join(dir, 'issues.jsonl')) ? dir : undefined;
 }

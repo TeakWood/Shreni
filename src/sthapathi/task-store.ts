@@ -1,14 +1,20 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { PrWatermark } from './pr-followup.js';
-import { bd, syncBeads } from './beads.js';
 
-/** The tracker calls the agent loop and error handler make, bd's or the engine's. */
-export type TrackerCalls = Pick<ReturnType<typeof bd>, 'prime' | 'show' | 'addNote' | 'remember' | 'flag'>;
+/** The tracker calls the agent loop and error handler make. */
+export interface TrackerCalls {
+  /** The project's memories, rendered for a prompt. */
+  prime(): Promise<string>;
+  /** The task as a JSON array: the task (with acceptance_criteria), then its dependencies. */
+  show(id: string): Promise<string>;
+  addNote(id: string, note: string): Promise<string>;
+  remember(insight: string): Promise<string>;
+  flag(id: string, reason: string): Promise<string>;
+}
 
-// The task store the merge and PR follow-up paths write to when a Kshetra
-// runs on the task graph engine (policy spec, "The lifecycle" and "Running
-// work"). A worker on the engine registers one at startup; a Kshetra without
-// one keeps its bd calls until the migration release removes them.
+// The task store the worker's merge, PR follow-up and agent paths write to
+// (policy spec, "The lifecycle" and "Running work"). The worker registers one
+// at startup, once it has opened the task graph engine.
 
 /** A task waiting on its PR, as reconcile walks them. */
 export interface AwaitingMerge { id: string; title: string; slug: string }
@@ -33,7 +39,7 @@ export interface EngineTaskStore {
   note(taskId: string, text: string): Promise<void>;
   readWatermark(taskId: string): Promise<PrWatermark>;
   writeWatermark(taskId: string, w: PrWatermark): Promise<void>;
-  /** prime (memories), show (bd-shaped task JSON), notes, memories and flags for the agent loop. */
+  /** prime (memories), show (the task JSON), notes, memories and flags for the agent loop. */
   tracker: TrackerCalls;
   /** The CLI's and Phalaka's reads, bd-shaped, on the worker's own connection. */
   reads?: import('../policy/sthapathi/reads.js').TrackerReads;
@@ -62,18 +68,27 @@ export function unregisterEngineStore(kshetraId: string): void {
   stores.delete(kshetraId);
 }
 
-/** The Kshetra's engine store, or undefined while it runs on bd. */
-export function engineStore(kshetra: Pick<KshetraConfig, 'id'>): EngineTaskStore | undefined {
+/** No task store is registered for the Kshetra: its worker hasn't opened the engine. */
+export class NoTaskStore extends Error {
+  constructor(kshetraId: string) {
+    super(`no task store for ${kshetraId}: the worker has not opened the task graph engine`);
+    this.name = 'NoTaskStore';
+  }
+}
+
+/** The Kshetra's task store when this process's worker has registered one. */
+export function registeredStore(kshetra: Pick<KshetraConfig, 'id'>): EngineTaskStore | undefined {
   return stores.get(kshetra.id);
 }
 
-/** The tracker for the agent loop: the engine's when the Kshetra runs on it, else bd. */
-export function trackerFor(kshetra: KshetraConfig): TrackerCalls {
-  return engineStore(kshetra)?.tracker ?? bd(kshetra);
+/** The Kshetra's task store, registered by its worker; throws NoTaskStore when there is none. */
+export function engineStore(kshetra: Pick<KshetraConfig, 'id'>): EngineTaskStore {
+  const store = stores.get(kshetra.id);
+  if (!store) throw new NoTaskStore(kshetra.id);
+  return store;
 }
 
-/** Pushes the beads repo; nothing to do on the engine, whose writes are already in the database. */
-export async function syncTracker(kshetra: KshetraConfig): Promise<void> {
-  if (engineStore(kshetra)) return;
-  await syncBeads(kshetra);
+/** The tracker for the agent loop. */
+export function trackerFor(kshetra: Pick<KshetraConfig, 'id'>): TrackerCalls {
+  return engineStore(kshetra).tracker;
 }
