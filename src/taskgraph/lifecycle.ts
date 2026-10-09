@@ -225,6 +225,7 @@ export function lifecycleViolations(def: Lifecycle): LifecycleViolation[] {
     if (leasedState && !m.from.includes(leasedState)) fail('expiry-hooks', `${label} move ${m.name} must start from the leased state`);
     if (!m.by.includes(SYSTEM_ROLE)) fail('expiry-hooks', `${label} move ${m.name} must list ${SYSTEM_ROLE} in by`);
     if (m.guard) fail('expiry-hooks', `${label} move ${m.name} can't have a guard: the sweep applies it to many tasks in one statement`);
+    if (def.states[m.to]?.terminal) fail('expiry-hooks', `${label} move ${m.name} can't land in terminal state ${m.to}: the sweep can't refuse a move over live children or dependents`);
   }
   return out;
 }

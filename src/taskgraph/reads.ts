@@ -13,7 +13,7 @@ import type { Attempt, Plan, PlanFilter, Task, TaskDetail, TaskFilter, TaskGraph
 // newer lifecycle can read before activating it.
 
 const nonEmpty = z.string().min(1);
-const TaskFilterSchema = z.object({
+export const TaskFilterSchema = z.object({
   states: z.array(nonEmpty).optional(),
   kind: z.enum(['work', 'container']).optional(),
   ids: z.array(nonEmpty).optional(),
@@ -37,7 +37,7 @@ const ORDER: Record<NonNullable<TaskFilter['orderBy']>, RawBuilder<unknown>> = {
 };
 
 /** The filter as conditions on `t`, a row of taskgraph.tasks in the project. */
-function filterWhere(projectId: string, f: TaskFilter): RawBuilder<boolean> {
+export function filterWhere(projectId: string, f: TaskFilter): RawBuilder<boolean> {
   const where: RawBuilder<unknown>[] = [sql`t.project_id = ${projectId}`];
   if (f.states) where.push(sql`t.state = any(${textArray(f.states)})`);
   if (f.kind) where.push(sql`t.kind = ${f.kind}`);

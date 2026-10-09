@@ -9,6 +9,7 @@ import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi } from './moves';
 import { readsApi } from './reads';
 import { activateApi, diffApi } from './upgrade';
+import { claimApi, expireLeasesApi } from './claims';
 import { exportProject, importProject, purgeProject, type ImportCallback, type ImportReport, type ProjectBundle, type PurgeReport } from './bundle';
 
 type ReadsApi = ReturnType<typeof readsApi>;
@@ -191,6 +192,8 @@ export class ProjectHandle {
   /** Ready work, in claim order: what a claim would pick next. */
   readonly ready: ReadsApi['ready'];
   readonly lifecycles: ReturnType<typeof diffApi>;
+  /** The lease sweep on its own, as system; claim runs it first. Returns how many leases it returned. */
+  readonly expireLeases: ReturnType<typeof expireLeasesApi>;
 
   /** @internal Use client.project(id). */
   constructor(/** @internal */ readonly client: TaskGraphClient, readonly id: string) {
@@ -202,6 +205,7 @@ export class ProjectHandle {
     this.events = reads.events;
     this.ready = reads.ready;
     this.lifecycles = diffApi(this);
+    this.expireLeases = expireLeasesApi(client, id);
   }
 
   /** The same project, acting as `actor`: every write goes through one. */
@@ -218,6 +222,8 @@ export class ActorHandle {
   /** Makes a declared move; throws MoveRefused. */
   readonly move: ReturnType<typeof movesApi>;
   readonly lifecycles: ReturnType<typeof activateApi>;
+  /** Sweeps, then leases the next ready task to a worker; null when nothing is ready. */
+  readonly claim: ReturnType<typeof claimApi>;
 
   /** @internal Use tg.as(actor). */
   constructor(/** @internal */ readonly project: ProjectHandle, readonly actor: Actor) {
@@ -229,6 +235,7 @@ export class ActorHandle {
     this.notes = notesApi(this);
     this.move = movesApi(this);
     this.lifecycles = activateApi(this);
+    this.claim = claimApi(this);
   }
 
   /**
