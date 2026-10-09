@@ -171,7 +171,7 @@ approval — the change merges to `main`.
 
 ## Prerequisites
 
-- **Node.js** ≥ 20 and **pnpm** (`npm install -g pnpm`)
+- **Node.js** ≥ 22 and **pnpm** (`npm install -g pnpm`)
 - **`bd` (Beads) CLI** — the task database — `npm install -g @beads/bd`
 - **A provider CLI, authenticated** — **Anthropic API key** (`ANTHROPIC_API_KEY`)
   for the default Claude provider. The agent still calls a model, so this is

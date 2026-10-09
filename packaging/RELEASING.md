@@ -20,7 +20,7 @@ Most steps are mechanical; a few are **founder decisions** and are flagged.
 - **`prepublishOnly: pnpm build`** rebuilds `dist` immediately before publish, so
   a stale or missing build can't be shipped.
 - **`publishConfig.access: public`** so the first publish isn't rejected.
-- **`engines.node: >=20`** advertises the runtime requirement to consumers.
+- **`engines.node: >=22`** advertises the runtime requirement to consumers.
 
 ## npm publish
 

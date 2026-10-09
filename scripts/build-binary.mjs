@@ -68,7 +68,7 @@ async function main() {
     outfile: BUNDLE,
     bundle: true,
     platform: 'node',
-    target: 'node20',
+    target: 'node22',
     format: 'cjs',
     // Node strips the entry shebang; drop it so the bundle is clean.
     banner: { js: '' },

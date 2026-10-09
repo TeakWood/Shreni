@@ -21,6 +21,7 @@
     "node_modules",
     "dist",
     "src/**/*.test.ts",
+    "src/taskgraph/test",
     "vitest.config.ts",
     "src/phalaka/web"
   ]
