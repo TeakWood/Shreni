@@ -1,5 +1,5 @@
 import postgres from 'postgres';
-import type { KshetraConfig } from '../../kshetra/config.js';
+import type { ProjectConfig } from '../../kshetra/project-config.js';
 import { loadUserConfig, resolveDatabase } from '../../kshetra/user-config.js';
 import { openShreni, type ShreniClient } from '../db/client';
 import { taskLifecycle } from '../lifecycle/lifecycle';
@@ -14,7 +14,8 @@ export interface KshetraEngine {
   close(): Promise<void>;
 }
 
-export async function openKshetraEngine(kshetra: KshetraConfig, opts: { name?: string } = {}): Promise<KshetraEngine> {
+/** Opens the database a project's config names: a Kshetra's, or a tracker's for shreni task. */
+export async function openKshetraEngine(kshetra: Pick<ProjectConfig, 'database'>, opts: { name?: string } = {}): Promise<KshetraEngine> {
   const target = resolveDatabase(kshetra, loadUserConfig());
   const auth = { ...(target.user ? { username: target.user } : {}), ...(target.password ? { password: target.password } : {}) };
   const sql = postgres(target.url, { max: 4, onnotice: () => {}, ...auth });

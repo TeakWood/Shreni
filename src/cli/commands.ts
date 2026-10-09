@@ -35,6 +35,7 @@ import { runReport } from './report';
 import { runShow } from './show';
 import { runInit } from './init';
 import { runTelemetry } from './telemetry';
+import { runTask, TASK_USAGE } from './task';
 import { parseLabels } from './labels';
 import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -384,6 +385,12 @@ export const COMMANDS: Command[] = [
         upgrade: ctx.has('--upgrade'),
       });
     },
+  },
+  {
+    name: 'task',
+    summary: 'Read and file tasks by hand, as the developer',
+    usage: TASK_USAGE,
+    run: ctx => runTask(ctx),
   },
   {
     name: 'telemetry',
