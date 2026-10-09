@@ -3,9 +3,10 @@ import type { ActorHandle, TaskGraphClient } from './client';
 import type { Lifecycle, Move } from './lifecycle';
 import { SYSTEM_ROLE } from './lifecycle';
 import { parse, toTask, TASK_COLUMNS, type TaskRow } from './tasks';
+import type { MoveOptions } from './moves';
 import { CLAIM_ORDER, claimableState, readyWhere } from './ready';
 import { filterWhere, TaskFilterSchema } from './reads';
-import { InvalidRequest, NotPermitted } from './errors';
+import { InvalidRequest, LeaseHeld, LeaseLost, NotFound, NotPermitted } from './errors';
 import type { NewEvent } from './events';
 import type { Task, TaskFilter } from './types';
 
@@ -26,6 +27,11 @@ export type ClaimOptions = {
 
 /** The longest lease a claim may ask for; a worker renews with heartbeats instead. */
 export const MAX_LEASE_MS = 30 * 24 * 3_600_000;
+
+/** TASK_COLUMNS qualified by the alias t, for joins. */
+const TASK_COLUMNS_T = `t.project_id, t.id, t.key, t.plan_id, t.parent_id, t.kind, t.category, t.title, t.description,
+  t.priority, t.state, t.origin, t.spec, t.tags, t.boosted, t.hold_until, t.next_child, t.lease_attempt_id, t.lease_expires_at,
+  t.created_at, t.updated_at, t.closed_at`;
 
 const leasedState = (lc: Lifecycle) => Object.keys(lc.states).find(s => lc.states[s].leased)!;
 const moveNamed = (lc: Lifecycle, name: string) => lc.moves.find(m => m.name === name)!;
@@ -93,9 +99,7 @@ export function claimApi(as: ActorHandle) {
   /** Sweeps, then leases the next ready task to this worker; null when nothing is ready. */
   return async function claim(opts: ClaimOptions): Promise<Claim | null> {
     if (!opts?.worker) throw new InvalidRequest('a claim needs a worker');
-    if (!(Number.isInteger(opts.leaseMs) && opts.leaseMs > 0 && opts.leaseMs <= MAX_LEASE_MS)) {
-      throw new InvalidRequest(`leaseMs must be a whole number of milliseconds from 1 to ${MAX_LEASE_MS} (30 days), not ${opts.leaseMs}`);
-    }
+    checkLeaseMs(opts.leaseMs);
     const filter = parse(TaskFilterSchema, opts.filter ?? {});
     if (!claimMove.by.includes(as.actor.role)) {
       throw new NotPermitted('claim', as.actor.role, claimableState(lifecycle));
@@ -131,5 +135,76 @@ export function claimApi(as: ActorHandle) {
       });
       return { task, attemptId: task.leaseAttemptId!, expiresAt: task.leaseExpiresAt! };
     });
+  };
+}
+
+function checkLeaseMs(leaseMs: number): void {
+  if (!(Number.isInteger(leaseMs) && leaseMs > 0 && leaseMs <= MAX_LEASE_MS)) {
+    throw new InvalidRequest(`leaseMs must be a whole number of milliseconds from 1 to ${MAX_LEASE_MS} (30 days), not ${leaseMs}`);
+  }
+}
+
+/** The leased calls (engine spec, "Fencing"): each carries the claim's attempt id, and throws LeaseLost once it no longer holds the task. */
+export function leasedApi(as: ActorHandle) {
+  const { client } = as.project;
+  const projectId = as.project.id;
+  const { lifecycle } = client;
+  /** Work calls follow their move: heartbeat and resume take the onClaim move's roles. */
+  const mayWork = (call: string) => {
+    if (!moveNamed(lifecycle, lifecycle.hooks.onClaim).by.includes(as.actor.role)) {
+      throw new NotPermitted(call, as.actor.role);
+    }
+  };
+
+  return {
+    /**
+     * Pushes the lease out to leaseMs from now. A lapsed lease the sweep
+     * hasn't returned still belongs to its holder, so this renews it. Writes
+     * no event: heartbeats would swamp the history.
+     */
+    async heartbeat(claim: Claim, opts: { leaseMs: number }): Promise<Claim> {
+      checkLeaseMs(opts?.leaseMs);
+      mayWork('heartbeat');
+      return client.transaction(async ({ db }) => {
+        await as.assertVersion(db);
+        const r = await sql<TaskRow>`
+          update taskgraph.tasks
+             set lease_expires_at = taskgraph.now() + make_interval(secs => ${opts.leaseMs / 1000})
+           where project_id = ${projectId} and id = ${claim.task.id} and lease_attempt_id = ${claim.attemptId}
+          returning ${TASK_COLUMNS}`.execute(db);
+        if (!r.rows[0]) throw new LeaseLost(claim.task.id, claim.attemptId);
+        const task = toTask(r.rows[0]);
+        return { task, attemptId: claim.attemptId, expiresAt: task.leaseExpiresAt! };
+      });
+    },
+
+    /** Makes a move on the claimed task while this claim still holds it; throws LeaseLost or MoveRefused. */
+    moveClaimed(claim: Claim, moveName: string, opts: MoveOptions = {}): Promise<Task> {
+      return as.moveFenced(claim.task.id, moveName, opts, claim.attemptId);
+    },
+
+    claims: {
+      /**
+       * The live claim on a task, for the actor holding it, such as a person
+       * whose CLI process ended; throws LeaseHeld, naming the holder, to anyone
+       * else, and NotFound when no one holds it.
+       */
+      async resume(taskId: string): Promise<Claim> {
+        mayWork('claims.resume');
+        await client.need('0001_core');
+        // One statement, so the attempt read is the one holding the lease now.
+        const r = await sql<TaskRow & { holder: string | null }>`
+          select ${sql.raw(TASK_COLUMNS_T)}, a.actor as holder
+            from taskgraph.tasks t
+            left join taskgraph.attempts a on a.project_id = t.project_id and a.id = t.lease_attempt_id
+           where t.project_id = ${projectId} and t.id = ${taskId}`.execute(client.db);
+        const row = r.rows[0];
+        if (!row) throw new NotFound('task', taskId);
+        const task = toTask(row);
+        if (!task.leaseAttemptId) throw new NotFound('claim', taskId);
+        if (row.holder !== as.actor.id) throw new LeaseHeld(taskId, row.holder ?? 'an unknown actor');
+        return { task, attemptId: task.leaseAttemptId, expiresAt: task.leaseExpiresAt! };
+      },
+    },
   };
 }

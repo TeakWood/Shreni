@@ -6,16 +6,16 @@ import { defineLifecycle, registerLifecycle, type Call, type Lifecycle } from '.
 import { checkPermission } from './permissions';
 import { tasksApi } from './tasks';
 import { depsApi, linksApi, notesApi } from './deps';
-import { movesApi } from './moves';
+import { movesApi, type MoveOptions } from './moves';
 import { readsApi } from './reads';
 import { activateApi, diffApi } from './upgrade';
-import { claimApi, expireLeasesApi } from './claims';
+import { claimApi, expireLeasesApi, leasedApi } from './claims';
 import { exportProject, importProject, purgeProject, type ImportCallback, type ImportReport, type ProjectBundle, type PurgeReport } from './bundle';
 
 type ReadsApi = ReturnType<typeof readsApi>;
 import { runTransaction, type EngineTx } from './tx';
 import { NotFound, SchemaBehind, VersionMismatch } from './errors';
-import type { Actor } from './types';
+import type { Actor, Task } from './types';
 
 // The engine's entry point (engine spec, "API"): one client per process, one
 // handle per project, and every write through an actor. Client calls
@@ -220,10 +220,17 @@ export class ActorHandle {
   readonly links: ReturnType<typeof linksApi>;
   readonly notes: ReturnType<typeof notesApi>;
   /** Makes a declared move; throws MoveRefused. */
-  readonly move: ReturnType<typeof movesApi>;
+  readonly move: (taskId: string, moveName: string, opts?: MoveOptions) => Promise<Task>;
   readonly lifecycles: ReturnType<typeof activateApi>;
   /** Sweeps, then leases the next ready task to a worker; null when nothing is ready. */
   readonly claim: ReturnType<typeof claimApi>;
+  /** Renews a claim's lease; throws LeaseLost once it no longer holds the task. */
+  readonly heartbeat: ReturnType<typeof leasedApi>['heartbeat'];
+  /** A move fenced by the claim's attempt id; throws LeaseLost or MoveRefused. */
+  readonly moveClaimed: ReturnType<typeof leasedApi>['moveClaimed'];
+  readonly claims: ReturnType<typeof leasedApi>['claims'];
+  /** @internal move() with a fence; use moveClaimed. */
+  readonly moveFenced: ReturnType<typeof movesApi>;
 
   /** @internal Use tg.as(actor). */
   constructor(/** @internal */ readonly project: ProjectHandle, readonly actor: Actor) {
@@ -233,9 +240,15 @@ export class ActorHandle {
     this.deps = depsApi(this);
     this.links = linksApi(this);
     this.notes = notesApi(this);
-    this.move = movesApi(this);
+    const fenced = movesApi(this);
+    this.move = (taskId, moveName, opts) => fenced(taskId, moveName, opts);
+    this.moveFenced = fenced;
     this.lifecycles = activateApi(this);
     this.claim = claimApi(this);
+    const leased = leasedApi(this);
+    this.heartbeat = leased.heartbeat;
+    this.moveClaimed = leased.moveClaimed;
+    this.claims = leased.claims;
   }
 
   /**

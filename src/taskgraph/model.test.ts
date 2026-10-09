@@ -6,12 +6,14 @@ import { openEngine, type TestEngine } from './test/engine';
 import { testLifecycle } from './test/lifecycle';
 import { CycleError, InvalidRequest, MoveRefused, NotPermitted } from './errors';
 import type { ProjectHandle } from './client';
+import type { Claim } from './claims';
+import { LeaseLost } from './errors';
 
 // Model-based property test (engine spec, "Testing"): random sequences of
 // create, edit, add dependency, delete, move, claim, clock ticks and the lease
 // sweep run against the engine and a simple in-memory model, and after every
 // step the engine must agree with the model and keep its invariants.
-// Heartbeats and fenced moves join with them (T2.2).
+// Heartbeats and fenced moves on earlier claims, live or stale, test the fence.
 
 const LC = testLifecycle();
 const TERMINAL = new Set(Object.keys(LC.states).filter(s => LC.states[s].terminal));
@@ -28,6 +30,8 @@ type MTask = {
   /** Expiries in a row since the last attempt that ended another way. */
   streak: number;
   attempts: number;
+  /** The attempt holding the lease. */
+  attempt: string | null;
 };
 /** A hold: none, one already past, or one far ahead. */
 type Hold = 'none' | 'past' | 'future';
@@ -35,7 +39,7 @@ const HOLD_AT: Record<Hold, Date | null> = { none: null, past: new Date('2000-01
 type Role = 'developer' | 'planner' | 'orchestrator' | 'system';
 /** The test lifecycle's tasks.update permission: the states each role may edit in. */
 const EDIT_STATES: Record<string, string[]> = { developer: ['proposed', 'open', 'blocked', 'parked'], planner: ['proposed'] };
-type Model = { tasks: MTask[]; deps: Set<string>; clock: number };
+type Model = { tasks: MTask[]; deps: Set<string>; clock: number; claims: Claim[] };
 
 /** The database clock (taskgraph.fake_now), shared by every run; it only moves forward. */
 let NOW = Date.parse('2026-10-09T00:00:00Z');
@@ -48,6 +52,7 @@ const boostAfter = (name: string, boosted: boolean) => (moveDef(name).boost ? tr
 function endAttempt(t: MTask, move: string) {
   if (t.leaseUntil === null) return;
   t.leaseUntil = null;
+  t.attempt = null;
   t.streak = move === LC.hooks.onLeaseExpiry ? t.streak + 1 : 0;
 }
 
@@ -134,7 +139,7 @@ class Create implements fc.AsyncCommand<Model, Real> {
     if (t) {
       expect(t.state).toBe(this.role === 'system' ? 'open' : 'proposed');
       m.tasks.push({ id: t.id, kind: this.kind, state: t.state, parent: parent?.id ?? null, priority: this.priority, createdAt: m.clock++, held: this.hold === 'future',
-        boosted: false, leaseUntil: null, streak: 0, attempts: 0 });
+        boosted: false, leaseUntil: null, streak: 0, attempts: 0, attempt: null });
     }
   }
   toString() { return `create(${this.role}, ${this.kind}, parent#${this.parentIdx}, p${this.priority}, hold ${this.hold})`; }
@@ -206,7 +211,7 @@ class Delete implements fc.AsyncCommand<Model, Real> {
 const MOVES = ['approve', 'park', 'unpark', 'flag', 'unblock', 'cancel', 'completeContainer', 'submit', 'finish', 'release', 'followUp'] as const;
 
 class Move implements fc.AsyncCommand<Model, Real> {
-  constructor(readonly idx: number, readonly move: typeof MOVES[number], readonly dropDeps: boolean, readonly role: Role) {}
+  constructor(readonly idx: number, readonly move: typeof MOVES[number], readonly dropDeps: boolean, readonly role: Role, readonly fence?: Claim) {}
   check(m: Readonly<Model>) { return m.tasks.length > 0; }
   async run(m: Model, r: Real) {
     const t = pick(m, this.idx);
@@ -219,7 +224,8 @@ class Move implements fc.AsyncCommand<Model, Real> {
     else if (TERMINAL.has(to) && children(m, t.id).some(c => !TERMINAL.has(c.state))) reason = 'ChildrenLive';
     else if (TERMINAL.has(to) && !SATISFIES.has(to) && !this.dropDeps
       && dependents(m, t.id).some(d => !TERMINAL.has(d.state))) reason = 'DependentsLive';
-    const out = await r.tg.as({ id: role, role }).move(t.id, this.move, { dropDeps: this.dropDeps })
+    const as = r.tg.as({ id: role, role });
+    const out = await (this.fence ? as.moveClaimed(this.fence, this.move, { dropDeps: this.dropDeps }) : as.move(t.id, this.move, { dropDeps: this.dropDeps }))
       .then(v => v, err => err);
     ran(reason ? `move refused:${reason}` : `move:${this.move}`);
     if (reason) {
@@ -266,6 +272,8 @@ class Claim implements fc.AsyncCommand<Model, Real> {
     t.state = LEASED;
     t.leaseUntil = NOW + LEASE_MS;
     t.attempts++;
+    t.attempt = c.attemptId;
+    m.claims.push(c);
     t.boosted = boostAfter(LC.hooks.onClaim, t.boosted);
   }
   toString() { return 'claim'; }
@@ -310,6 +318,48 @@ class SubmitAndFollowUp implements fc.AsyncCommand<Model, Real> {
     await new Create('system', 'work', null, 0, 'none').run(m, r);
   }
   toString() { return 'submitAndFollowUp'; }
+}
+
+/** One of the run's claims, counted back from the newest, so recent (often live) claims are picked as often as old ones. */
+const recentClaim = (m: Model, i: number) => m.claims[m.claims.length - 1 - (i % m.claims.length)];
+
+/** A heartbeat on some claim made earlier in the run, live or long gone. */
+class Heartbeat implements fc.AsyncCommand<Model, Real> {
+  constructor(readonly idx: number) {}
+  check(m: Readonly<Model>) { return m.claims.length > 0; }
+  async run(m: Model, r: Real) {
+    const c = recentClaim(m, this.idx);
+    const t = m.tasks.find(x => x.id === c.task.id)!;
+    const out = await r.tg.as({ id: 'orc', role: 'orchestrator' }).heartbeat(c, { leaseMs: LEASE_MS }).then(v => v, err => err);
+    if (t.attempt !== c.attemptId) {
+      ran('heartbeat:lost');
+      expect(out).toBeInstanceOf(LeaseLost);
+      return;
+    }
+    if (out instanceof Error) throw out;
+    ran('heartbeat');
+    t.leaseUntil = NOW + LEASE_MS;
+  }
+  toString() { return `heartbeat(claim#${this.idx})`; }
+}
+
+/** A move fenced by some earlier claim: LeaseLost unless that claim still holds the task. */
+class MoveClaimed implements fc.AsyncCommand<Model, Real> {
+  constructor(readonly idx: number, readonly move: 'submit' | 'finish' | 'release' | 'flag' | 'cancel') {}
+  check(m: Readonly<Model>) { return m.claims.length > 0; }
+  async run(m: Model, r: Real) {
+    const c = recentClaim(m, this.idx);
+    const t = m.tasks.find(x => x.id === c.task.id)!;
+    const role = moveDef(this.move).by[0] as Role;
+    if (t.attempt !== c.attemptId) {
+      ran('moveClaimed:lost');
+      await expect(r.tg.as({ id: role, role }).moveClaimed(c, this.move)).rejects.toBeInstanceOf(LeaseLost);
+      return;
+    }
+    ran('moveClaimed');
+    await new Move(m.tasks.indexOf(t), this.move, false, role, c).run(m, r);
+  }
+  toString() { return `moveClaimed(claim#${this.idx}, ${this.move})`; }
 }
 
 /** Moves the database clock forward. */
@@ -364,6 +414,11 @@ const COMMANDS = [
   fc.constant(null).map(() => new ClaimAndLapse()),
   fc.constant(null).map(() => new ClaimAndLapse()),
   fc.constant(null).map(() => new SubmitAndFollowUp()),
+  idx.map(i => new Heartbeat(i)),
+  fc.tuple(idx, fc.constantFrom('submit' as const, 'finish' as const, 'release' as const, 'flag' as const, 'cancel' as const))
+    .map(([i, mv]) => new MoveClaimed(i, mv)),
+  fc.tuple(idx, fc.constantFrom('submit' as const, 'finish' as const, 'release' as const, 'flag' as const, 'cancel' as const))
+    .map(([i, mv]) => new MoveClaimed(i, mv)),
   fc.tuple(idx, fc.constantFrom(...MOVES)).map(([i, mv]) => new TargetedMove(i, mv)),
   fc.tuple(idx, fc.constantFrom(...MOVES)).map(([i, mv]) => new TargetedMove(i, mv)),
   // the moves that end or follow an attempt, which only claimed and waiting tasks can make
@@ -415,7 +470,7 @@ async function runModel(e: TestEngine, numRuns: number, seed?: number) {
       const p = await e.client.projects.create({ name: `m${n++}`, idPrefix: 'm', actor: { id: 'a', role: 'developer' } });
       const real: Real = { e, tg: e.client.project(p.id) };
       await e.t.pglite.query(`select set_config('taskgraph.fake_now', $1, false)`, [new Date(NOW).toISOString()]);
-      const model: Model = { tasks: [], deps: new Set(), clock: 0 };
+      const model: Model = { tasks: [], deps: new Set(), clock: 0, claims: [] };
       await fc.asyncModelRun(() => ({ model, real }), [...cmds].map(c => ({
         check: (mm: Readonly<Model>) => c.check(mm),
         run: async (mm: Model, rr: Real) => { await c.run(mm, rr); await checkInvariants(mm, rr); },
@@ -439,7 +494,7 @@ describe('the engine against a model', () => {
     await runModel(await openEngine(), 200, 20261009);
     for (const what of ['ok', 'refused:CycleError', 'refused:InvalidRequest', 'refused:NotPermitted', 'move:approve',
       'move:cancel', 'move:park', 'move refused:NotPermitted', 'move refused:WrongState', 'move refused:ChildrenLive',
-      'move refused:DependentsLive', 'claim', 'expired', 'expired:repeated', 'move:submit', 'move:followUp', 'move:finish', 'move:release']) {
+      'move refused:DependentsLive', 'claim', 'expired', 'expired:repeated', 'move:submit', 'move:followUp', 'move:finish', 'move:release', 'heartbeat', 'heartbeat:lost', 'moveClaimed', 'moveClaimed:lost']) {
       expect(RAN.get(what) ?? 0, `${what} in ${JSON.stringify([...RAN])}`).toBeGreaterThan(0);
     }
   }, 600_000);

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { openEngine, type TestEngine } from './test/engine';
 import { testLifecycle } from './test/lifecycle';
 import { lifecycleViolations } from './lifecycle';
-import { InvalidRequest, NotPermitted } from './errors';
+import { InvalidRequest, LeaseHeld, LeaseLost, NotFound, NotPermitted } from './errors';
 
 // Claims and the lease sweep (engine spec, "Claiming and leases").
 
@@ -135,5 +135,75 @@ describe('the expiry hooks', () => {
     const lc = testLifecycle();
     lc.moves = lc.moves.map(m => (m.name === 'expire' ? { ...m, to: 'cancelled' } : m));
     expect(lifecycleViolations(lc).map(v => v.rule)).toContain('expiry-hooks');
+  });
+});
+
+describe('heartbeat, fenced moves and resume', { timeout: 30_000 }, () => {
+  it('heartbeat pushes the lease out, writes no event, and gets LeaseLost once another worker has the task', async () => {
+    const e = await openEngine();
+    await clock(e, T0);
+    const t = await e.as('system').tasks.create({ title: 't' });
+    const first = (await claim(e, 'w/1'))!;
+    const events = async () => (await e.rows(`select count(*)::int n from taskgraph.events`))[0].n;
+    const before = await events();
+    await clock(e, new Date(T0.getTime() + HOUR / 2));
+    const renewed = await orc(e).heartbeat(first, { leaseMs: HOUR });
+    expect(renewed).toMatchObject({ attemptId: first.attemptId, expiresAt: new Date(T0.getTime() + HOUR / 2 + HOUR) });
+    expect(await events()).toBe(before);
+
+    // lapsed but not swept: the lease still belongs to its holder
+    await clock(e, new Date(T0.getTime() + 2 * HOUR));
+    await orc(e).heartbeat(first, { leaseMs: HOUR });
+    // lapsed and taken over
+    await clock(e, new Date(T0.getTime() + 4 * HOUR));
+    const second = (await claim(e, 'w/2'))!;
+    expect(second.task.id).toBe(t.id);
+    await expect(orc(e).heartbeat(first, { leaseMs: HOUR })).rejects.toBeInstanceOf(LeaseLost);
+    await orc(e).heartbeat(second, { leaseMs: HOUR });
+  });
+
+  it('moveClaimed is fenced by the attempt id, and ends the attempt', async () => {
+    const e = await openEngine();
+    await clock(e, T0);
+    const t = await e.as('system').tasks.create({ title: 't' });
+    const first = (await claim(e, 'w/1'))!;
+    await orc(e).move(t.id, 'release');
+    const second = (await claim(e, 'w/2'))!;
+    await expect(orc(e).moveClaimed(first, 'submit')).rejects.toBeInstanceOf(LeaseLost);
+    expect(await orc(e).moveClaimed(second, 'submit', { reason: 'pr open' })).toMatchObject({ state: 'waiting', leaseAttemptId: null });
+    expect(await e.rows(`select outcome from taskgraph.attempts where id = $1`, [second.attemptId])).toEqual([{ outcome: 'submit' }]);
+    await expect(orc(e).moveClaimed(second, 'finish')).rejects.toBeInstanceOf(LeaseLost);
+  });
+
+  it('a move out of the leased state by anyone takes the lease away', async () => {
+    const e = await openEngine();
+    const t = await e.as('system').tasks.create({ title: 't' });
+    const c = (await claim(e))!;
+    await e.as('developer').move(t.id, 'cancel');
+    await expect(orc(e).heartbeat(c, { leaseMs: HOUR })).rejects.toBeInstanceOf(LeaseLost);
+  });
+
+  it('claims.resume returns the live attempt to its actor, and LeaseHeld names the holder to anyone else', async () => {
+    const e = await openEngine();
+    const t = await e.as('system').tasks.create({ title: 't' });
+    const ann = e.tg.as({ id: 'ann', role: 'developer' });
+    const bob = e.tg.as({ id: 'bob', role: 'developer' });
+    const c = (await ann.claim({ worker: 'cli:ann@laptop', leaseMs: HOUR }))!;
+    expect(await ann.claims.resume(t.id)).toEqual(c);
+    const err = await bob.claims.resume(t.id).catch(x => x);
+    expect(err).toBeInstanceOf(LeaseHeld);
+    expect(err.holder).toBe('ann');
+    const other = await e.as('system').tasks.create({ title: 'free' });
+    await expect(ann.claims.resume(other.id)).rejects.toBeInstanceOf(NotFound);
+  });
+});
+
+describe('review follow-ups (T2.2)', { timeout: 30_000 }, () => {
+  it('heartbeat and claims.resume follow the claim move\'s roles', async () => {
+    const e = await openEngine();
+    const t = await e.as('system').tasks.create({ title: 't' });
+    const c = (await claim(e))!;
+    await expect(e.as('planner').heartbeat(c, { leaseMs: HOUR })).rejects.toBeInstanceOf(NotPermitted);
+    await expect(e.as('planner').claims.resume(t.id)).rejects.toBeInstanceOf(NotPermitted);
   });
 });

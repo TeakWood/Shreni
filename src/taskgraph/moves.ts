@@ -2,7 +2,7 @@ import { sql } from 'kysely';
 import type { ActorHandle } from './client';
 import { loadTask, lockGraph, toTask, TASK_COLUMNS, type TaskRow } from './tasks';
 import { containerSettled, isTerminal, liveChildren, liveDependents, lockWithParent } from './containers';
-import { InvalidRequest, MoveRefused } from './errors';
+import { InvalidRequest, LeaseLost, MoveRefused } from './errors';
 import { textArray } from './sql-values';
 import type { Task } from './types';
 
@@ -27,8 +27,12 @@ export function movesApi(as: ActorHandle) {
   const { lifecycle } = client;
   const leasedState = Object.keys(lifecycle.states).find(s => lifecycle.states[s].leased);
 
-  /** Makes the named move on a task; throws MoveRefused. */
-  return async function move(taskId: string, moveName: string, opts: MoveOptions = {}): Promise<Task> {
+  /**
+   * Makes the named move on a task; throws MoveRefused. With `fence`, an
+   * attempt id, the move is made only while that attempt holds the task's
+   * lease, and throws LeaseLost otherwise.
+   */
+  return async function move(taskId: string, moveName: string, opts: MoveOptions = {}, fence?: string): Promise<Task> {
     const def = lifecycle.moves.find(m => m.name === moveName);
     if (!def) throw new InvalidRequest(`lifecycle ${lifecycle.name}@${lifecycle.version} has no move ${moveName}`);
     if (moveName === lifecycle.hooks.onClaim) {
@@ -45,6 +49,7 @@ export function movesApi(as: ActorHandle) {
       await as.assertVersion(db);
       if (strands) await lockGraph(db, projectId);
       const task = toTerminal ? await lockWithParent(db, projectId, taskId) : await loadTask(db, projectId, taskId, true);
+      if (fence !== undefined && task.leaseAttemptId !== fence) throw new LeaseLost(taskId, fence);
       if (!def.by.includes(as.actor.role)) throw new MoveRefused(taskId, task.state, 'NotPermitted');
       if (!def.from.includes(task.state)) throw new MoveRefused(taskId, task.state, 'WrongState');
       if (toTerminal) {
