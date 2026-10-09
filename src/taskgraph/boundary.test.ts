@@ -16,7 +16,7 @@ const RUNTIME_PACKAGES = new Set(['postgres', 'kysely', 'graphology', 'grapholog
 
 // Dev-only packages (devDependencies, absent from an npm install of shreni):
 // allowed only in test files and under test/, never in shipped engine code.
-const TEST_PACKAGES = new Set(['@electric-sql/pglite', '@testcontainers/postgresql', 'fast-check', 'vitest', 'typescript', 'esbuild']);
+const TEST_PACKAGES = new Set(['@electric-sql/pglite', '@electric-sql/pglite-socket', '@testcontainers/postgresql', 'fast-check', 'vitest', 'typescript', 'esbuild']);
 
 const SOURCE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 

@@ -87,11 +87,12 @@ Build the core and reuse everything around it. The core (tables, the ready query
 
 | Library | Use for |
 | --- | --- |
-| [postgres](https://www.npmjs.com/package/postgres) (3.4) | Driver: transactions, `LISTEN`/`NOTIFY`, connection pooling |
+| [postgres](https://www.npmjs.com/package/postgres) (3.4) | Driver: transactions, `LISTEN`/`NOTIFY`, connection pooling. Kysely has no postgres.js dialect, so the engine carries a small one: a reserved connection per transaction |
 | [Kysely](https://www.npmjs.com/package/kysely) (0.29) | Type-safe queries and migrations; the claim query stays hand-written SQL |
 | [graphology](https://www.npmjs.com/package/graphology) + [graphology-dag](https://www.npmjs.com/package/graphology-dag) (0.4) | In-memory plan checks before writing: `hasCycle`, `willCreateCycle`, `topologicalGenerations` (which also gives the graph's depth and width for the sizing reviewer) |
 | [zod](https://www.npmjs.com/package/zod) (already a Shreni dependency) | Validating the lifecycle definition and task specs |
 | [PGlite](https://www.npmjs.com/package/@electric-sql/pglite) (0.5) | Postgres in-process for fast unit tests |
+| [pglite-socket](https://www.npmjs.com/package/@electric-sql/pglite-socket) (0.2) | PGlite behind the Postgres wire protocol, so unit tests drive the engine through postgres.js without Docker |
 | [@testcontainers/postgresql](https://www.npmjs.com/package/@testcontainers/postgresql) (12.2) | Real Postgres for concurrency tests |
 | [fast-check](https://www.npmjs.com/package/fast-check) (4.10) | Property tests for the invariants |
 
@@ -547,6 +548,7 @@ type TaskFilter = {
 Errors are typed and carry stable codes:
 
 - `CycleError`; `NotFound`; `ValidationError`, with every finding.
+- `NotPermitted`: the actor's role may not make a call that isn't a move, or not with the task in its current state. A refused move is `MoveRefused` with reason `NotPermitted`.
 - `MoveRefused`, with the task's current state and a reason: the guard's, `NotPermitted`, `ChildrenLive`, or `DependentsLive` with the waiting tasks.
 - `LeaseLost`, and `LeaseHeld`, which names the holder.
 - `VersionMismatch`: this process is older than the schema's `min_writer`, or isn't on the project's lifecycle version. `SchemaBehind`: a migration this call needs hasn't run.

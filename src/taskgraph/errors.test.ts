@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   TaskGraphError, CycleError, NotFound, ValidationError, MoveRefused, LeaseLost, LeaseHeld,
-  VersionMismatch, SchemaBehind, Unavailable, LifecycleInvalid,
+  VersionMismatch, SchemaBehind, Unavailable, LifecycleInvalid, NotPermitted,
 } from './errors';
 
 describe('typed errors', () => {
@@ -18,6 +18,7 @@ describe('typed errors', () => {
       [new VersionMismatch('lifecycle shreni.task 1 is not active (2 is)'), 'VersionMismatch', {}],
       [new SchemaBehind('0002_x'), 'SchemaBehind', { migration: '0002_x' }],
       [new Unavailable('connection dropped'), 'Unavailable', {}],
+      [new NotPermitted('notes.add', 'planner', 'open'), 'NotPermitted', { call: 'notes.add', role: 'planner', state: 'open' }],
       [new LifecycleInvalid('t@1', [{ rule: 'expiry-hooks', message: 'm' }]), 'LifecycleInvalid',
         { lifecycle: 't@1', violations: [{ rule: 'expiry-hooks', message: 'm' }] }],
     ];

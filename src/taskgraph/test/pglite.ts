@@ -1,4 +1,6 @@
 import { PGlite } from '@electric-sql/pglite';
+import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
+import postgres from 'postgres';
 import { Kysely, PGliteDialect } from 'kysely';
 import { migrate } from '../migrate';
 
@@ -54,4 +56,34 @@ export async function createMigratedTestDb<DB = any>(): Promise<TestDb<DB>> {
     throw err;
   });
   return wrap<DB>((await (await template).clone()) as PGlite);
+}
+
+/** A postgres.js client talking to PGlite over the Postgres wire protocol. */
+export interface WireDb {
+  pglite: PGlite;
+  sql: postgres.Sql;
+  close(): Promise<void>;
+}
+
+/**
+ * Serves a fresh PGlite on a free local port and connects postgres.js to it,
+ * to drive the engine through the driver it uses in production. PGlite serves
+ * one connection, so the client's pool holds one.
+ */
+export async function createWireTestDb(): Promise<WireDb> {
+  const pglite = await PGlite.create();
+  const server = new PGLiteSocketServer({ db: pglite, host: '127.0.0.1', port: 0 });
+  await server.start();
+  const conn = server.getServerConn();
+  const port = Number(conn.slice(conn.lastIndexOf(':') + 1));
+  const sql = postgres({ host: '127.0.0.1', port, max: 1, onnotice: () => {} });
+  return {
+    pglite,
+    sql,
+    async close() {
+      await sql.end({ timeout: 1 });
+      await server.stop();
+      if (!pglite.closed) await pglite.close();
+    },
+  };
 }

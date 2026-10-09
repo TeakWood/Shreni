@@ -21,6 +21,13 @@ export class NotFound extends TaskGraphError {
   }
 }
 
+/** The actor's role may not make this call, or not with the task in its current state. */
+export class NotPermitted extends TaskGraphError {
+  constructor(readonly call: string, readonly role: string, readonly state?: string) {
+    super('NotPermitted', `role ${role} may not call ${call}${state === undefined ? '' : ` on a task in ${state}`}`);
+  }
+}
+
 /** One validator's finding (engine spec, "Validation"). */
 export interface Finding {
   validator: string;

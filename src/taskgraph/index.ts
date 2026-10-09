@@ -6,4 +6,10 @@
 // built-ins and the libraries the spec adopts are allowed, enforced by
 // boundary.test.ts.
 
-export {};
+export { openTaskGraph } from './client';
+export type { OpenTaskGraphOptions, Project, TaskGraphClient, ProjectHandle, ActorHandle } from './client';
+export { defineLifecycle, defineGuard, SYSTEM_ROLE, CALLS } from './lifecycle';
+export type { Lifecycle, Move, Guard, GuardFn, StateFlags, Call } from './lifecycle';
+export type { MigrationReport } from './migrate';
+export type { Actor, Task } from './types';
+export * from './errors';

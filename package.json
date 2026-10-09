@@ -64,6 +64,7 @@
   "homepage": "https://github.com/TeakWood/Shreni#readme",
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "0.2.11",
     "@types/node": "^25.9.2",
     "@vitest/coverage-v8": "^4.1.8",
     "esbuild": "^0.28.1",
