@@ -297,8 +297,10 @@ The caller declares the states and the moves between them; the engine refuses an
 ```ts
 type StateFlags = { claimable?: true; leased?: true; satisfiesDeps?: true; terminal?: true };
 
-type Guard = (ctx: { task: Task; actor: Actor; tx: Transaction }) => Promise<true | string>;
+type GuardFn = (ctx: { task: Task; actor: Actor; tx: Transaction }) => Promise<true | string>;
 // true allows the move; a string refuses it, and MoveRefused carries the reason
+type Guard = GuardFn & { guardName: string };
+declare function defineGuard(name: string, fn: GuardFn): Guard;   // the name goes into the lifecycle's hash
 
 type Move = {
   name: string;
@@ -333,9 +335,9 @@ type Lifecycle = {
 declare function defineLifecycle(def: Lifecycle): Lifecycle;   // checked with zod when registered
 ```
 
-**What the engine requires of any lifecycle.** Exactly one claimable state and one leased state; at least one state that satisfies dependencies; terminal states with no outgoing moves; a `create.state` that the `onApprove` move starts from, and a `create.byRole` that names only that state or the claimable one; and hooks whose moves fit their job. `onClaim` goes from the claimable state to the leased one, `onApprove` lands in the claimable state, and `onDiscard` lands in a terminal one. The expiry moves start from the leased state, list `system` in `by`, and have no guard, because the sweep applies them to many tasks in one statement and can't run one; their `boost` and `clearsBoost` flags are honored. Registration fails otherwise. The optional `onRepeatedExpiry` hook names a move the engine fires instead of the expiry move when a task's lease expires that many times in a row, with no attempt ending another way in between. Shreni's setting, and why, is in the policy spec's [Boost and repeated expiry](task-lifecycle.md#boost-and-repeated-expiry).
+**What the engine requires of any lifecycle.** Exactly one claimable state and one leased state; at least one state that satisfies dependencies; terminal states with no outgoing moves; a `create.state` that the `onApprove` move starts from, and a `create.byRole` that names only that state or the claimable one; and hooks whose moves fit their job. `onClaim` goes from the claimable state to the leased one, `onApprove` lands in the claimable state, and `onDiscard` lands in a terminal one. The expiry moves start from the leased state, list `system` in `by`, and have no guard, because the sweep applies them to many tasks in one statement and can't run one; their `boost` and `clearsBoost` flags are honored. For the same reason the `onClaim` move has no guard, since the claim is one `SKIP LOCKED` update, and it is the only move that lands in the leased state, so every leased task has a lease. `onDiscard` starts from `create.state`. Registration fails otherwise. The optional `onRepeatedExpiry` hook names a move the engine fires instead of the expiry move when a task's lease expires that many times in a row, with no attempt ending another way in between. Shreni's setting, and why, is in the policy spec's [Boost and repeated expiry](task-lifecycle.md#boost-and-repeated-expiry).
 
-**Guards are the caller's code.** A guard runs inside the move's transaction and sees the task, the actor making the move and a transaction handle, so a rule can depend on who is asking as well as on the task. It allows the move by returning true, or refuses it by returning a reason, which `MoveRefused` carries. A move with `boost` puts the task ahead of all unboosted work, whatever its priority, until a move with `clearsBoost` takes it out. Shreni's three guards, and why its PR follow-ups boost, are in the policy spec's [The lifecycle](task-lifecycle.md#the-lifecycle) and [Boost and repeated expiry](task-lifecycle.md#boost-and-repeated-expiry).
+**Guards are the caller's code.** A guard runs inside the move's transaction and sees the task, the actor making the move and a transaction handle, so a rule can depend on who is asking as well as on the task. It allows the move by returning true, or refuses it by returning a reason, which `MoveRefused` carries. Each guard is named explicitly with `defineGuard`, because a function's own name isn't stable: an inline guard takes its property's name, and a bundler may rename one. A move with `boost` puts the task ahead of all unboosted work, whatever its priority, until a move with `clearsBoost` takes it out. Shreni's three guards, and why its PR follow-ups boost, are in the policy spec's [The lifecycle](task-lifecycle.md#the-lifecycle) and [Boost and repeated expiry](task-lifecycle.md#boost-and-repeated-expiry).
 
 **Guards read only the database.** A guard queries through its transaction handle, with no network or file calls, so no row lock waits on a network call. Outside facts are recorded first, in the caller's own tables, and the guard checks that row; Shreni's `hasOpenPr` works this way. Each guard can then become a SQL function if the core moves into PL/pgSQL.
 
@@ -376,7 +378,7 @@ Four version numbers are in play, and three are checked:
 
 A release that adds no breaking migration and leaves the lifecycle alone runs beside an older one, and neither is fenced out.
 
-- **Versioned in code.** `defineLifecycle` takes a name and a version number, and the engine stores each version it sees with its hash. A changed definition without a version bump fails to register. The hash covers guard names, not their code; Shreni's snapshot test covers the code ([Lifecycle upgrades in practice](task-lifecycle.md#lifecycle-upgrades-in-practice)).
+- **Versioned in code.** `defineLifecycle` takes a name and a version number, and the engine stores each version it sees with its hash. A changed definition without a version bump fails to register; reordering moves or the states and roles a move lists is not a change. The hash covers guard names, not their code; Shreni's snapshot test covers the code ([Lifecycle upgrades in practice](task-lifecycle.md#lifecycle-upgrades-in-practice)).
 - **Mapped by its author.** A new version says where tasks in a removed or renamed state go, for example `migrate: { parked: 'open' }`. Activation refuses a state that disappears without one.
 - **Previewed, then activated.** `lifecycles.diff(version)` returns the states and moves added or removed, roles changed, guards changed by name, the tasks the mapping moves, and any live leases. `lifecycles.activate(version)` applies it. Until then, a process on the newer version can read but refuses writes. A new project starts on the version it is created with.
 - **What activation does,** in one transaction: checks that no schema migration is pending, moves those tasks, makes the new version active, and writes a `lifecycle.upgraded` event naming who ran it. Schema migrations are separate, below.
@@ -549,6 +551,7 @@ Errors are typed and carry stable codes:
 - `LeaseLost`, and `LeaseHeld`, which names the holder.
 - `VersionMismatch`: this process is older than the schema's `min_writer`, or isn't on the project's lifecycle version. `SchemaBehind`: a migration this call needs hasn't run.
 - `Unavailable`: the database can't be reached, or a transaction gave up after its retries. It is safe to retry with the same request id.
+- `LifecycleInvalid`: a lifecycle breaks a registration rule, or changes without a version bump; it names each rule broken.
 
 ## Claiming and leases
 

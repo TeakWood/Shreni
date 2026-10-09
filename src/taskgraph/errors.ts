@@ -91,3 +91,16 @@ export class Unavailable extends TaskGraphError {
     super('Unavailable', message, cause === undefined ? undefined : { cause });
   }
 }
+
+/** One registration rule a lifecycle breaks. */
+export interface LifecycleViolation {
+  rule: string;
+  message: string;
+}
+
+/** A lifecycle breaks a registration rule, or changes without a version bump. */
+export class LifecycleInvalid extends TaskGraphError {
+  constructor(readonly lifecycle: string, readonly violations: readonly LifecycleViolation[]) {
+    super('LifecycleInvalid', `lifecycle ${lifecycle} refused: ${violations.map(v => `[${v.rule}] ${v.message}`).join('; ')}`);
+  }
+}

@@ -79,7 +79,7 @@ Not drawn, to keep the picture readable: any state that is not `done` or `cancel
 
 Solid arrows move work forward and dashed ones send it back; only `done` satisfies a dependency.
 
-**Three guards.** Each follows the engine's guard contract: it reads only the database, and returns `true` or a reason for refusing.
+**Three guards.** Each follows the engine's guard contract: it reads only the database, returns `true` or a reason for refusing, and is named with `defineGuard`.
 
 | Guard | On move | Allows the move when |
 | --- | --- | --- |
