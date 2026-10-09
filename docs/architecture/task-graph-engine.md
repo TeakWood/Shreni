@@ -503,7 +503,7 @@ as.deps.add(taskId, dependsOnId): Promise<void>    // throws CycleError
 as.deps.remove(taskId, dependsOnId): Promise<void>
 as.links.add(a, b, kind): Promise<void>
 as.plans.validate(planId): Promise<ValidationReport>
-as.plans.approve(planId, { via }): Promise<Plan>   // via: the surface it came through; throws ValidationError
+as.plans.approve(planId, { via }): Promise<Plan & { findings }>   // via: the surface it came through; warnings come back; throws ValidationError
 as.plans.discard(planId, { via }): Promise<Plan>   // fires onDiscard on every proposed task
 as.tasks.approve(id, { via }): Promise<Task>       // a task with no plan: task-scope validators, then onApprove
 
@@ -669,7 +669,7 @@ interface Validator {
   validate(subject: PlanSnapshot, ctx: ValidatorContext): Promise<Finding[]>;
 }
 
-type PlanSnapshot = { plan: Plan; tasks: Task[]; deps: Dep[]; links: Link[] };
+type PlanSnapshot = { plan: Plan | null; tasks: Task[]; deps: Dep[]; links: Link[] };   // plan is null for a lone task
 type ValidatorContext = { tx: Transaction; config: unknown };
 type Finding = {
   validator: string;
@@ -687,7 +687,7 @@ Shreni registers four more, configured per project in either kind of project's c
 
 ### Approval
 
-`plans.approve` locks the plan, runs every validator, and fires the lifecycle's `onApprove` move on all its proposed tasks in one transaction. It records the actor and the surface (`via`) on the `plan.approved` event. A task with no plan is approved with `tasks.approve`, which runs the task-scope validators and fires the same move. `plans.discard` fires `onDiscard` on every proposed task of a plan that was never approved, and records `plan.discarded`. It cancels in an order the container and dependency rules allow, children before their container and waiting tasks before the ones they wait on, and refuses, naming them, when a task outside the plan waits on one inside it. Who may approve is the role on that move; Shreni's rule, humans only, and its approval surfaces are in the policy spec's [Approval: humans only](task-lifecycle.md#approval-humans-only).
+`plans.approve` locks the plan, runs every validator, and fires the lifecycle's `onApprove` move on all its proposed tasks in one transaction. It records the actor and the surface (`via`) on the `plan.approved` event. A task with no plan is approved with `tasks.approve`, which runs the task-scope validators and fires the same move. `plans.discard` fires `onDiscard` on every proposed task of a plan that was never approved, and records `plan.discarded`. It cancels in an order the container and dependency rules allow, children before their container and waiting tasks before the ones they wait on, and refuses, naming them, when a live task outside the plan waits on one inside it (`MoveRefused`, `DependentsLive`) or sits under one (`ChildrenLive`). Who may approve is the role on that move; Shreni's rule, humans only, and its approval surfaces are in the policy spec's [Approval: humans only](task-lifecycle.md#approval-humans-only).
 
 ## Events and history
 

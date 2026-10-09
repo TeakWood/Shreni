@@ -12,14 +12,18 @@ import { InvalidRequest } from './errors';
 
 const NONE = Symbol('none');
 
-export type PriorWrite = { kind: string; actor: string; taskId: string | null; attemptId: string | null };
+export type PriorWrite = {
+  kind: string; actor: string; taskId: string | null; planId: string | null; attemptId: string | null;
+  payload: Record<string, unknown>;
+};
 
 async function priorWrite(db: Kysely<any>, projectId: string, requestId: string): Promise<PriorWrite | undefined> {
-  const r = await sql<{ kind: string; actor: string; task_id: string | null; attempt_id: string | null }>`
-    select kind, actor, task_id, attempt_id from taskgraph.events
+  const r = await sql<{ kind: string; actor: string; task_id: string | null; plan_id: string | null; attempt_id: string | null;
+                        payload: Record<string, unknown> }>`
+    select kind, actor, task_id, plan_id, attempt_id, payload from taskgraph.events
      where project_id = ${projectId} and request_id = ${requestId}`.execute(db);
   const row = r.rows[0];
-  return row && { kind: row.kind, actor: row.actor, taskId: row.task_id, attemptId: row.attempt_id };
+  return row && { kind: row.kind, actor: row.actor, taskId: row.task_id, planId: row.plan_id, attemptId: row.attempt_id, payload: row.payload };
 }
 
 /**
@@ -30,7 +34,7 @@ async function priorWrite(db: Kysely<any>, projectId: string, requestId: string)
  */
 export async function once<T>(
   db: Kysely<any>, projectId: string, requestId: string | undefined, kind: string,
-  expected: { actor: string; taskId?: string },
+  expected: { actor: string; taskId?: string; planId?: string },
   act: () => Promise<T>, replay: (prior: PriorWrite) => Promise<T>,
 ): Promise<T> {
   if (requestId === undefined) return act();
@@ -42,6 +46,9 @@ export async function once<T>(
       throw new InvalidRequest(`request id ${requestId} was used by another write (${prior.kind}), not ${kind}`);
     }
     if (prior.actor !== expected.actor) throw new InvalidRequest(`request id ${requestId} was used by another actor`);
+    if (expected.planId !== undefined && prior.planId !== expected.planId) {
+      throw new InvalidRequest(`request id ${requestId} was used on plan ${prior.planId}, not ${expected.planId}`);
+    }
     if (expected.taskId !== undefined && prior.taskId !== expected.taskId) {
       throw new InvalidRequest(`request id ${requestId} was used on task ${prior.taskId}, not ${expected.taskId}`);
     }

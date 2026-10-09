@@ -9,7 +9,7 @@ import { once as onceFor, type PriorWrite } from './requests';
 import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi, type MoveOptions } from './moves';
 import { readsApi } from './reads';
-import { plansApi } from './plans';
+import { approveTaskApi, plansApi, type ApprovalOptions } from './plans';
 import type { Validator } from './validators';
 import { Session, type Release } from './session';
 import { activateApi, diffApi } from './upgrade';
@@ -18,7 +18,7 @@ import { exportProject, importProject, purgeProject, type ImportCallback, type I
 
 type ReadsApi = ReturnType<typeof readsApi>;
 import { runTransaction, type EngineTx } from './tx';
-import { LeaseLost, NotFound, NotPermitted, SchemaBehind, VersionMismatch } from './errors';
+import { LeaseLost, NotFound, NotPermitted, SchemaBehind, VersionMismatch, type Finding } from './errors';
 import type { Actor, Task } from './types';
 
 // The engine's entry point (engine spec, "API"): one client per process, one
@@ -257,7 +257,7 @@ export class ProjectHandle {
 }
 
 export class ActorHandle {
-  readonly tasks: ReturnType<typeof tasksApi>;
+  readonly tasks: ReturnType<typeof tasksApi> & { approve(id: string, opts: ApprovalOptions): Promise<Task> };
   readonly deps: ReturnType<typeof depsApi>;
   readonly links: ReturnType<typeof linksApi>;
   readonly notes: ReturnType<typeof notesApi>;
@@ -282,17 +282,22 @@ export class ActorHandle {
     // Every write that takes a request id runs once per id (requests.ts).
     const { client, id: projectId } = project;
     const once = <T>(requestId: string | undefined, kind: string, taskId: string | undefined,
-                     act: () => Promise<T>, replay: (p: PriorWrite) => Promise<T>) =>
-      onceFor(client.db, projectId, requestId, kind, { actor: actor.id, taskId }, act, replay);
+                     act: () => Promise<T>, replay: (p: PriorWrite) => Promise<T>, planId?: string) =>
+      onceFor(client.db, projectId, requestId, kind, { actor: actor.id, taskId, planId }, act, replay);
+    const reads = project;
     const task = (p: PriorWrite) => loadTask(client.db, projectId, p.taskId!);
     const nothing = async () => {};
 
     const tasks = tasksApi(this);
+    const approveTask = approveTaskApi(this);
     this.tasks = {
       ...tasks,
       create: (input, opts = {}) => once(opts.requestId, 'task.created', undefined, () => tasks.create(input, opts), task),
       update: (id, patch, opts = {}) => once(opts.requestId, 'task.updated', id, () => tasks.update(id, patch, opts), task),
       delete: (id, opts = {}) => once(opts.requestId, 'task.deleted', id, () => tasks.delete(id, opts), nothing),
+      /** Approves a task with no plan, after the task-scope validators; throws ValidationError. */
+      approve: (id: string, opts: ApprovalOptions) =>
+        once(opts?.requestId, `move:${client.lifecycle.hooks.onApprove}`, id, () => approveTask(id, opts), task),
     };
     const deps = depsApi(this);
     this.deps = {
@@ -308,7 +313,15 @@ export class ActorHandle {
       once(opts.requestId, `move:${moveName}`, taskId, () => moves(taskId, moveName, opts, fence), task);
     this.move = (taskId, moveName, opts) => fenced(taskId, moveName, opts);
     this.moveFenced = fenced;
-    this.plans = plansApi(this);
+    const plans = plansApi(this);
+    const plan = (p: PriorWrite) => reads.plans.get(p.planId!);
+    this.plans = {
+      ...plans,
+      create: (input, opts = {}) => once(opts.requestId, 'plan.created', undefined, () => plans.create(input, opts), plan),
+      approve: (planId, opts) => once(opts?.requestId, 'plan.approved', undefined, () => plans.approve(planId, opts),
+        async p => ({ ...(await plan(p)), findings: (p.payload.findings ?? []) as Finding[] }), planId),
+      discard: (planId, opts) => once(opts?.requestId, 'plan.discarded', undefined, () => plans.discard(planId, opts), plan, planId),
+    };
     const lifecycles = activateApi(this);
     this.lifecycles = {
       activate: (version, opts = {}) => once(opts.requestId, 'lifecycle.upgraded', undefined, () => lifecycles.activate(version, opts), nothing),

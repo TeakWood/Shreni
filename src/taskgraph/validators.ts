@@ -10,8 +10,8 @@ import type { Plan, Task } from './types';
 
 export type Dep = { taskId: string; dependsOnId: string };
 export type Link = { a: string; b: string; kind: string };
-/** A plan, its tasks, and the dependencies and links that touch them. */
-export type PlanSnapshot = { plan: Plan; tasks: Task[]; deps: Dep[]; links: Link[] };
+/** A plan, its tasks, and the dependencies and links that touch them; plan is null for a lone task's approval. */
+export type PlanSnapshot = { plan: Plan | null; tasks: Task[]; deps: Dep[]; links: Link[] };
 export type ValidatorContext = { tx: Transaction<any>; config: unknown };
 
 export interface Validator {
@@ -129,11 +129,13 @@ function mustPropagate(err: unknown): boolean {
  */
 export async function runValidators(
   s: PlanSnapshot, ctx: Omit<BuiltinContext, 'config'>, custom: readonly Validator[], configFor: (name: string) => unknown,
+  /** 'task' runs only the task-scope validators, for a lone task's approval. */
+  only?: 'task',
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   const all: { v: Builtin | Validator; builtin: boolean }[] = [
     ...BUILTIN_VALIDATORS.map(v => ({ v, builtin: true })), ...custom.map(v => ({ v, builtin: false })),
-  ];
+  ].filter(x => !only || x.v.scope === only);
   for (const { v, builtin } of all) {
     const config = configFor(v.name);
     await sql`savepoint taskgraph_validator`.execute(ctx.tx);
