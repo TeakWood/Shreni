@@ -1,7 +1,7 @@
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { ENGINE_VERSION, WRITER_VERSION_SETTING } from './migrate';
 import { writeEvents, type NewEvent } from './events';
-import { TaskGraphError, Unavailable } from './errors';
+import { InvalidRequest, TaskGraphError, Unavailable, VersionMismatch } from './errors';
 
 // The transaction runner (engine spec, "Claiming and leases: Transactions").
 // Every engine transaction runs at READ COMMITTED with bounded timeouts, marks
@@ -22,6 +22,8 @@ export interface TransactionOptions {
   sleep?: (ms: number) => Promise<void>;
   /** The jitter source, in [0, 1). */
   random?: () => number;
+  /** The lifecycle this process runs; the trigger refuses a write to a project on another version. */
+  lifecycle?: { name: string; version: number };
 }
 
 const RETRYABLE = new Set(['40001', '40P01']); // serialization_failure, deadlock_detected
@@ -63,7 +65,9 @@ export async function runTransaction<T>(
           set_config('lock_timeout', '5s', true),
           set_config('statement_timeout', '30s', true),
           set_config('idle_in_transaction_session_timeout', '60s', true),
-          set_config(${WRITER_VERSION_SETTING}, ${String(ENGINE_VERSION)}, true)`.execute(trx);
+          set_config(${WRITER_VERSION_SETTING}, ${String(ENGINE_VERSION)}, true),
+          set_config('taskgraph.lifecycle_name', ${opts.lifecycle?.name ?? ''}, true),
+          set_config('taskgraph.lifecycle_version', ${String(opts.lifecycle?.version ?? '')}, true)`.execute(trx);
         const events: NewEvent[] = [];
         let flushed = false;
         const result = await fn({
@@ -80,6 +84,9 @@ export async function runTransaction<T>(
     } catch (err) {
       if (err instanceof TaskGraphError) throw err;
       const code = errorCode(err);
+      // Raised by the backstop trigger (migrations/0002_triggers.ts).
+      if (code === 'TG001') throw new VersionMismatch((err as Error).message);
+      if (code === 'TG002') throw new InvalidRequest((err as Error).message);
       if (RETRYABLE.has(code)) {
         if (retry >= MAX_RETRIES) throw new Unavailable(`transaction gave up after ${MAX_RETRIES} retries`, err);
         // exponential backoff with jitter: about 20, 40, 80 ms

@@ -1,7 +1,6 @@
 import { sql, type Kysely, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import type { ActorHandle } from './client';
-import { runTransaction } from './tx';
 import { newTaskId, nextChildId } from './ids';
 import { InvalidRequest, NotFound } from './errors';
 import { LOCK_NAMESPACE } from './locks';
@@ -132,7 +131,7 @@ export function tasksApi(as: ActorHandle) {
     async create(input: NewTask, opts: WriteOptions = {}): Promise<Task> {
       const t = parse(NewTaskSchema, input);
       try {
-        return await runTransaction(client.db, async ({ db, emit }) => {
+        return await client.transaction(async ({ db, emit }) => {
           await as.check('tasks.create', undefined, db);
           if (t.plan) {
             // Shared: blocks approve and discard, not other creates.
@@ -199,7 +198,7 @@ export function tasksApi(as: ActorHandle) {
     /** Changes the fields the tasks.update permission allows in the task's state; writes task.updated. */
     async update(id: string, input: TaskPatch, opts: WriteOptions = {}): Promise<Task> {
       const patch = parse(TaskPatchSchema, input);
-      return runTransaction(client.db, async ({ db, emit }) => {
+      return client.transaction(async ({ db, emit }) => {
         // A reparent takes the graph lock first, so two can't each pass the
         // subtree check and together form a parent cycle.
         if (patch.parent !== undefined) await lockGraph(db, projectId);
@@ -277,7 +276,7 @@ export function tasksApi(as: ActorHandle) {
 
     /** Removes a task still in create.state, with no attempts or children, and its edges; writes task.deleted. */
     async delete(id: string, opts: WriteOptions = {}): Promise<void> {
-      await runTransaction(client.db, async ({ db, emit }) => {
+      await client.transaction(async ({ db, emit }) => {
         await lockGraph(db, projectId);
         const task = await loadTask(db, projectId, id, true);
         await as.check('tasks.delete', task.state, db);

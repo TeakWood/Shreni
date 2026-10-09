@@ -1,6 +1,5 @@
 import { sql } from 'kysely';
 import type { ActorHandle } from './client';
-import { runTransaction } from './tx';
 import { loadTask, lockGraph, type WriteOptions } from './tasks';
 import { CycleError, InvalidRequest, NotFound } from './errors';
 
@@ -16,7 +15,7 @@ export function depsApi(as: ActorHandle) {
   return {
     /** taskId waits for dependsOnId; throws CycleError if dependsOnId already waits on taskId. */
     async add(taskId: string, dependsOnId: string, opts: WriteOptions = {}): Promise<void> {
-      await runTransaction(client.db, async ({ db, emit }) => {
+      await client.transaction(async ({ db, emit }) => {
         await lockGraph(db, projectId);
         // Lock the waiting task, so its state can't change between the check and the write.
         const task = await loadTask(db, projectId, taskId, true);
@@ -45,7 +44,7 @@ export function depsApi(as: ActorHandle) {
     },
 
     async remove(taskId: string, dependsOnId: string, opts: WriteOptions = {}): Promise<void> {
-      await runTransaction(client.db, async ({ db, emit }) => {
+      await client.transaction(async ({ db, emit }) => {
         await lockGraph(db, projectId);
         const task = await loadTask(db, projectId, taskId, true);
         await as.check('deps.remove', task.state, db);
@@ -70,7 +69,7 @@ export function linksApi(as: ActorHandle) {
     /** A non-blocking reference from a to b, such as discovered-from or related. */
     async add(a: string, b: string, kind: string, opts: WriteOptions = {}): Promise<void> {
       if (!kind) throw new InvalidRequest('a link needs a kind');
-      await runTransaction(client.db, async ({ db, emit }) => {
+      await client.transaction(async ({ db, emit }) => {
         const from = await loadTask(db, projectId, a, true);
         await loadTask(db, projectId, b);
         await as.check('links.add', from.state, db);
@@ -95,7 +94,7 @@ export function notesApi(as: ActorHandle) {
     /** A note on a task, kept as a `note` event in its history. */
     async add(taskId: string, text: string, opts: WriteOptions = {}): Promise<void> {
       if (!text) throw new InvalidRequest('a note needs text');
-      await runTransaction(client.db, async ({ db, emit }) => {
+      await client.transaction(async ({ db, emit }) => {
         const task = await loadTask(db, projectId, taskId, true);
         await as.check('notes.add', task.state, db);
         emit({

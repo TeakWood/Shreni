@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { sql } from 'kysely';
+import { testDefinitionSql } from './test/lifecycle';
 import { createTestDb, PGLITE_TIMEOUT, type TestDb } from './test/pglite';
 import { migrate, pendingMigrations, requireMigration, setWriterVersion, ENGINE_VERSION } from './migrate';
 import { MIGRATIONS, type EngineMigration } from './migrations';
@@ -83,7 +84,7 @@ describe('migrate', { timeout: PGLITE_TIMEOUT }, () => {
     const t = await openDb();
     await migrate(t.db);
     await t.pglite.exec(`
-      insert into taskgraph.lifecycles (name, version, definition, hash) values ('l', 1, '{}', 'h');
+      insert into taskgraph.lifecycles (name, version, definition, hash) values ('l', 1, ${testDefinitionSql()}, 'h');
       insert into taskgraph.projects (id, name, id_prefix, lifecycle_name, lifecycle_version)
         values ('00000000-0000-0000-0000-000000000001', 'web', 'web', 'l', 1);
     `);
@@ -142,7 +143,7 @@ describe('schema_meta across migrations', { timeout: PGLITE_TIMEOUT }, () => {
     const boom = fake(2, 'boom', { up: async () => { throw new Error('boom'); } });
     await expect(migrate(t.db, [core, boom])).rejects.toThrow('boom');
     expect(await rows(t, `select to_regclass('taskgraph.schema_meta')::text as t`)).toEqual([{ t: null }]);
-    expect(await pendingMigrations(t.db)).toEqual(['0001_core']);
+    expect(await pendingMigrations(t.db)).toEqual(MIGRATIONS.map(m => m.name));
   });
 
   it('refuses with SchemaBehind when a newer schema lacks one of this code\'s migrations', async () => {

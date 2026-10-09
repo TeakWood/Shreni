@@ -6,7 +6,8 @@ import { defineLifecycle, registerLifecycle, type Call, type Lifecycle } from '.
 import { checkPermission } from './permissions';
 import { tasksApi } from './tasks';
 import { depsApi, linksApi, notesApi } from './deps';
-import { runTransaction } from './tx';
+import { movesApi } from './moves';
+import { runTransaction, type EngineTx } from './tx';
 import { NotFound, SchemaBehind, VersionMismatch } from './errors';
 import type { Actor } from './types';
 
@@ -35,8 +36,10 @@ export type Project = {
   createdAt: Date;
 };
 
-/** The migration every current call needs. */
+/** The migration every current read needs. */
 const CORE = '0001_core';
+/** Writes also need the backstop triggers in place. */
+const TRIGGERS = '0002_triggers';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // No dot: a child id is its parent's id plus .<n>.
 const ID_PREFIX = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -91,6 +94,11 @@ export class TaskGraphClient {
     if (this.pending.has(migration)) throw new SchemaBehind(migration);
   }
 
+  /** @internal An engine transaction marked with this process's lifecycle version. */
+  transaction<T>(fn: (tx: EngineTx) => Promise<T>): Promise<T> {
+    return runTransaction(this.db, fn, { lifecycle: { name: this.lifecycle.name, version: this.lifecycle.version } });
+  }
+
   /** Applies pending schema migrations; run only when asked. */
   async migrate(): Promise<MigrationReport> {
     const report = await migrate(this.db);
@@ -101,11 +109,11 @@ export class TaskGraphClient {
   readonly projects = {
     /** Creates a project on the lifecycle's registered version. */
     create: async (input: { name: string; idPrefix: string; actor: Actor }): Promise<Project> => {
-      await this.need(CORE);
+      await this.need(TRIGGERS);
       const actor = checkActor(input.actor);
       if (!input.name) throw new TypeError('a project needs a name');
       if (!ID_PREFIX.test(input.idPrefix)) throw new TypeError(`invalid id prefix ${JSON.stringify(input.idPrefix)}`);
-      return runTransaction(this.db, async ({ db, emit }) => {
+      return this.transaction(async ({ db, emit }) => {
         const r = await raw<ProjectRow>`
           insert into taskgraph.projects (name, id_prefix, lifecycle_name, lifecycle_version)
           values (${input.name}, ${input.idPrefix}, ${this.lifecycle.name}, ${this.lifecycle.version})
@@ -162,6 +170,8 @@ export class ActorHandle {
   readonly deps: ReturnType<typeof depsApi>;
   readonly links: ReturnType<typeof linksApi>;
   readonly notes: ReturnType<typeof notesApi>;
+  /** Makes a declared move; throws MoveRefused. */
+  readonly move: ReturnType<typeof movesApi>;
 
   /** @internal Use tg.as(actor). */
   constructor(/** @internal */ readonly project: ProjectHandle, readonly actor: Actor) {
@@ -171,16 +181,16 @@ export class ActorHandle {
     this.deps = depsApi(this);
     this.links = linksApi(this);
     this.notes = notesApi(this);
+    this.move = movesApi(this);
   }
 
   /**
-   * Throws NotPermitted unless this actor's role may make `call` on a task in
-   * `state`, under the project's active lifecycle, which must be this
-   * process's (VersionMismatch otherwise). Pass the transaction the call runs in.
+   * @internal Throws VersionMismatch unless the project's active lifecycle is
+   * this process's. Pass the transaction the call runs in.
    */
-  async check(call: Call, state?: string, db: Kysely<any> = this.project.client.db): Promise<void> {
+  async assertVersion(db: Kysely<any> = this.project.client.db): Promise<void> {
     const { client, id } = this.project;
-    await client.need(CORE);
+    await client.need(TRIGGERS);
     const r = await raw<{ lifecycle_name: string; lifecycle_version: number }>`
       select lifecycle_name, lifecycle_version from taskgraph.projects where id = ${id}`.execute(db);
     const project = r.rows[0];
@@ -191,7 +201,16 @@ export class ActorHandle {
         `project ${id} is on lifecycle ${project.lifecycle_name}@${project.lifecycle_version}; this process runs ${name}@${version}`,
       );
     }
-    checkPermission(client.lifecycle, call, this.actor.role, state);
+  }
+
+  /**
+   * Throws NotPermitted unless this actor's role may make `call` on a task in
+   * `state`, under the project's active lifecycle, which must be this
+   * process's (VersionMismatch otherwise). Pass the transaction the call runs in.
+   */
+  async check(call: Call, state?: string, db: Kysely<any> = this.project.client.db): Promise<void> {
+    await this.assertVersion(db);
+    checkPermission(this.project.client.lifecycle, call, this.actor.role, state);
   }
 }
 

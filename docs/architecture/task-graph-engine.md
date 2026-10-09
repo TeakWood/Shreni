@@ -435,7 +435,7 @@ These hold no matter how many workers run or what order their calls arrive in. E
 | --- | --- | --- |
 | No edge or parent crosses projects | Database | Composite foreign keys on `(project_id, id)` |
 | No dependency cycles | Transaction | A per-project advisory lock, then a reachability check before inserting the edge |
-| Only declared moves happen | Transaction, then a trigger | `UPDATE … SET state = $to WHERE state = ANY($from) RETURNING`; zero rows means the move is refused, which also catches races. A trigger on the engine's tables refuses an undeclared change from any client |
+| Only declared moves happen | Transaction, then a trigger | `UPDATE … SET state = $to WHERE state = ANY($from) RETURNING`; zero rows means the move is refused, which also catches races. A trigger on the engine's tables refuses an undeclared change from any client, and the delete of a task that has left `create.state` outside a purge |
 | New tasks start where the lifecycle says | Transaction, then a trigger | `tasks.create` takes the state from the create rules, never the caller; the trigger refuses an insert in any other state outside an import |
 | Only processes that may write, write | Trigger | Each write sets its engine and lifecycle versions with `set local`; the trigger refuses a lifecycle mismatch, or an engine older than the schema's `min_writer`, with `VersionMismatch` |
 | Only ready work is claimed | Claim query | Claimable state, kind `work`, every dependency in a dependency-satisfying state, every container above it in the claimable state, not held, not leased |
@@ -550,7 +550,7 @@ Errors are typed and carry stable codes:
 - `CycleError`; `NotFound`; `ValidationError`, with every finding.
 - `InvalidRequest`: a call's input is malformed, or an edit the rules forbid: a kind change on a task with children or attempts, a delete past `create.state`, with attempts or with children, a reparent into the task's own subtree, or a task joining a plan that is approved or discarded.
 - `NotPermitted`: the actor's role may not make a call that isn't a move, or not with the task in its current state. A refused move is `MoveRefused` with reason `NotPermitted`.
-- `MoveRefused`, with the task's current state and a reason: the guard's, `NotPermitted`, `ChildrenLive`, or `DependentsLive` with the waiting tasks.
+- `MoveRefused`, with the task's current state and a reason: the guard's, `NotPermitted`, `WrongState` (the move can't start from the task's state), `ChildrenLive`, or `DependentsLive` with the waiting tasks. The `onClaim` move is made only by `claim`; passing it to `move` is an `InvalidRequest`, as is a move the lifecycle doesn't declare.
 - `LeaseLost`, and `LeaseHeld`, which names the holder.
 - `VersionMismatch`: this process is older than the schema's `min_writer`, or isn't on the project's lifecycle version. `SchemaBehind`: a migration this call needs hasn't run.
 - `Unavailable`: the database can't be reached, or a transaction gave up after its retries. It is safe to retry with the same request id.
@@ -719,7 +719,7 @@ Heartbeats update the task row but write no event; they would swamp the log.
 
 Three calls work on a whole project: bringing data in, taking a copy out, and removing it.
 
-- **`projects.import(bundle)`** creates a project and loads it in one transaction: tasks with their own ids, states, timestamps, boost and hold; dependencies, through the cycle check; links; and past events with their original `at`, such as notes and close reasons. Every task gets origin `imported`. It bypasses the create rules and moves, since the trigger allows any declared state while importing, and sets each parent's `next_child` past its highest imported child. An optional callback runs inside the same transaction, so the caller can write its own rows with it, as Shreni does for memories. It takes only the engine's own bundle; Shreni's importer turns beads into one first, so the engine never learns the beads format.
+- **`projects.import(bundle)`** creates a project and loads it in one transaction: tasks with their own ids, states, timestamps, boost and hold; dependencies, through the cycle check; links; and past events with their original `at`, such as notes and close reasons. Every task gets origin `imported`. It bypasses the create rules and moves, since the trigger allows an insert in any declared state while importing (never a state change), and sets each parent's `next_child` past its highest imported child. An optional callback runs inside the same transaction, so the caller can write its own rows with it, as Shreni does for memories. It takes only the engine's own bundle; Shreni's importer turns beads into one first, so the engine never learns the beads format.
 - **`projects.export(id)`** returns the same bundle for one project, every row and event, so a project can be snapshotted, moved to another database, or restored with purge and import.
 - **`projects.purge(id)`** deletes every row of a project, events included, in one transaction, after the caller types the project's name back. It is the only way past the events trigger: it sets a session flag naming the project, and the trigger then allows deletes of that project's rows only. Its record goes to `purges`, since the project's own events go with it.
 

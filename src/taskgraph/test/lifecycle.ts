@@ -1,4 +1,4 @@
-import { defineGuard, type Lifecycle } from '../lifecycle';
+import { defineGuard, serializeLifecycle, type Lifecycle } from '../lifecycle';
 
 // A lifecycle shaped like Shreni's (policy spec, "The lifecycle"), for engine
 // tests. Each call returns a fresh copy, so a test can change it freely. The
@@ -56,4 +56,9 @@ export function testLifecycle(): Lifecycle {
       onRepeatedExpiry: { after: 3, move: 'flag' },
     },
   };
+}
+
+/** The test lifecycle's stored definition as a SQL string literal, for raw fixture inserts. */
+export function testDefinitionSql(): string {
+  return `'${JSON.stringify(serializeLifecycle(testLifecycle())).replace(/'/g, "''")}'`;
 }

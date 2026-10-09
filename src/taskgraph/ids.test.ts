@@ -1,5 +1,6 @@
 import { describe, it, expect, onTestFinished } from 'vitest';
 import { sql } from 'kysely';
+import { testDefinitionSql } from './test/lifecycle';
 import { createMigratedTestDb, PGLITE_TIMEOUT, type TestDb } from './test/pglite';
 import { newTaskId, newPlanId, nextChildId } from './ids';
 
@@ -12,7 +13,7 @@ async function openDb(): Promise<TestDb> {
   const t = await createMigratedTestDb();
   onTestFinished(() => t.close());
   await t.pglite.exec(`
-    insert into taskgraph.lifecycles (name, version, definition, hash) values ('l', 1, '{}', 'h');
+    insert into taskgraph.lifecycles (name, version, definition, hash) values ('l', 1, ${testDefinitionSql()}, 'h');
     insert into taskgraph.projects (id, name, id_prefix, lifecycle_name, lifecycle_version) values ('${P}', 'web', 'web', 'l', 1);
   `);
   return t;

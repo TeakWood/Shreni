@@ -1,5 +1,6 @@
 import type { Kysely } from 'kysely';
 import { migration as core } from './0001_core';
+import { migration as triggers } from './0002_triggers';
 
 // The engine's schema migrations (engine spec, "Schema migrations"). The list is
 // static: the single-file binary bundles every module, so there is no folder for
@@ -19,4 +20,4 @@ export interface EngineMigration {
   up(db: Kysely<any>): Promise<void>;
 }
 
-export const MIGRATIONS: readonly EngineMigration[] = [core];
+export const MIGRATIONS: readonly EngineMigration[] = [core, triggers];

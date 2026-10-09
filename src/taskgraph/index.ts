@@ -13,4 +13,5 @@ export type { Lifecycle, Move, Guard, GuardFn, StateFlags, Call } from './lifecy
 export type { MigrationReport } from './migrate';
 export type { Actor, Task } from './types';
 export type { NewTask, TaskPatch, WriteOptions } from './tasks';
+export type { MoveOptions } from './moves';
 export * from './errors';

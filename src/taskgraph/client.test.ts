@@ -4,6 +4,7 @@ import { testLifecycle } from './test/lifecycle';
 import { openTaskGraph, type TaskGraphClient } from './client';
 import { LifecycleInvalid, NotFound, NotPermitted, SchemaBehind, VersionMismatch } from './errors';
 import { lifecycleHash } from './lifecycle';
+import { MIGRATIONS } from './migrations';
 
 const ann = { id: 'ann', role: 'developer' };
 
@@ -22,7 +23,7 @@ describe('openTaskGraph', { timeout: PGLITE_TIMEOUT }, () => {
     expect(err.migration).toBe('0001_core');
 
     const report = await client.migrate();
-    expect(report.applied).toEqual(['0001_core']);
+    expect(report.applied).toEqual(MIGRATIONS.map(m => m.name));
     expect(await client.projects.list()).toEqual([]);
   });
 
