@@ -9,6 +9,7 @@ import { once as onceFor, type PriorWrite } from './requests';
 import { depsApi, linksApi, notesApi } from './deps';
 import { movesApi, type MoveOptions } from './moves';
 import { readsApi } from './reads';
+import { Session, type Release } from './session';
 import { activateApi, diffApi } from './upgrade';
 import { claimApi, expireLeasesApi, leasedApi } from './claims';
 import { exportProject, importProject, purgeProject, type ImportCallback, type ImportReport, type ProjectBundle, type PurgeReport } from './bundle';
@@ -26,8 +27,17 @@ import type { Actor, Task } from './types';
 export interface OpenTaskGraphOptions {
   /** The caller's postgres.js instance. Give this or `db`. */
   sql?: postgres.Sql;
-  /** A Kysely instance instead, as tests do over PGlite. */
+  /**
+   * A Kysely instance instead, as tests do over PGlite. Session locks then run
+   * on it, so it must be a single session, as PGlite is; not a pool.
+   */
   db?: Kysely<any>;
+  /**
+   * A postgres.js instance on a direct connection (not through a pooler),
+   * with max: 1 and max_lifetime: null, for session locks and LISTEN. Needed
+   * for tg.locks with `sql`. The caller owns it and ends it.
+   */
+  session?: postgres.Sql;
   lifecycle: Lifecycle;
 }
 
@@ -80,6 +90,8 @@ export class TaskGraphClient {
     /** @internal */ readonly db: Kysely<any>,
     readonly lifecycle: Lifecycle,
     private readonly ownsDb: boolean,
+    /** @internal The session connection, for session locks (and LISTEN). */
+    readonly session: Session = new Session(db),
   ) {}
 
   /** @internal Reads which migrations have run, and registers the lifecycle once the schema has it. */
@@ -181,6 +193,7 @@ export class TaskGraphClient {
 
   /** Releases the client. A postgres.js instance passed in stays open; its owner ends it. */
   async close(): Promise<void> {
+    await this.session.close();
     if (this.ownsDb) await this.db.destroy();
   }
 }
@@ -193,6 +206,14 @@ export class ProjectHandle {
   /** Ready work, in claim order: what a claim would pick next. */
   readonly ready: ReadsApi['ready'];
   readonly lifecycles: ReturnType<typeof diffApi>;
+  readonly locks: {
+    /**
+     * A session advisory lock named for this project, on the client's session
+     * connection: a release function, or null at once if another session holds
+     * it. Held until released, or until the client or its connection closes.
+     */
+    trySession(name: string): Promise<Release | null>;
+  };
   /** The lease sweep on its own, as system; claim runs it first. Returns how many leases it returned. */
   readonly expireLeases: ReturnType<typeof expireLeasesApi>;
 
@@ -206,6 +227,7 @@ export class ProjectHandle {
     this.events = reads.events;
     this.ready = reads.ready;
     this.lifecycles = diffApi(this);
+    this.locks = { trySession: name => client.session.trySession(id, name) };
     this.expireLeases = expireLeasesApi(client, id);
   }
 
@@ -329,7 +351,7 @@ export async function openTaskGraph(options: OpenTaskGraphOptions): Promise<Task
   const lifecycle = defineLifecycle(options.lifecycle);
   const owns = !options.db;
   const db = options.db ?? new Kysely<any>({ dialect: new PostgresJsDialect({ sql: options.sql! }) });
-  const client = new TaskGraphClient(db, lifecycle, owns);
+  const client = new TaskGraphClient(db, lifecycle, owns, new Session(db, options.session, !!options.sql));
   try {
     await client.refresh();
   } catch (err) {

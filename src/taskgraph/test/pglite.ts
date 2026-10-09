@@ -62,6 +62,8 @@ export async function createMigratedTestDb<DB = any>(): Promise<TestDb<DB>> {
 export interface WireDb {
   pglite: PGlite;
   sql: postgres.Sql;
+  /** Another postgres.js instance on the same server; closed with it. */
+  connect(options?: postgres.Options<{}>): postgres.Sql;
   close(): Promise<void>;
 }
 
@@ -70,17 +72,24 @@ export interface WireDb {
  * to drive the engine through the driver it uses in production. PGlite serves
  * one connection, so the client's pool holds one.
  */
-export async function createWireTestDb(): Promise<WireDb> {
+export async function createWireTestDb(connections = 1): Promise<WireDb> {
   const pglite = await PGlite.create();
-  const server = new PGLiteSocketServer({ db: pglite, host: '127.0.0.1', port: 0 });
+  const server = new PGLiteSocketServer({ db: pglite, host: '127.0.0.1', port: 0, maxConnections: connections });
   await server.start();
   const conn = server.getServerConn();
   const port = Number(conn.slice(conn.lastIndexOf(':') + 1));
-  const sql = postgres({ host: '127.0.0.1', port, max: 1, onnotice: () => {} });
+  const sql = postgres({ host: '127.0.0.1', port, max: connections, onnotice: () => {} });
+  const others: postgres.Sql[] = [];
   return {
     pglite,
     sql,
+    connect(options = {}) {
+      const s = postgres({ host: '127.0.0.1', port, onnotice: () => {}, ...options });
+      others.push(s);
+      return s;
+    },
     async close() {
+      for (const s of others) await s.end({ timeout: 1 });
       await sql.end({ timeout: 1 });
       await server.stop();
       if (!pglite.closed) await pglite.close();

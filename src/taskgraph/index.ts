@@ -16,6 +16,7 @@ export type { NewTask, TaskPatch, WriteOptions } from './tasks';
 export type { MoveOptions } from './moves';
 export type { LifecycleDiff } from './upgrade';
 export type { Claim, ClaimOptions } from './claims';
+export type { Release } from './session';
 export { BUNDLE_FORMAT } from './bundle';
 export type { ProjectBundle, BundleTask, BundlePlan, BundleEvent, ImportReport, ImportCallback, PurgeReport } from './bundle';
 export * from './errors';

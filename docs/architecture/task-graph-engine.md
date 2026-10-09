@@ -520,7 +520,7 @@ as.claims.resume(taskId): Promise<Claim>          // the live attempt, if this a
 as.heartbeat(claim, { leaseMs }): Promise<Claim>  // throws LeaseLost
 as.moveClaimed(claim, move, { reason?, payload? }): Promise<Task>   // fenced by claim.attemptId
 tg.expireLeases(): Promise<number>                // the sweep claim runs first; callable on its own
-tg.locks.trySession(name): Promise<Release | null>   // a session advisory lock on the client's session connection
+tg.locks.trySession(name): Promise<Release | null>   // a session advisory lock on the client's session connection; release.held() checks it
 
 // Reads
 tg.tasks.get(id)                                  // with its deps and their states, and its live claim, marked expired once lapsed
@@ -713,7 +713,7 @@ Heartbeats update the task row but write no event; they would swamp the log.
 
 **Commit order.** Identity ids are assigned at insert, not at commit, so a reader could see id 42 commit before 41 and move its cursor past 41. The engine prevents that at the source: each transaction writes its events last, under a per-project advisory lock held until it commits, so a project's event ids commit in order and `events.since(cursor)` needs no trailing window. The lock covers only the last milliseconds of a write, and is always the last lock taken.
 
-**Connections.** `LISTEN` needs a session-level connection. Poolers in transaction mode (PgBouncer, and hosted poolers run that way) don't support it, so the client holds one direct session connection, for the listener and for session locks, while queries use the pool.
+**Connections.** `LISTEN` needs a session-level connection. Poolers in transaction mode (PgBouncer, and hosted poolers run that way) don't support it, so the client holds one direct session connection, for the listener and for session locks, while queries use the pool. The caller passes it as `session`: a postgres.js instance on a direct connection with `max: 1`, `max_lifetime: null` and no `idle_timeout`, so it stays one session; the client refuses one that isn't. A statement stuck on a half-open connection is left to postgres.js's keep-alive. Every session statement also returns the backend's pid, so a reconnect shows in the very statement that runs on the new backend: the old session's locks went with it, and each `Release`'s `held()` turns false, rather than a worker carrying on as if it still held its lock. A worker that must not run twice checks `held()` before each round of work. Session statements run one at a time; lock keys are 63-bit hashes of the project and the name, and a name is held once per client, so taking it twice in one process gets `null`.
 
 ## Import, export and purge
 
