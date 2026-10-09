@@ -2,9 +2,76 @@
 // `code`, never on the message.
 
 export class TaskGraphError extends Error {
-  constructor(readonly code: string, message: string) {
-    super(message);
+  constructor(readonly code: string, message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = code;
+  }
+}
+
+/** Adding the edge would close a cycle: dependsOnId already waits, directly or not, on taskId. */
+export class CycleError extends TaskGraphError {
+  constructor(readonly taskId: string, readonly dependsOnId: string) {
+    super('CycleError', `${taskId} can't depend on ${dependsOnId}: ${dependsOnId} already depends on ${taskId}`);
+  }
+}
+
+export class NotFound extends TaskGraphError {
+  constructor(readonly entity: string, readonly id: string) {
+    super('NotFound', `${entity} ${id} not found`);
+  }
+}
+
+/** One validator's finding (engine spec, "Validation"). */
+export interface Finding {
+  validator: string;
+  severity: 'error' | 'warning';
+  taskId?: string;
+  message: string;
+}
+
+/** Validation refused an approval; carries every finding, warnings included. */
+export class ValidationError extends TaskGraphError {
+  constructor(readonly findings: readonly Finding[]) {
+    const errors = findings.filter(f => f.severity === 'error');
+    const shown = errors.length ? errors : findings;
+    super('ValidationError', `validation failed: ${shown.map(f => f.message).join('; ') || 'no findings'}`);
+  }
+}
+
+/**
+ * A move was refused. `reason` is the guard's string, or one of NotPermitted,
+ * ChildrenLive or DependentsLive; DependentsLive also names the waiting tasks.
+ */
+export class MoveRefused extends TaskGraphError {
+  constructor(
+    readonly taskId: string,
+    readonly state: string,
+    readonly reason: string,
+    readonly waiting: readonly string[] = [],
+  ) {
+    const who = waiting.length ? ` (waiting: ${waiting.join(', ')})` : '';
+    super('MoveRefused', `move refused on ${taskId} in ${state}: ${reason}${who}`);
+  }
+}
+
+/** The attempt no longer holds the lease; the worker must abandon it. */
+export class LeaseLost extends TaskGraphError {
+  constructor(readonly taskId: string, readonly attemptId: string) {
+    super('LeaseLost', `attempt ${attemptId} no longer holds ${taskId}`);
+  }
+}
+
+/** Someone else holds the task's lease. */
+export class LeaseHeld extends TaskGraphError {
+  constructor(readonly taskId: string, readonly holder: string) {
+    super('LeaseHeld', `${taskId} is held by ${holder}`);
+  }
+}
+
+/** This process is older than the schema's min_writer, or not on the project's lifecycle version. */
+export class VersionMismatch extends TaskGraphError {
+  constructor(message: string) {
+    super('VersionMismatch', message);
   }
 }
 
@@ -12,5 +79,15 @@ export class TaskGraphError extends Error {
 export class SchemaBehind extends TaskGraphError {
   constructor(readonly migration: string) {
     super('SchemaBehind', `the database schema is behind: migration ${migration} has not run (run migrate)`);
+  }
+}
+
+/**
+ * The database can't be reached, or a transaction gave up after its retries.
+ * Safe to retry with the same request id.
+ */
+export class Unavailable extends TaskGraphError {
+  constructor(message: string, cause?: unknown) {
+    super('Unavailable', message, cause === undefined ? undefined : { cause });
   }
 }

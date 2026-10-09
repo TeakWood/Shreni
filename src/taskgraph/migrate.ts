@@ -2,6 +2,7 @@ import { sql, type Kysely } from 'kysely';
 import { Migrator, type Migration } from 'kysely/migration';
 import { MIGRATIONS, type EngineMigration } from './migrations';
 import { SchemaBehind } from './errors';
+import { LOCK_NAMESPACE } from './locks';
 
 // Schema migrations (engine spec, "Schema migrations"). They run only when the
 // caller asks, all pending ones in one transaction under Kysely's migration
@@ -9,6 +10,9 @@ import { SchemaBehind } from './errors';
 
 /** This process's engine version: the newest migration its code carries. */
 export const ENGINE_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
+
+/** The setting every write sets to ENGINE_VERSION, for the backstop trigger. */
+export const WRITER_VERSION_SETTING = 'taskgraph.engine_version';
 
 const SCHEMA = 'taskgraph';
 const TABLE = 'kysely_migration';
@@ -28,7 +32,7 @@ export interface MigrationReport {
  * transaction calls it first; it lasts until the transaction ends.
  */
 export async function setWriterVersion(tx: Kysely<any>): Promise<void> {
-  await sql`select set_config('taskgraph.engine_version', ${String(ENGINE_VERSION)}, true)`.execute(tx);
+  await sql`select set_config(${WRITER_VERSION_SETTING}, ${String(ENGINE_VERSION)}, true)`.execute(tx);
 }
 
 /**
@@ -46,7 +50,7 @@ export async function migrate(
   migrations: readonly EngineMigration[] = MIGRATIONS,
 ): Promise<MigrationReport> {
   return db.transaction().execute(async trx => {
-    await sql`select pg_advisory_xact_lock(hashtext('taskgraph:migrate'))`.execute(trx);
+    await sql`select pg_advisory_xact_lock(${LOCK_NAMESPACE.migrate}, 0)`.execute(trx);
 
     // A schema migrated by a newer engine carries names this code doesn't know.
     // Kysely would call that corrupt; it is the expected state for an older
