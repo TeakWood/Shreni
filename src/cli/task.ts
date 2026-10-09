@@ -5,6 +5,7 @@ import { sql } from 'kysely';
 import type { CommandContext } from './registry';
 import type { ActorHandle, ProjectHandle, Task } from '../taskgraph';
 import { loadKshetraConfig } from '../kshetra/config';
+import { loadRegistry } from '../kshetra/registry';
 import { loadTrackerConfig, type ProjectConfig } from '../kshetra/project-config';
 import { loadUserConfig } from '../kshetra/user-config';
 import { openKshetraEngine, type KshetraEngine } from '../policy/sthapathi/connect';
@@ -58,6 +59,8 @@ const LIVE = ['proposed', 'open', 'claimed', 'waiting', 'blocked', 'parked'];
 export interface TaskDeps {
   /** Where the project is looked for, walking up. */
   cwd: string;
+  /** SHRENI_KSHETRA, set in a planning session, names the project instead. */
+  env: NodeJS.ProcessEnv;
   open(config: ProjectConfig): Promise<KshetraEngine>;
   /** The developer the calls act as: `user` in ~/.shreni/config.yaml, else git's user.email. */
   user(): string | undefined;
@@ -72,6 +75,7 @@ export interface TaskDeps {
 
 const defaultDeps = (): TaskDeps => ({
   cwd: process.cwd(),
+  env: process.env,
   open: config => openKshetraEngine(config, { name: 'shreni-task' }),
   user: () => loadUserConfig().user,
   print: line => console.log(line),
@@ -113,6 +117,20 @@ export function findProjectConfig(cwd: string): {
   }
 }
 
+/**
+ * The project a command works on: the Kshetra a planning session was launched
+ * for (SHRENI_KSHETRA, since its worktree may not carry the config), else the
+ * repo's own config found from `cwd`.
+ */
+export function resolveProject(cwd: string, env: NodeJS.ProcessEnv): ReturnType<typeof findProjectConfig> {
+  const id = env.SHRENI_KSHETRA;
+  if (!id) return findProjectConfig(cwd);
+  const k = loadRegistry().find(x => x.id === id);
+  if (!k) throw new Error(`SHRENI_KSHETRA names Kshetra ${id}, which isn't registered`);
+  if (!k.project) throw new Error(`Kshetra ${id} isn't on the task graph engine`);
+  return { kind: 'kshetra', path: `registry:${id}`, config: k as ProjectConfig & { project: string }, kshetraId: k.id };
+}
+
 /** One acceptance check from "given … when … then …". */
 export function parseCheck(text: string): { given: string; when: string; then: string } {
   const m = /^\s*given\b:?(.*?)\bwhen\b:?(.*?)\bthen\b:?(.*)$/is.exec(text);
@@ -127,7 +145,7 @@ export function parseCheck(text: string): { given: string; when: string; then: s
 
 /** A subcommand's arguments, read strictly: an unknown flag, a missing value or a stray word is refused. */
 export function parseArgs(
-  args: string[], spec: { valued?: string[]; repeated?: string[]; bool?: string[]; positionals?: number | 'rest' },
+  args: string[], spec: { valued?: string[]; repeated?: string[]; bool?: string[]; positionals?: number | 'rest'; command?: string },
 ): { values: Record<string, string>; repeated: Record<string, string[]>; bools: Set<string>; positionals: string[] } {
   const valued = new Set([...(spec.valued ?? []), ...(spec.repeated ?? [])]);
   const bool = new Set([...(spec.bool ?? []), '--json']);
@@ -137,7 +155,7 @@ export function parseArgs(
     if (a.startsWith('--')) {
       if (a.includes('=')) throw new Error(`write ${a.slice(0, a.indexOf('='))} <value>, not ${a}`);
       if (bool.has(a)) { out.bools.add(a); continue; }
-      if (!valued.has(a)) throw new Error(`shreni task ${args[0]} takes no ${a}`);
+      if (!valued.has(a)) throw new Error(`${spec.command ?? `shreni task ${args[0]}`} takes no ${a}`);
       const v = args[++i];
       if (v === undefined || v.startsWith('--')) throw new Error(`${a} needs a value`);
       if (spec.repeated?.includes(a)) (out.repeated[a] ??= []).push(v);
@@ -178,7 +196,7 @@ export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> 
   if (TERMINAL_ONLY.has(sub) && !deps.interactive()) {
     throw new Error(`shreni task ${sub} is the developer's, and needs an interactive terminal`);
   }
-  const found = findProjectConfig(deps.cwd);
+  const found = resolveProject(deps.cwd, deps.env);
   const { config } = found;
   const user = deps.user();
   if (!user) throw new Error('no developer to act as: set user in ~/.shreni/config.yaml, or git config user.email');

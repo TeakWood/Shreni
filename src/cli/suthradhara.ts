@@ -10,7 +10,7 @@ import {
   type LaunchResult,
   type StartOpts,
 } from '../suthradhara/lifecycle';
-import { listSessions } from '../suthradhara/persistence';
+import { listSessions, loadSession } from '../suthradhara/persistence';
 import { readHandoff, type Handoff } from '../suthradhara/handoff';
 import { emit as emitActivity, type ActivityEvent } from '../sthapathi/activity-log';
 import { timed } from '../sthapathi/timing';
@@ -18,6 +18,45 @@ import { getUsageMeter, getPolicySource, costFor, type UsageMeter, type PolicySo
 import { readSessionUsage, type SessionUsage } from '../suthradhara/usage';
 import { resolveAgentModel, type KshetraConfig } from '../kshetra/config';
 import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
+import { loadUserConfig } from '../kshetra/user-config';
+import { openKshetraEngine } from '../policy/sthapathi/connect';
+import { planStore, renderPlan, type PlanStore } from '../policy/suthradhara/filing';
+
+// On the task graph engine (policy spec, "Approval: humans only") Shreni's own
+// process creates each session's plan before launch, and when the session ends
+// it shows the plan and asks the developer to approve, revise, discard or
+// decide later. Approval is that keystroke, never a tool call by the agent.
+
+/** The plan store for a Kshetra on the engine, acting as the developer. */
+export function defaultPlanStore(kshetra: KshetraConfig): PlanStore {
+  const user = loadUserConfig().user;
+  if (!user) throw new Error('no developer to act as: set user in ~/.shreni/config.yaml, or git config user.email');
+  return planStore(kshetra.project!, user, () => openKshetraEngine(kshetra, { name: 'shreni-suthradhara' }));
+}
+
+/** Discards a plan left unused, so it isn't offered for approval; a failure is only logged. */
+async function dropPlan(plans: PlanStore, planId: string, log: (m: string) => void): Promise<void> {
+  try {
+    await plans.dropIfEmpty(planId);
+  } catch (err) {
+    log(`suthradhara: could not discard the unused plan ${planId} (${(err as Error).message})`);
+  }
+}
+
+/**
+ * The plan a resumed session files into: its own while still open, else a new
+ * one, so a session from before the engine, or one whose plan was decided
+ * meanwhile, still has somewhere to file.
+ */
+export async function planForResume(plans: PlanStore, kshetra: KshetraConfig, current: string | undefined): Promise<string> {
+  if (current && await plans.isOpen(current)) return current;
+  return newPlan(plans, kshetra);
+}
+
+/** A new plan for a planning session to file into. */
+export function newPlan(plans: PlanStore, kshetra: KshetraConfig): Promise<string> {
+  return plans.create(`Planning session, ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, { kshetra: kshetra.id });
+}
 
 // Resolve the target Kshetra for a Suthradhara subcommand. Precedence:
 //   1. @<id> as a bare positional token (at-mention)
@@ -121,11 +160,21 @@ export async function runSuthradhara(sub: string | undefined, opts: RunOpts): Pr
     // from origin/<mainBranch>. Skip when a session is already running — no
     // launch, no cut (mirrors gateFirstLaunch's already-running short-circuit).
     if (!statusSession(kshetra.id).running && !(await ensureBaseBranchForLaunch(kshetra))) return;
-    const result = await startSession(kshetra);
+    const plans = kshetra.project ? defaultPlanStore(kshetra) : undefined;
+    // The plan exists before the session does; none is made for a launch that won't happen.
+    const planId = plans && !statusSession(kshetra.id).running ? await newPlan(plans, kshetra) : undefined;
+    let result: Awaited<ReturnType<typeof startSession>>;
+    try {
+      result = planId ? await startSession(kshetra, { planId }) : await startSession(kshetra);
+    } catch (err) {
+      if (planId && plans) await dropPlan(plans, planId, m => console.log(m));
+      throw err;
+    }
+    if (result.status === 'already_running' && planId && plans) await dropPlan(plans, planId, m => console.log(m));
     if (result.status === 'already_running') {
       console.log(`suthradhara[${result.kshetraId}]: already running (pid ${result.pid})`);
     } else {
-      await runPlanningLoop(kshetra, result);
+      await runPlanningLoop(kshetra, result, plans ? { plans } : {});
     }
   } else if (sub === 'stop') {
     const result = await stopSession(kshetra);
@@ -170,13 +219,18 @@ async function runResume(opts: RunOpts, kshetras: KshetraConfig[]): Promise<void
   // from origin/<mainBranch>. Skip when already running (no relaunch, no cut).
   if (!statusSession(kshetra.id).running && !(await ensureBaseBranchForLaunch(kshetra))) return;
 
-  const result = await resumeSession(kshetra, sessionId);
+  // On the engine: the session's plan if still open, else a new one, settled before any worktree is cut.
+  const plans = kshetra.project ? defaultPlanStore(kshetra) : undefined;
+  // A missing record is resumeSession's to report, with its own message.
+  const recorded = (() => { try { return loadSession(sessionId).planId; } catch { return undefined; } })();
+  const planId = plans ? await planForResume(plans, kshetra, recorded) : undefined;
+  const result = planId ? await resumeSession(kshetra, sessionId, { planId }) : await resumeSession(kshetra, sessionId);
   if (result.status === 'already_running') {
     console.log(
       `suthradhara[${result.kshetraId}]: already running (pid ${result.pid}); resume is a no-op`,
     );
   } else {
-    await runPlanningLoop(kshetra, result, {}, /* firstResume */ true);
+    await runPlanningLoop(kshetra, result, plans ? { plans } : {}, /* firstResume */ true);
   }
 }
 
@@ -212,6 +266,87 @@ export interface PlanningLoopDeps {
   // Base-branch preflight seam (uvu.6). Defaults to ensureBaseBranchForLaunch
   // wired to this loop's ask/log; injected so tests drive the missing-base path.
   ensureBaseBranch?: (kshetra: KshetraConfig) => Promise<boolean>;
+  // On the task graph engine: the plans the sessions file into, and the menu's approve and discard.
+  plans?: PlanStore;
+}
+
+export type PlanDecision = 'approve' | 'revise' | 'discard' | 'later';
+
+export function parsePlanDecision(raw: string): PlanDecision | null {
+  const s = raw.trim().toLowerCase();
+  if (s === 'a' || s === 'approve') return 'approve';
+  if (s === 'r' || s === 'revise') return 'revise';
+  if (s === 'd' || s === 'discard') return 'discard';
+  if (s === 'l' || s === 'later' || s === 'decide later') return 'later';
+  return null;
+}
+
+/** What became of a session's plan: decided, left open, or to be revised. */
+type PlanOutcome = 'approved' | 'discarded' | 'later' | 'empty' | 'revise';
+
+/**
+ * Shows the plan, its checks and the validators' findings, and asks the
+ * developer what to do with it. A refused approval or discard says why and
+ * asks again, so the developer can revise instead.
+ */
+async function decidePlan(
+  kshetra: KshetraConfig, sessionId: string, planId: string, plans: PlanStore,
+  io: { ask: (q: string) => Promise<string>; log: (m: string) => void; emit: (ev: ActivityEvent) => void },
+): Promise<PlanOutcome> {
+  for (;;) {
+    let summary: Awaited<ReturnType<PlanStore['summary']>>;
+    try {
+      summary = await plans.summary(planId);
+    } catch (err) {
+      // The plan stays as it is in the database, for shreni task approve once it can be read.
+      io.log(`suthradhara[${kshetra.id}]: could not read plan ${planId} (${(err as Error).message}); approve it later with shreni task approve ${planId}.`);
+      return 'later';
+    }
+    if (!summary.open) return summary.plan.approvedAt ? 'approved' : 'discarded';
+    if (!summary.tasks.length) {
+      io.log(`  (the session filed nothing into plan ${planId})`);
+      return 'empty';
+    }
+    io.log('');
+    for (const line of renderPlan(summary)) io.log(line);
+    const decision = parsePlanDecision(
+      await io.ask('\nThe plan:  [a] approve   [r] revise   [d] discard   [l] decide later\n> '));
+    if (!decision) {
+      io.log('Please answer a, r, d or l.');
+      continue;
+    }
+    // Recorded once it has happened, so a refused approval isn't audited as one.
+    const decided = () => io.emit({ type: 'suthradhara_plan_decision', kshetra: kshetra.id, sessionId, planId, decision });
+    try {
+      if (decision === 'approve') {
+        for (const f of await plans.approve(planId, summary.tasks.map(t => t.task.id))) io.log(`  ${f.severity}: ${f.message}`);
+        decided();
+        io.log(`suthradhara[${kshetra.id}]: approved plan ${planId}; its tasks are open for the worker.`);
+        return 'approved';
+      }
+      if (decision === 'discard') {
+        await plans.discard(planId);
+        decided();
+        io.log(`suthradhara[${kshetra.id}]: discarded plan ${planId}; its tasks are cancelled.`);
+        return 'discarded';
+      }
+    } catch (err) {
+      io.log(`suthradhara[${kshetra.id}]: ${decision === 'approve' ? 'not approved' : 'not discarded'}: ${(err as Error).message}`);
+      continue;
+    }
+    decided();
+    if (decision === 'later') {
+      io.log(`suthradhara[${kshetra.id}]: plan ${planId} left for later; approve it with shreni task approve ${planId}.`);
+      return 'later';
+    }
+    return 'revise';
+  }
+}
+
+/** The first message of a session relaunched to revise its plan. */
+export function reviseKickoff(planId: string): string {
+  return `Revise plan ${planId}. Run \`shreni plan show\` to see what is filed, then ask me what to change. ` +
+    'Change it with shreni plan task update/delete and dep add/remove, run shreni plan validate, and end the session when done.';
 }
 
 export type MenuChoice = 'extend' | 'new' | 'end';
@@ -242,7 +377,7 @@ export function renderSummary(kshetra: KshetraConfig, handoff: Handoff | null): 
   } else {
     lines.push(
       '  (no handoff record found — the session may have exited before completing the push.)',
-      '  Check `bd list` and the worktree branch to see what landed.',
+      `  Check \`${kshetra.project ? 'shreni task list' : 'bd list'}\` and the worktree branch to see what landed.`,
     );
   }
   return lines;
@@ -367,6 +502,7 @@ async function runPlanningLoop(
   const ensureBaseBranch =
     deps.ensureBaseBranch ?? ((k: KshetraConfig) => ensureBaseBranchForLaunch(k, { ask, log }));
   const { provider, model } = resolveAgentModel(kshetra, 'suthradhara');
+  const plans = deps.plans;
   let current = first;
   // The first session may be a resume (`suthradhara resume`); every relaunch the
   // loop drives (extend/new) is a fresh session, so this flips false after one.
@@ -398,6 +534,7 @@ async function runPlanningLoop(
     }
 
     const handoff = readHandoff(current.worktreePath);
+    const planId = current.planId;
     // Gate ① (plan filed) + Gate ② (doc pushed) only fire when the session
     // completed the handoff; a session that exited early emits neither.
     if (handoff) {
@@ -484,6 +621,31 @@ async function runPlanningLoop(
 
     for (const line of renderSummary(kshetra, handoff)) log(line);
 
+    // On the engine: the developer decides on the plan before anything else.
+    let outcome: PlanOutcome | undefined;
+    if (planId && plans) {
+      outcome = await decidePlan(kshetra, current.sessionId, planId, plans, { ask, log, emit });
+      if (outcome === 'revise') {
+        // fnd.7: a revise is another session, so it passes the budget gate too.
+        const gate = mayLaunchSession(kshetra, emit, policy);
+        if (!gate.allowed) {
+          log(`suthradhara[${kshetra.id}]: ${gate.reason} — not relaunching to revise; plan ${planId} stays open for shreni task approve.`);
+          await teardownWorktrees(kshetra);
+          return;
+        }
+        const next = await startSession(kshetra, {
+          ...deps.startOpts, reuseWorktree: current.worktreePath, planId, kickoff: reviseKickoff(planId),
+        });
+        if (next.status === 'already_running') {
+          log(`suthradhara[${kshetra.id}]: another session is already running (pid ${next.pid}); stopping the loop.`);
+          return;
+        }
+        current = next;
+        launchWasResume = false;
+        continue;
+      }
+    }
+
     let choice: MenuChoice | null = null;
     while (choice === null) {
       const answer = await ask('\nWhat next?  [1] extend this topic   [2] new story   [3] end\n> ');
@@ -493,6 +655,7 @@ async function runPlanningLoop(
     emit({ type: 'suthradhara_menu_choice', kshetra: kshetra.id, sessionId: current.sessionId, choice });
 
     if (choice === 'end') {
+      if (planId && plans && outcome === 'empty') await dropPlan(plans, planId, log);
       await teardownWorktrees(kshetra);
       log(`suthradhara[${kshetra.id}]: planning ended.`);
       return;
@@ -517,14 +680,37 @@ async function runPlanningLoop(
       return;
     }
 
+    // An empty plan takes the next session's work, and one left for later takes
+    // its extension; a new story, or a decided plan, gets a new plan, since a
+    // plan is approved or discarded as one unit.
+    const reuse = planId && (outcome === 'empty' || (outcome === 'later' && choice === 'extend'));
+    if (planId && plans && outcome === 'empty' && !reuse) await dropPlan(plans, planId, log);
+    let nextPlan: { planId?: string } = {};
+    if (plans) {
+      try {
+        nextPlan = { planId: reuse ? planId : await newPlan(plans, kshetra) };
+      } catch (err) {
+        log(`suthradhara[${kshetra.id}]: could not create the next plan (${(err as Error).message}); ending planning.`);
+        await teardownWorktrees(kshetra);
+        return;
+      }
+    }
+    const fresh = plans && !reuse ? nextPlan.planId : undefined;
     const startOpts: StartOpts =
       choice === 'extend'
-        ? { ...deps.startOpts, reuseWorktree: current.worktreePath, extendDocRelPath: handoff?.docPath }
-        : { ...deps.startOpts };
+        ? { ...deps.startOpts, ...nextPlan, reuseWorktree: current.worktreePath, extendDocRelPath: handoff?.docPath }
+        : { ...deps.startOpts, ...nextPlan };
     if (choice === 'new') await teardownWorktrees(kshetra);
 
-    const next = await startSession(kshetra, startOpts);
+    let next: Awaited<ReturnType<typeof startSession>>;
+    try {
+      next = await startSession(kshetra, startOpts);
+    } catch (err) {
+      if (fresh && plans) await dropPlan(plans, fresh, log);
+      throw err;
+    }
     if (next.status === 'already_running') {
+      if (fresh && plans) await dropPlan(plans, fresh, log);
       log(`suthradhara[${kshetra.id}]: another session is already running (pid ${next.pid}); stopping the loop.`);
       return;
     }

@@ -26,6 +26,15 @@ describe('foldPlanningSessions', () => {
     });
   });
 
+  it('keeps the plan and the developer\'s decision on it, on the task graph engine', () => {
+    const lines = [
+      line({ type: 'suthradhara_launched', kshetra: 'alpha', sessionId: 's1', ts: 't0' }),
+      line({ type: 'suthradhara_plan_decision', kshetra: 'alpha', sessionId: 's1', planId: 'alpha-plan-ab12', decision: 'later' }),
+    ];
+    const [s] = foldPlanningSessions('alpha', lines);
+    expect(s).toMatchObject({ planId: 'alpha-plan-ab12', planDecision: 'later' });
+  });
+
   it('marks a session still running until session_ended lands', () => {
     const lines = [
       line({ type: 'suthradhara_launched', kshetra: 'alpha', sessionId: 's1', ts: 't0' }),

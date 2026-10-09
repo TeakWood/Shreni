@@ -30,6 +30,9 @@ export interface SessionState {
   // in. Absent only in the brief window before createSessionWorktree returns.
   worktreePath?: string;
   status: SessionStatus;
+  // On the task graph engine: the plan the session files into, created by the
+  // launcher before the session starts (policy spec, "Approval: humans only").
+  planId?: string;
 }
 
 export function newSessionState(

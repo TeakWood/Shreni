@@ -32,6 +32,9 @@ export interface PlanningSessionSnapshot {
   summary?: string;
   // The operator's last menu decision for the unit (extend / new / end).
   choice?: 'extend' | 'new' | 'end';
+  // On the task graph engine: the session's plan and the developer's call on it.
+  planId?: string;
+  planDecision?: 'approve' | 'revise' | 'discard' | 'later';
   // Recovered token usage folded from the session's run_usage event (fnd.6). Zero
   // when no run_usage matched yet (a still-running session hasn't been metered).
   inputTokens: number;
@@ -59,6 +62,8 @@ interface RawEvent {
   branch?: unknown;
   resume?: unknown;
   choice?: unknown;
+  planId?: unknown;
+  decision?: unknown;
   inputTokens?: unknown;
   outputTokens?: unknown;
   costUsd?: unknown;
@@ -152,6 +157,13 @@ export function foldPlanningSessions(kshetraId: string, lines: string[]): Planni
         const s = ensure(sessionId);
         const c = str(ev.choice);
         if (c === 'extend' || c === 'new' || c === 'end') s.choice = c;
+        break;
+      }
+      case 'suthradhara_plan_decision': {
+        const s = ensure(sessionId);
+        s.planId = str(ev.planId) ?? s.planId;
+        const d = str(ev.decision);
+        if (d === 'approve' || d === 'revise' || d === 'discard' || d === 'later') s.planDecision = d;
         break;
       }
       case 'suthradhara_session_ended': {

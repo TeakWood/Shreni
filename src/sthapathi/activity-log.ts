@@ -213,6 +213,8 @@ export type ActivityEvent =
   | { type: 'suthradhara_plan_filed';    kshetra: string; sessionId: string; epicId: string; docPath: string; summary: string }
   | { type: 'suthradhara_doc_pushed';    kshetra: string; sessionId: string; branch: string; docPath: string }
   | { type: 'suthradhara_menu_choice';   kshetra: string; sessionId: string; choice: 'extend' | 'new' | 'end' }
+  // The developer's call on a planning session's plan, on the task graph engine (policy spec, "Approval: humans only").
+  | { type: 'suthradhara_plan_decision'; kshetra: string; sessionId: string; planId: string; decision: 'approve' | 'revise' | 'discard' | 'later' }
   | { type: 'suthradhara_session_ended'; kshetra: string; sessionId: string; epicId?: string };
 
 // Bump when the on-disk event envelope changes shape in a way a consumer must

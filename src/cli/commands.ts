@@ -36,6 +36,7 @@ import { runShow } from './show';
 import { runInit } from './init';
 import { runTelemetry } from './telemetry';
 import { runTask, TASK_USAGE } from './task';
+import { runPlan, PLAN_USAGE } from './plan';
 import { parseLabels } from './labels';
 import { ablationGuardError } from '../kshetra/ablation';
 import { emit as emitTelemetry } from '../telemetry/telemetry';
@@ -385,6 +386,12 @@ export const COMMANDS: Command[] = [
         upgrade: ctx.has('--upgrade'),
       });
     },
+  },
+  {
+    name: 'plan',
+    summary: 'File into a planning session\'s plan (inside a Suthradhara session)',
+    usage: PLAN_USAGE,
+    run: ctx => runPlan(ctx),
   },
   {
     name: 'task',

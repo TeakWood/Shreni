@@ -4,6 +4,7 @@ import type { SpawnSpec } from '../agents/providers/types';
 import { resolveBin } from '../agents/providers/types';
 import { resolveMcpConnection, McpConnectionError } from '../kshetra/mcp-connect';
 import { buildPlanningPrompt } from './prompt';
+import { KSHETRA_ENV, PLAN_ENV } from '../policy/suthradhara/filing';
 
 // Compose the INTERACTIVE `claude` invocation for a launched planning session
 // (epic d3y). Unlike the old per-turn headless spawn (buildClaudeSpawn, removed
@@ -50,12 +51,17 @@ export interface PlanningSessionOpts {
   // When the operator chose "extend this topic", the prior session's design-doc
   // repo-relative path — seeded into the planning prompt (fresh launch only).
   extendDocRelPath?: string;
+  // On the task graph engine: the plan the session files into with `shreni plan`.
+  planId?: string;
 }
 
 // Build the interactive spawn spec. Pure — exported so the runner and tests can
 // assemble the invocation without spawning a process.
 export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
   const { kshetra } = opts;
+  if (kshetra.project && !opts.planId) {
+    throw new SuthradharaSpawnError(`${kshetra.id} is on the task graph engine: a planning session needs the plan it files into`);
+  }
 
   // Connect every defined MCP server (secretEnv resolved into the child env). A
   // secretEnv naming an unset host var fails loud here, before the session
@@ -78,6 +84,7 @@ export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
     args.push('--session-id', opts.claudeSessionId);
     args.push('--append-system-prompt', buildPlanningPrompt(kshetra, {
       extendDocRelPath: opts.extendDocRelPath,
+      planId: opts.planId,
     }));
   }
   args.push('--setting-sources', 'project');
@@ -99,7 +106,17 @@ export function buildPlanningSession(opts: PlanningSessionOpts): SpawnSpec {
     // auto-discovery would fail. Passing the absolute dir makes every `bd` (read
     // and the completion-protocol `bd create`/`bd export`) resolve to the one
     // shared dolt DB regardless of cwd.
-    env: { CLAUDE_CODE_ENTRYPOINT: 'cli', BEADS_DIR: kshetra.beads.path, ...secretEnv },
+    //
+    // On the task graph engine the session gets its plan and Kshetra instead,
+    // and files with `shreni plan` as the planner (policy spec, "Approval:
+    // humans only"); there is nothing to sync.
+    env: {
+      CLAUDE_CODE_ENTRYPOINT: 'cli',
+      ...(kshetra.project && opts.planId
+        ? { [PLAN_ENV]: opts.planId, [KSHETRA_ENV]: kshetra.id }
+        : { BEADS_DIR: kshetra.beads.path }),
+      ...secretEnv,
+    },
   };
 }
 

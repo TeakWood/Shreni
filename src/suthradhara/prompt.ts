@@ -165,23 +165,8 @@ ${sizingRubric(kshetra)}
 Then ask the operator to Approve / Edit / Cancel. Edit reopens the interview; Cancel discards.`;
 }
 
-// The load-bearing addition: the exact steps the session runs ITSELF once the
-// operator approves, grounded in this Kshetra's remotes/paths. Two gates: (1)
-// plan approved → file beads + write doc + sync beads; (2) doc approved → push
-// the doc branch. Then write the handoff and stop.
-function completionProtocol(kshetra: KshetraConfig): string {
-  const beadsRemote = kshetra.beads.remote;
-  const main = kshetra.repo.mainBranch;
-  return `COMPLETION PROTOCOL — you execute this yourself; do it in exactly two gates.
-
-GATE ① — the operator APPROVES THE PLAN. Then, in order:
-  a. File the epic, then each child, with \`bd create\` (set --type, --priority, --description,
-     --acceptance). File the epic with \`--type epic\` explicitly — never feature or task: Sthapathi
-     never works an epic and auto-closes it when its last child closes. Children keep their own type
-     (task/feature/bug) and are filed with \`--parent <epic id>\` so they are linked to the epic.
-     Capture the ids. Add the dependency edges with \`bd dep add <blocked> <blocker>\`.
-     bd auto-resolves its database from BEADS_DIR — do not pass a path.
-  b. Write the design note as a NEW dated ADR at \`${DESIGN_DIR}/<YYYY-MM-DD>-<slug>.md\` in your cwd,
+// Step b of gate ①, the same on either tracker: the design note as a dated ADR.
+const DESIGN_NOTE_STEP = `  b. Write the design note as a NEW dated ADR at \`${DESIGN_DIR}/<YYYY-MM-DD>-<slug>.md\` in your cwd,
      where <YYYY-MM-DD> is today's date and <slug> is a lowercase-hyphen slug of the feature. Open it with
      ADR frontmatter (docs/guides/adr-convention.md):
        ---
@@ -193,14 +178,61 @@ GATE ① — the operator APPROVES THE PLAN. Then, in order:
      Store the epic id and this dated doc path — the handoff needs them.
      If this CHANGES a feature that already has an ADR, do NOT rewrite that ADR's body: instead set its
      frontmatter to \`status: superseded\` and \`superseded-by: <this new dated filename>\` (the only
-     permitted edit to a prior ADR), so the decision chain stays traversable.
+     permitted edit to a prior ADR), so the decision chain stays traversable.`;
+
+const REPORT_STEP = '  Report what you filed (epic id, child ids, doc path) and tell the operator the doc is ready to review.';
+
+// Gate ① on the task graph engine (policy spec, "Approval: humans only"): the
+// launcher created the plan before the session started, so the session files
+// into it with `shreni plan` as the planner. Everything lands proposed; the
+// operator approves, revises or discards it in the launcher's menu once the
+// session ends, never through the agent. There is nothing to sync.
+function engineGateOne(planId: string): string {
+  return `GATE ① — the operator APPROVES THE PLAN. Then, in order:
+  a. File the plan into plan ${planId} (it is in $SHRENI_PLAN; every command below works on it). Each
+     \`shreni plan task add\` prints the new task's id; capture it.
+       shreni plan task add --title "<epic>" --epic --priority <0-4> --description "<…>"
+       shreni plan task add --title "<child>" --parent <epic id> --priority <0-4> --description "<…>" \\
+         --check "given <context> when <action> then <outcome>"     # one --check per acceptance criterion
+       shreni plan dep add <blocked child id> <blocker child id>     # the first waits on the second
+     The epic is a container: it is never worked itself, and completes once all its children are done.
+     Then run \`shreni plan validate\` and fix every error it reports (\`shreni plan task update <id> …\`,
+     \`shreni plan task delete <id>\`, \`shreni plan dep remove …\`) until it passes; \`shreni plan show\`
+     prints the plan. Everything you file stays proposed, and you never approve it: the operator
+     approves, revises or discards it in the launcher once this session ends.
+${DESIGN_NOTE_STEP}
+${REPORT_STEP}`;
+}
+
+// Gate ① on beads: file with bd, then sync the beads repo.
+function beadsGateOne(beadsRemote: string): string {
+  return `GATE ① — the operator APPROVES THE PLAN. Then, in order:
+  a. File the epic, then each child, with \`bd create\` (set --type, --priority, --description,
+     --acceptance). File the epic with \`--type epic\` explicitly — never feature or task: Sthapathi
+     never works an epic and auto-closes it when its last child closes. Children keep their own type
+     (task/feature/bug) and are filed with \`--parent <epic id>\` so they are linked to the epic.
+     Capture the ids. Add the dependency edges with \`bd dep add <blocked> <blocker>\`.
+     bd auto-resolves its database from BEADS_DIR — do not pass a path.
+${DESIGN_NOTE_STEP}
   c. Sync beads to their remote (${beadsRemote}):
        bd export -o "$BEADS_DIR/issues.jsonl"
        git -C "$BEADS_DIR" add issues.jsonl
        git -C "$BEADS_DIR" commit -m "chore(beads): plan <feature>"
        git -C "$BEADS_DIR" pull --rebase && git -C "$BEADS_DIR" push
      Verify \`git -C "$BEADS_DIR" status\` shows up to date with origin before continuing.
-  Report what you filed (epic id, child ids, doc path) and tell the operator the doc is ready to review.
+${REPORT_STEP}`;
+}
+
+// The load-bearing addition: the exact steps the session runs ITSELF once the
+// operator approves, grounded in this Kshetra's remotes/paths. Two gates: (1)
+// plan approved → file beads + write doc + sync beads; (2) doc approved → push
+// the doc branch. Then write the handoff and stop.
+function completionProtocol(kshetra: KshetraConfig, planId?: string): string {
+  const beadsRemote = kshetra.beads.remote;
+  const main = kshetra.repo.mainBranch;
+  return `COMPLETION PROTOCOL — you execute this yourself; do it in exactly two gates.
+
+${planId ? engineGateOne(planId) : beadsGateOne(beadsRemote)}
 
 GATE ② — the operator APPROVES THE DESIGN DOC / ARD. Then push it (NEVER merge to ${main}):
      git switch -c suthradhara/<slug>          # your worktree starts detached; branch off it
@@ -223,6 +255,8 @@ export interface PlanningPromptOpts {
   // path of the design doc the PRIOR session wrote — seeded so this session frames
   // its work as an extension of that doc rather than a brand-new feature.
   extendDocRelPath?: string;
+  // On the task graph engine: the plan the session files into with `shreni plan`.
+  planId?: string;
 }
 
 // Compose the full planning system prompt for a Kshetra. Pure — no I/O, no live
@@ -244,13 +278,19 @@ export function buildPlanningPrompt(
       ]
     : [];
 
+  // On the engine the session reads the project with shreni task and files with
+  // shreni plan; nothing is synced, and the operator approves in the launcher.
+  const engine = (text: string) => !opts.planId ? text : text
+    .replace('run bd/git', 'run git, `shreni task list`/`shreni task show <id>` (the existing work) and `shreni plan`')
+    .replace('files the bundle, writes the doc, syncs beads, and pushes the doc branch', 'files the plan, writes the doc, and pushes the doc branch')
+    .replaceAll('child beads', 'child tasks');
   return [
-    ROLE_BOUNDARY,
+    engine(ROLE_BOUNDARY),
     '',
     `Active Kshetra: ${kshetra.id} (repo at ${kshetra.repo.path}).`,
     '',
     'The phased interview (walk these in order; revisit earlier stages as clarity demands):',
-    renderStages(),
+    engine(renderStages()),
     '',
     renderRubric(),
     ...extendBlock,
@@ -259,6 +299,6 @@ export function buildPlanningPrompt(
     '',
     proposalShape(kshetra),
     '',
-    completionProtocol(kshetra),
+    completionProtocol(kshetra, opts.planId),
   ].join('\n');
 }

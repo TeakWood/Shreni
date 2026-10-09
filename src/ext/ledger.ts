@@ -144,6 +144,7 @@ export function isDecisionGrade(ev: LoggedEvent): boolean {
     case 'suthradhara_plan_filed':
     case 'suthradhara_doc_pushed':
     case 'suthradhara_menu_choice':
+    case 'suthradhara_plan_decision':
     case 'suthradhara_session_ended':
       return false;
   }
@@ -230,6 +231,7 @@ export function audienceFor(kind: LoggedEvent['type']): LedgerAudience {
     case 'suthradhara_plan_filed':
     case 'suthradhara_doc_pushed':
     case 'suthradhara_menu_choice':
+    case 'suthradhara_plan_decision':
     case 'suthradhara_session_ended':
       return 'audit';
   }

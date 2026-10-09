@@ -35,6 +35,8 @@ import { clearHandoff } from './handoff';
 export interface Spawned {
   pid: number;
   wait: () => Promise<number>;
+  /** On the task graph engine: the plan the session files into. */
+  planId?: string;
 }
 
 // Seam so tests never launch real claude: given the spec + cwd, return a Spawned.
@@ -48,6 +50,8 @@ export interface LaunchResult {
   worktreePath: string;
   pid: number;
   wait: () => Promise<number>;
+  /** On the task graph engine: the plan the session files into. */
+  planId?: string;
 }
 export interface AlreadyRunning {
   status: 'already_running';
@@ -96,6 +100,10 @@ export interface StartOpts {
   reuseWorktree?: string;
   // Seed the planning prompt with a prior design doc (the "extend" path).
   extendDocRelPath?: string;
+  // On the task graph engine: the plan the session files into.
+  planId?: string;
+  // The first message, in place of the default kickoff (the "revise" path).
+  kickoff?: string;
   // Test seams.
   spawn?: SpawnPlanning;
   uuid?: () => string;
@@ -155,6 +163,7 @@ export async function startSession(
     ...newSessionState(sessionId, kshetra.id),
     claudeSessionId,
     worktreePath,
+    ...(opts.planId ? { planId: opts.planId } : {}),
   };
   saveSession(state);
   clearHandoff(worktreePath); // drop any stale handoff from a prior unit
@@ -162,12 +171,16 @@ export async function startSession(
   const spec = buildPlanningSession({
     kshetra,
     claudeSessionId,
-    kickoff: defaultKickoff(Boolean(opts.extendDocRelPath)),
+    kickoff: opts.kickoff ?? defaultKickoff(Boolean(opts.extendDocRelPath)),
     extendDocRelPath: opts.extendDocRelPath,
+    planId: opts.planId,
   });
 
   const { pid, wait } = spawnAndTrack(kshetra, spec, worktreePath, opts.spawn ?? defaultSpawn);
-  return { status: 'launched', kshetraId: kshetra.id, sessionId, claudeSessionId, worktreePath, pid, wait };
+  return {
+    status: 'launched', kshetraId: kshetra.id, sessionId, claudeSessionId, worktreePath, pid, wait,
+    ...(opts.planId ? { planId: opts.planId } : {}),
+  };
 }
 
 // Resume an existing session: reattach to its Claude Code conversation via
@@ -198,17 +211,23 @@ export async function resumeSession(
   const worktreePath = await createSessionWorktree(kshetra, sessionId);
   const resume = Boolean(state.claudeSessionId);
   const claudeSessionId = state.claudeSessionId ?? (opts.uuid ?? randomUUID)();
-  saveSession({ ...state, worktreePath, claudeSessionId, status: 'active' });
+  // The launcher may hand a new plan to a session whose own was decided meanwhile.
+  const planId = opts.planId ?? state.planId;
+  saveSession({ ...state, worktreePath, claudeSessionId, status: 'active', ...(planId ? { planId } : {}) });
 
   const spec = buildPlanningSession({
     kshetra,
     claudeSessionId,
     resume,
     kickoff: resume ? undefined : defaultKickoff(false),
+    planId,
   });
 
   const { pid, wait } = spawnAndTrack(kshetra, spec, worktreePath, opts.spawn ?? defaultSpawn);
-  return { status: 'launched', kshetraId: kshetra.id, sessionId, claudeSessionId, worktreePath, pid, wait };
+  return {
+    status: 'launched', kshetraId: kshetra.id, sessionId, claudeSessionId, worktreePath, pid, wait,
+    ...(planId ? { planId } : {}),
+  };
 }
 
 // Reap the current worktree(s) for a Kshetra — the control loop calls this when
