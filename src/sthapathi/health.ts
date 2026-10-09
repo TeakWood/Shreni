@@ -4,6 +4,7 @@ import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
 import { git } from './git.js';
 import { bd } from './beads.js';
+import { engineStore } from './task-store.js';
 import { getHealthBaseline } from '../kshetra/state.js';
 import { resolveTestCommand, splitCommand } from '../kshetra/toolchain.js';
 
@@ -134,12 +135,15 @@ export async function ensureHealthBead(
   kshetra: KshetraConfig,
   failCount: number,
 ): Promise<boolean> {
+  const countLabel = failCount >= 0 ? `${failCount}` : 'an unknown number of';
+  const store = engineStore(kshetra);
+  // On the engine: filed by system (so it lands open), and only while none is open.
+  if (store) return store.ensureHealthTask(`${HEALTH_BEAD_TITLE} (${countLabel} failing)`, 0);
   const bdClient = bd(kshetra);
   for (const status of ['open', 'in_progress', 'blocked']) {
     const raw = await bdClient.list({ status });
     if (rawHasHealthBead(raw)) return false;
   }
-  const countLabel = failCount >= 0 ? `${failCount}` : 'an unknown number of';
   await bdClient.create(
     `${HEALTH_BEAD_TITLE} (${countLabel} failing)`,
     0,

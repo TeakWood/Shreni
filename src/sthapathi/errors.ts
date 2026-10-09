@@ -1,6 +1,7 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { Task } from './types.js';
-import { bd, syncBeads, BeadsError } from './beads.js';
+import { BeadsError } from './beads.js';
+import { syncTracker, trackerFor } from './task-store.js';
 import { pauseKshetra, recordStall } from '../kshetra/state.js';
 import { git, GitError } from './git.js';
 import { branchName } from './branch.js';
@@ -121,7 +122,7 @@ export async function handleCycleError(
   task: Task | null,
   err: Error,
 ): Promise<void> {
-  const bdClient = bd(kshetra);
+  const bdClient = trackerFor(kshetra);
 
   // Track repeating cycle errors so the watchdog can trip on a stall loop
   // (e.g. the same git/agent failure recurring across polls).
@@ -147,7 +148,7 @@ export async function handleCycleError(
     case 'AGENT_FAILED':
       if (task) {
         await bdClient.flag(task.id, `Agent failed: ${err.message}`);
-        await syncBeads(kshetra);
+        await syncTracker(kshetra);
         await cleanupBranch(kshetra, task);
       }
       await notifyOperator(kshetra, task, 'agent_failed');
@@ -156,7 +157,7 @@ export async function handleCycleError(
     case 'MALFORMED_OUTPUT':
       if (task) {
         await bdClient.flag(task.id, `Malformed output after retries: ${err.message}`);
-        await syncBeads(kshetra);
+        await syncTracker(kshetra);
         await cleanupBranch(kshetra, task);
       }
       await notifyOperator(kshetra, task, 'agent_failed');
@@ -165,7 +166,7 @@ export async function handleCycleError(
     case 'GIT_FAILED':
       if (task) {
         await bdClient.flag(task.id, `Git failure: ${err.message}. Branch kept.`);
-        await syncBeads(kshetra);
+        await syncTracker(kshetra);
       }
       pauseKshetra(kshetra, {
         reason: 'git_failed',
@@ -187,7 +188,7 @@ export async function handleCycleError(
     default:
       if (task) {
         await bdClient.flag(task.id, `Unexpected error: ${err.message}`);
-        await syncBeads(kshetra);
+        await syncTracker(kshetra);
         await cleanupBranch(kshetra, task);
       }
       await notifyOperator(kshetra, task, 'unknown_error');

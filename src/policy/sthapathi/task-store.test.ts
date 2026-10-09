@@ -45,7 +45,10 @@ async function setup() {
   const tg = shreni.tg.project(p.id);
   const as = tg.as({ id: 'sthapathi', role: 'orchestrator' });
   const claims = new Map<string, Claim>();
-  const store = engineTaskStore({ shreni, tg, as, claimFor: id => claims.get(id) });
+  const store = engineTaskStore({
+    shreni, tg, as, claimFor: id => claims.get(id),
+    systemActor: tg.as({ id: 'sthapathi', role: 'system' }), agentActor: tg.as({ id: 'parikshaka', role: 'agent' }),
+  });
   registerEngineStore(kshetra.id, store);
   const rows = async (q: string, params: unknown[] = []) => (await t.pglite.query<any>(q, params)).rows;
   return { shreni, tg, as, claims, store, rows, sys: tg.as({ id: 's', role: 'system' }) };

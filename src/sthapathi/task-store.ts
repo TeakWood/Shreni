@@ -1,5 +1,9 @@
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { PrWatermark } from './pr-followup.js';
+import { bd, syncBeads } from './beads.js';
+
+/** The tracker calls the agent loop and error handler make, bd's or the engine's. */
+export type TrackerCalls = Pick<ReturnType<typeof bd>, 'prime' | 'show' | 'addNote' | 'remember' | 'flag'>;
 
 // The task store the merge and PR follow-up paths write to when a Kshetra
 // runs on the task graph engine (policy spec, "The lifecycle" and "Running
@@ -29,6 +33,21 @@ export interface EngineTaskStore {
   note(taskId: string, text: string): Promise<void>;
   readWatermark(taskId: string): Promise<PrWatermark>;
   writeWatermark(taskId: string, w: PrWatermark): Promise<void>;
+  /** prime (memories), show (bd-shaped task JSON), notes, memories and flags for the agent loop. */
+  tracker: TrackerCalls;
+  /**
+   * Files the health gate's repair task, as system (so it lands open), unless
+   * one is already open. Returns whether it filed one.
+   */
+  ensureHealthTask(title: string, priority: number): Promise<boolean>;
+  /**
+   * Files a Parikshaka gap as agent (proposed), keyed so a gap seen twice is
+   * filed once: under the source task's epic while that is open, standalone
+   * once it has closed, linked discovered-from to the source task.
+   */
+  fileGap(gap: { title: string; description: string; priority: number; key: string; sourceTaskId?: string }): Promise<'filed' | 'exists'>;
+  /** Records on the current attempt whether the task's acceptance checks passed (finish's checksPassed reads it). */
+  recordAcceptance(taskId: string, passed: boolean): Promise<void>;
 }
 
 const stores = new Map<string, EngineTaskStore>();
@@ -44,4 +63,15 @@ export function unregisterEngineStore(kshetraId: string): void {
 /** The Kshetra's engine store, or undefined while it runs on bd. */
 export function engineStore(kshetra: Pick<KshetraConfig, 'id'>): EngineTaskStore | undefined {
   return stores.get(kshetra.id);
+}
+
+/** The tracker for the agent loop: the engine's when the Kshetra runs on it, else bd. */
+export function trackerFor(kshetra: KshetraConfig): TrackerCalls {
+  return engineStore(kshetra)?.tracker ?? bd(kshetra);
+}
+
+/** Pushes the beads repo; nothing to do on the engine, whose writes are already in the database. */
+export async function syncTracker(kshetra: KshetraConfig): Promise<void> {
+  if (engineStore(kshetra)) return;
+  await syncBeads(kshetra);
 }

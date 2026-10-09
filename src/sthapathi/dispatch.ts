@@ -3,7 +3,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import type { KshetraConfig } from '../kshetra/config.js';
 import type { AgentContext, Task, SilpiOutput, ViharapalaOutput } from './types.js';
-import { bd } from './beads.js';
+import { engineStore, trackerFor } from './task-store.js';
 import { runSilpi } from '../agents/silpi.js';
 import { runViharapala } from '../agents/viharapala.js';
 import { sessionIdOf } from '../agents/runner.js';
@@ -89,7 +89,7 @@ export function gateLedgerVerdict(g: GateResult): 'pass' | 'fail' | 'warn' | 'sk
 }
 
 export async function buildAgentContext(kshetra: KshetraConfig, task: Task): Promise<AgentContext> {
-  const bdClient = bd(kshetra);
+  const bdClient = trackerFor(kshetra);
 
   // Injection flip (the agent-execution design §3.1): the provider CLI now loads the
   // repo's own config natively (instruction file, `.claude/` skills/rules/
@@ -131,7 +131,7 @@ export async function runSilpiSafe(
   branch: string,
   feedback?: ViharapalaOutput | null,
 ): Promise<SilpiOutput> {
-  const bdClient = bd(kshetra);
+  const bdClient = trackerFor(kshetra);
   await bdClient.addNote(task.id, `Round ${round}: dispatching Silpi`);
   try {
     const output = await withRetry(`Silpi r${round}`, () => runSilpi(context, round, feedback, branch));
@@ -155,7 +155,7 @@ export async function runViharapalaSafe(
   round: number,
   branch: string,
 ): Promise<ViharapalaOutput> {
-  const bdClient = bd(kshetra);
+  const bdClient = trackerFor(kshetra);
   await bdClient.addNote(task.id, `Round ${round}: dispatching Viharapala`);
   try {
     const output = await withRetry(`Viharapala r${round}`, () =>
@@ -190,7 +190,7 @@ async function guardAfterAgent(
     const salvage = await recoverOffBranch(kshetra, task, guard);
     const salvageNote = salvage ? ` Stray commits preserved on "${salvage}".` : '';
     emit({ type: 'task_done', kshetra: kshetra.id, beadId: task.id, title: task.title, approved: false, rounds: round });
-    await bd(kshetra).flag(
+    await trackerFor(kshetra).flag(
       task.id,
       `Aborted round ${round}: agent left the bead branch — ${err.message}. ` +
         `main restored to origin.${salvageNote} Investigate manually.`,
@@ -209,7 +209,7 @@ export async function runSilpiViharapalaLoop(
     return runHealthRepairLoop(kshetra, task, signal);
   }
 
-  const bdClient = bd(kshetra);
+  const bdClient = trackerFor(kshetra);
   let round = 0;
   let feedback: ViharapalaOutput | null = null;
   let lastSilpiOut: SilpiOutput | null = null;
@@ -353,9 +353,11 @@ export async function runSilpiViharapalaLoop(
           verdict: 'APPROVE', overallScore: 0, mustFix: [],
           suggestions: ['Merged WITHOUT Viharapala review (ablation: review)'], issues: [], insights: [],
         };
+        await recordGatesPassed(kshetra, task);
         await openPrAndDefer(task, kshetra, silpiOut, ablatedReview, context.taskDetails);
         return { approved: true, note: `Round ${round} — review ablated, PR opened` };
       }
+      await recordGatesPassed(kshetra, task);
       await squashMergeAndClose(task, kshetra, silpiOut);
       return { approved: true, note: `Round ${round} — review ablated, merged` };
     }
@@ -389,10 +391,12 @@ export async function runSilpiViharapalaLoop(
       // mergePolicy (3r2): 'pr' opens a PR and defers (bead stays open, closed on
       // merge by reconcilePullRequests); 'push' squash-merges to main + closes now.
       if (resolveMergePolicy(kshetra) === 'pr') {
+        await recordGatesPassed(kshetra, task);
         await openPrAndDefer(task, kshetra, silpiOut, feedback, context.taskDetails);
         return { approved: true, note: `Approved round ${round} — PR opened, awaiting merge` };
       }
       // Squash-merge the bead branch into main, close the task, fire Parikshaka
+      await recordGatesPassed(kshetra, task);
       await squashMergeAndClose(task, kshetra, silpiOut);
       return { approved: true, note: `Approved round ${round}` };
     }
@@ -418,7 +422,7 @@ export async function runHealthRepairLoop(
   task: Task,
   signal?: AbortSignal,
 ): Promise<{ approved: boolean; note: string }> {
-  const bdClient = bd(kshetra);
+  const bdClient = trackerFor(kshetra);
   let round = 0;
   let feedback: ViharapalaOutput | null = null;
   let lastSilpiOut: SilpiOutput | null = null;
@@ -469,6 +473,7 @@ export async function runHealthRepairLoop(
       // mergePolicy: they are the mechanism that restores a green base so feature
       // work can proceed, so deferring one behind a human PR gate would wedge the
       // whole queue. Only feature work honours the 'pr' policy.
+      await recordGatesPassed(kshetra, task);
       await squashMergeAndClose(task, kshetra, silpiOut);
       setHealthBaseline(kshetra, 0);
       return { approved: true, note: `Suite restored to green round ${round}` };
@@ -515,4 +520,13 @@ function repairFeedback(failCount: number, progress: boolean): ViharapalaOutput 
     issues: [],
     insights: [],
   };
+}
+
+/**
+ * On the engine, records on the attempt that the task's acceptance checks
+ * passed: the gates ran green and the reviewer approved. finish's checksPassed
+ * guard reads it (policy spec, "The lifecycle"). Nothing to do on bd.
+ */
+async function recordGatesPassed(kshetra: KshetraConfig, task: Task): Promise<void> {
+  await engineStore(kshetra)?.recordAcceptance(task.id, true);
 }

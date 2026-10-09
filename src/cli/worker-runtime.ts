@@ -1,6 +1,6 @@
 import { join } from 'path';
 import { createScheduler, type Scheduler, type SchedulerHooks } from '../sthapathi/index';
-import { selectNext, prepareTask, preFlightCheck, PreFlightError } from '../sthapathi/pickup';
+import { selectNext, prepareTask, preFlightFresh, PreFlightError, BaseRedError } from '../sthapathi/pickup';
 import { runSilpiViharapalaLoop } from '../sthapathi/dispatch';
 import { handleCycleError, AgentAbortedError } from '../sthapathi/errors';
 import { recoverKshetra, resetWorkTree, scheduleResume } from '../sthapathi/recover';
@@ -312,13 +312,16 @@ export function createWorkerRuntime(
       // Declared before the hooks, which it reads claims from (and tells when a claim ends).
       const store: EngineTaskStore = engineTaskStore({
         shreni: conn.shreni, tg, as,
+        systemActor: tg.as({ id: `sthapathi:${kshetra.id}`, role: 'system' }),
+        agentActor: tg.as({ id: 'parikshaka', role: 'agent' }),
         claimFor: taskId => hooks.claims.get(taskId),
         onClaimEnded: taskId => hooks.endClaim(taskId),
       });
       const hooks = engineHooks({
         queue,
-        // A follow-up works its open PR's branch; anything else starts from main.
-        preflight: (task, k) => (task.followup ? prepareFollowupBranch(task, k) : preFlightCheck(task, k)),
+        // A follow-up works its open PR's branch; anything else starts from main,
+        // and only on a green base (the health gate queues its repair otherwise).
+        preflight: (task, k) => (task.followup ? prepareFollowupBranch(task, k) : preFlightFresh(task, k)),
         // A follow-up is a task followUp reopened: boosted (only followUp sets
         // it; submit and finish clear it) and with a PR on an earlier attempt.
         // A task whose PR was closed and later unblocked isn't boosted, so it is
@@ -347,7 +350,8 @@ export function createWorkerRuntime(
         onPreflightRefused: (task, k, err) => {
           if (!(err instanceof PreFlightError)) throw err;
           console.warn(`${logTag} preflight refused ${task.id}: ${err.message}; claim given back`);
-          recordStall(k, 'preflight');
+          // The health gate has recorded its own stall.
+          if (!(err instanceof BaseRedError)) recordStall(k, 'preflight');
         },
       });
       engine = { conn, hooks, queue, lock };

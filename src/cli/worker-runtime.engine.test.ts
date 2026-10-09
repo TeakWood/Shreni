@@ -19,15 +19,68 @@ vi.mock('../policy/sthapathi/connect', () => ({
 }));
 vi.mock('../sthapathi/dispatch', () => ({ runSilpiViharapalaLoop: (...a: unknown[]) => run(...(a as [])) }));
 vi.mock('../sthapathi/recover', async orig => ({ ...(await orig<object>()), resetWorkTree: async () => {} }));
-vi.mock('../sthapathi/pickup', async orig => ({
-  ...(await orig<object>()), preFlightCheck: async () => {}, selectNext: vi.fn(), prepareTask: vi.fn(),
+// The work tree check is stubbed; the health gate runs for real, on a stubbed suite.
+let baseGreen = true;
+vi.mock('../sthapathi/health', async orig => ({
+  ...(await orig<object>()),
+  checkHealth: async () => ({ green: baseGreen, failCount: baseGreen ? 0 : 3, baseline: 0, sha: 'x' }),
 }));
+vi.mock('../sthapathi/pickup', async orig => {
+  const real = await orig<typeof import('../sthapathi/pickup')>();
+  return {
+    ...real, selectNext: vi.fn(), prepareTask: vi.fn(),
+    preFlightFresh: async (task: never, k: never) => { if (!(await real.healthGate(task, k))) throw new real.BaseRedError(task); },
+  };
+});
 vi.mock('../sthapathi/beads', async orig => ({ ...(await orig<object>()), syncBeads: vi.fn() }));
 vi.mock('../sthapathi/lot-manifest', async orig => ({ ...(await orig<object>()), collectLotManifest: async () => ({}) }));
 vi.mock('../ext/loader', async orig => ({ ...(await orig<object>()), loadExtension: async () => false }));
 
+async function setup() {
+  const t = await createTestDb();
+  shreni = await openShreni({ db: t.db, lifecycle: taskLifecycle });
+  onTestFinished(async () => { await shreni.close(); await t.close(); });
+  await shreni.migrate();
+  const p = await shreni.tg.projects.create({ name: 'web', idPrefix: 'web', actor: { id: 'a', role: 'developer' } });
+  const dir = mkdtempSync(join(tmpdir(), 'shreni-engine-'));
+  const kshetra = {
+    id: 'web', name: 'web', project: p.id, database: 'local', plan: { validators: {} },
+    repo: { path: dir, remote: 'x', mainBranch: 'main', branchPattern: 'bead-{id}/{slug}' },
+    beads: { path: dir, remote: 'x', mode: 'embedded' }, stack: { language: 'ts' },
+    gates: { build: { level: 'block' }, test: { level: 'block' }, lint: { level: 'warn' } },
+    agents: { provider: 'anthropic', model: 'm', maxRoundsPerBead: 3 }, priority: { p0AutoAssign: true, maxConcurrentBeads: 1 },
+    conventions: {},
+  } as unknown as KshetraConfig;
+  return { t, tg: shreni.tg.project(p.id), kshetra };
+}
+
 describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => {
+  it('on a red main, gives the claim back, files one repair task, and works the repair next', async () => {
+    const { t, tg, kshetra } = await setup();
+    const feature = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'Do the thing', priority: 2 });
+    const { createWorkerRuntime } = await import('./worker-runtime');
+    const runtime = createWorkerRuntime(kshetra, { entrypoint: 'drain' });
+    await runtime.startup();
+    baseGreen = false;
+    onTestFinished(() => { baseGreen = true; });
+    run.mockClear();
+
+    await runtime.scheduler.runCycle(kshetra, runtime.hooks);
+    expect(run).not.toHaveBeenCalled();
+    const health = await tg.tasks.list({ tags: ['shreni-health'] });
+    expect(health).toEqual([expect.objectContaining({ state: 'open', priority: 0, title: expect.stringMatching(/^\[shreni-health\]/) })]);
+    expect(await t.pglite.query<any>(`select task_id, outcome from taskgraph.attempts`).then(r => r.rows))
+      .toEqual([{ task_id: feature.id, outcome: 'release' }]);
+
+    // The repair task is exempt from the gate and comes first.
+    expect(await runtime.scheduler.runCycle(kshetra, runtime.hooks)).toBe('ran');
+    expect(run).toHaveBeenCalledTimes(1);
+    expect((run.mock.calls[0] as unknown[])[1]).toMatchObject({ id: health[0].id });
+    await runtime.close();
+  });
+
   it('claims and runs through the engine, takes the worker lock, and never touches bd', async () => {
+    run.mockClear();
     const t = await createTestDb();
     shreni = await openShreni({ db: t.db, lifecycle: taskLifecycle });
     onTestFinished(async () => { await shreni.close(); await t.close(); });

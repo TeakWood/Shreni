@@ -243,6 +243,63 @@ export async function selectNext(
   return pickNextWorkable(kshetra, inScope ? tasks.filter(inScope) : tasks);
 }
 
+// The health gate (shared by the bd and engine paths): true when the task may
+// start. On a red base it queues the repair task, records the stall and
+// returns false, unless enforcement is ablated.
+export async function healthGate(task: Task, kshetra: KshetraConfig): Promise<boolean> {
+  // Health gate: a fresh feature task only starts when the base suite is green
+  // (modulo the accepted baseline). preFlightCheck has put us on a clean, pulled
+  // main, so this measures the right tree. A red base does not start the task —
+  // it queues a P0 repair bead instead, which is exempt from this gate. This
+  // runs at the prepare boundary only, never mid-loop, so it can't interfere with
+  // an in-flight Silpi↔Viharapala round.
+  if (isHealthBead(task)) return true;
+  const health = await checkHealth(kshetra);
+  if (!health.green) {
+    // Enforcement ablation (epic 8wi / Study B1): the pickup health gate is a
+    // blocking point — under the ablation it does NOT defer and does NOT create a
+    // repair bead; it claims on a red suite. Record the suppression (decision-
+    // grade) so the ledger shows work was claimed on a red base — a gate_result
+    // for the synthetic 'pickup-health' gate at warn with the enforcement marker
+    // (round 0 = pre-round / pickup boundary).
+    if (isAblated(kshetra, 'enforcement')) {
+      emit({
+        type: 'gate_result', kshetra: kshetra.id, beadId: task.id, round: 0,
+        gate: 'pickup-health', verdict: 'warn', ablations: ['enforcement'],
+      });
+      console.warn(
+        `[shreni prepare:${kshetra.id}] base suite red ` +
+          `(${health.failCount} failing > baseline ${health.baseline}); ` +
+          `enforcement ablated — claiming ${task.id} on a red base (no repair bead)`,
+      );
+    } else {
+      const created = await ensureHealthBead(kshetra, health.failCount);
+      recordStall(kshetra, 'base suite red');
+      console.warn(
+        `[shreni prepare:${kshetra.id}] base suite red ` +
+          `(${health.failCount} failing > baseline ${health.baseline}); ` +
+          `deferring ${task.id}, ${created ? 'queued' : 'awaiting'} health repair`,
+      );
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Preflight refused a fresh task because the base suite is red (the repair task is queued). */
+export class BaseRedError extends PreFlightError {
+  constructor(task: Task) {
+    super(task, 'base suite red; deferring for the health repair');
+    this.name = 'BaseRedError';
+  }
+}
+
+// The engine's preflight for a fresh task: the work tree, then the health gate.
+export async function preFlightFresh(task: Task, kshetra: KshetraConfig): Promise<void> {
+  await preFlightCheck(task, kshetra);
+  if (!(await healthGate(task, kshetra))) throw new BaseRedError(task);
+}
+
 // PREPARE (the ONLY mutator in the pickup path) + bd claim. Syncs beads, runs
 // preFlightCheck (checkout main, pull, branch guard) and the health gate, then
 // claims. Returns the task when it is ready to work, or null when preflight
@@ -265,43 +322,7 @@ export async function prepareTask(task: Task, kshetra: KshetraConfig): Promise<T
     throw err;
   }
 
-  // Health gate: a fresh feature task only starts when the base suite is green
-  // (modulo the accepted baseline). preFlightCheck has put us on a clean, pulled
-  // main, so this measures the right tree. A red base does not start the task —
-  // it queues a P0 repair bead instead, which is exempt from this gate. This
-  // runs at the prepare boundary only, never mid-loop, so it can't interfere with
-  // an in-flight Silpi↔Viharapala round.
-  if (!isHealthBead(task)) {
-    const health = await checkHealth(kshetra);
-    if (!health.green) {
-      // Enforcement ablation (epic 8wi / Study B1): the pickup health gate is a
-      // blocking point — under the ablation it does NOT defer and does NOT create a
-      // repair bead; it claims on a red suite. Record the suppression (decision-
-      // grade) so the ledger shows work was claimed on a red base — a gate_result
-      // for the synthetic 'pickup-health' gate at warn with the enforcement marker
-      // (round 0 = pre-round / pickup boundary).
-      if (isAblated(kshetra, 'enforcement')) {
-        emit({
-          type: 'gate_result', kshetra: kshetra.id, beadId: task.id, round: 0,
-          gate: 'pickup-health', verdict: 'warn', ablations: ['enforcement'],
-        });
-        console.warn(
-          `[shreni prepare:${kshetra.id}] base suite red ` +
-            `(${health.failCount} failing > baseline ${health.baseline}); ` +
-            `enforcement ablated — claiming ${task.id} on a red base (no repair bead)`,
-        );
-      } else {
-        const created = await ensureHealthBead(kshetra, health.failCount);
-        recordStall(kshetra, 'base suite red');
-        console.warn(
-          `[shreni prepare:${kshetra.id}] base suite red ` +
-            `(${health.failCount} failing > baseline ${health.baseline}); ` +
-            `deferring ${task.id}, ${created ? 'queued' : 'awaiting'} health repair`,
-        );
-        return null;
-      }
-    }
-  }
+  if (!(await healthGate(task, kshetra))) return null;
 
   await bd(kshetra).claim(task.id);
   // Forward progress: a bead was successfully claimed — clear any stall counter.
