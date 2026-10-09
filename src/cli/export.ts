@@ -2,7 +2,7 @@ import { writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import type { CommandContext } from './registry';
 import { loadRegistry } from '../kshetra/registry';
-import { bd } from '../sthapathi/beads';
+import { withTrackerReads } from '../policy/sthapathi/reads';
 import { git } from '../sthapathi/git';
 import { readBeadStats, readManifest } from '../kshetra/snapshot';
 import { loadStaticAgentContext, type StaticAgentContext } from '../sthapathi/dispatch';
@@ -351,7 +351,8 @@ export function findExecutedBeads(beads: ExportBead[]): ExecutedBead[] {
   const offenders: ExecutedBead[] = [];
   for (const b of beads) {
     const fields: string[] = [];
-    if (b.status !== 'open') fields.push(`status=${b.status}`);
+    // A plan-time task is open, or proposed (on the engine, not yet approved).
+    if (b.status !== 'open' && b.status !== 'proposed') fields.push(`status=${b.status}`);
     if (b.closeReason) fields.push('close reason');
     if (b.notes) fields.push('notes');
     if (fields.length > 0) offenders.push({ id: b.id, fields });
@@ -523,8 +524,9 @@ export interface ExportDeps {
   loadContext(kshetra: KshetraConfig): Promise<StaticAgentContext>;
 }
 
-const defaultDeps: ExportDeps = {
-  loadBeadsJson: kshetra => bd(kshetra).list({ status: 'open,in_progress,blocked,deferred,closed' }),
+export const defaultDeps: ExportDeps = {
+  // Every task: on the engine that includes the proposed ones, which bd has no status for.
+  loadBeadsJson: kshetra => withTrackerReads(kshetra, r => r.list({ status: kshetra.project ? 'all' : 'open,in_progress,blocked,deferred,closed' })),
   registry: () => loadRegistry(),
   async loadProvenance(kshetra) {
     // Beads HEAD is best-effort (a beads dir that is not a git checkout records

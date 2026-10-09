@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { loadState } from './state.js';
-import { bd } from '../sthapathi/beads.js';
+import { withTrackerReads } from '../policy/sthapathi/reads.js';
 import { PR_NEEDS_FOLLOWUP_LABEL, parseWatermark } from '../sthapathi/pr-followup.js';
 import { readPid, isAlive } from '../cli/pid.js';
 import type { KshetraConfig } from './config.js';
@@ -73,7 +73,11 @@ function parseAgentRound(notes: string | undefined): { agent?: string; round?: n
   return {};
 }
 
-export async function assembleKshetraStatus(kshetra: KshetraConfig): Promise<KshetraStatusInfo> {
+export async function assembleKshetraStatus(
+  kshetra: KshetraConfig,
+  /** A long-lived caller (Phalaka) keeps its engine connection between calls. */
+  opts: { shared?: boolean } = {},
+): Promise<KshetraStatusInfo> {
   const pid = readPid(kshetra.id);
   const daemonRunning = pid !== null && isAlive(pid);
 
@@ -81,16 +85,14 @@ export async function assembleKshetraStatus(kshetra: KshetraConfig): Promise<Ksh
   const ks = state.kshetras[kshetra.id];
   const paused = ks?.paused ?? false;
 
-  const bdClient = bd(kshetra);
-
   // The follow-up list is a label-filtered slice of in_progress (bd's `list --json`
   // omits labels, so the label is the only way to tell a follow-up bead apart).
-  const [inProgressRaw, readyRaw, closedRaw, followupRaw] = await Promise.all([
-    bdClient.list({ status: 'in_progress' }).catch(() => '[]'),
-    bdClient.ready().catch(() => '[]'),
-    bdClient.list({ status: 'closed' }).catch(() => '[]'),
-    bdClient.list({ status: 'in_progress', label: PR_NEEDS_FOLLOWUP_LABEL }).catch(() => '[]'),
-  ]);
+  const [inProgressRaw, readyRaw, closedRaw, followupRaw] = await withTrackerReads(kshetra, r => Promise.all([
+    r.list({ status: 'in_progress' }).catch(() => '[]'),
+    r.ready().catch(() => '[]'),
+    r.list({ status: 'closed' }).catch(() => '[]'),
+    r.list({ status: 'in_progress', label: PR_NEEDS_FOLLOWUP_LABEL }).catch(() => '[]'),
+  ]), opts).catch(() => ['[]', '[]', '[]', '[]']);
 
   const followupIds = new Set(
     parseJsonArray(followupRaw)
@@ -100,15 +102,21 @@ export async function assembleKshetraStatus(kshetra: KshetraConfig): Promise<Ksh
   );
 
   let activeBead: ActiveBead | undefined;
+  // On the engine in_progress also holds tasks waiting on their PRs: the claimed one is the active one.
   const inProgress = parseJsonArray(inProgressRaw);
-  if (inProgress.length > 0) {
-    const parsed = BeadsItemSchema.safeParse(inProgress[0]);
+  const active = inProgress.find(i => (i as { state?: unknown }).state === 'claimed') ?? inProgress[0];
+  if (active !== undefined) {
+    const parsed = BeadsItemSchema.safeParse(active);
     if (parsed.success) {
       const { agent, round } = parseAgentRound(parsed.data.notes);
       // A follow-up bead in the work slot: surface its watermark round + budget so
       // the operator sees the loop is chewing on open-PR feedback, not a fresh bead.
       const followup = followupIds.has(parsed.data.id)
-        ? { round: parseWatermark(parsed.data.notes).round, maxRounds: kshetra.repo.prFollowupMaxRounds }
+        ? {
+          // The engine reports the round from the attempt's watermark; bd kept it in notes.
+          round: (active as { followup_round?: number }).followup_round ?? parseWatermark(parsed.data.notes).round,
+          maxRounds: kshetra.repo.prFollowupMaxRounds,
+        }
         : undefined;
       activeBead = { id: parsed.data.id, title: parsed.data.title, agent, round, followup };
     }

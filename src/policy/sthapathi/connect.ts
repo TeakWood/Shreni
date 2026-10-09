@@ -27,9 +27,11 @@ export async function openKshetraEngine(kshetra: KshetraConfig, opts: { name?: s
     return {
       shreni,
       async close() {
-        await shreni.close();
-        await sql.end({ timeout: 5 });
-        await session.end({ timeout: 5 });
+        // Every part is closed, even when one fails, so nothing keeps the process alive.
+        const results = await Promise.allSettled([shreni.close()]);
+        results.push(...await Promise.allSettled([sql.end({ timeout: 5 }), session.end({ timeout: 5 })]));
+        const failed = results.find((x): x is PromiseRejectedResult => x.status === 'rejected');
+        if (failed) throw failed.reason;
       },
     };
   } catch (err) {

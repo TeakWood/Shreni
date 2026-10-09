@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { z } from 'zod';
 import type { KshetraConfig } from '../kshetra/config.js';
 import { BD_MAX_BUFFER } from '../sthapathi/beads.js';
+import { withTrackerReads } from '../policy/sthapathi/reads.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -197,6 +198,16 @@ export interface ListFilters {
 export function beadsRead(kshetra: KshetraConfig) {
   const beadsPath = kshetra.beads.path;
   const env: NodeJS.ProcessEnv = { ...process.env, BEADS_DIR: beadsPath };
+  // On the task graph engine: the same rows, from a connection Phalaka keeps
+  // (still polling, through this cache, until change notifications come).
+  const source = kshetra.project ? `engine:${kshetra.project}` : beadsPath;
+  const engine = async (fn: Parameters<typeof withTrackerReads<string>>[1]): Promise<string> => {
+    try {
+      return await withTrackerReads(kshetra, fn, { shared: true });
+    } catch (err) {
+      throw new BeadsReadError(`task graph read failed: ${(err as Error).message}`, err);
+    }
+  };
 
   return {
     async list(filters: ListFilters = {}): Promise<BeadSummary[]> {
@@ -208,17 +219,19 @@ export function beadsRead(kshetra: KshetraConfig) {
       args.push('--limit', '0');
       // The cache key MUST carry every filter — a label-filtered list must not
       // collide with (and return) the unfiltered 'default' slice.
-      const key = `${beadsPath}::list::${filters.status ?? 'default'}::${filters.label ?? ''}`;
-      return cached(key, LIST_CACHE_TTL_MS, async () => parseRawArray(await exec(args, env)).map(toSummary));
+      const key = `${source}::list::${filters.status ?? 'default'}::${filters.label ?? ''}`;
+      return cached(key, LIST_CACHE_TTL_MS, async () => parseRawArray(kshetra.project
+        ? await engine(r => r.list({ ...(filters.status ? { status: filters.status } : {}), ...(filters.label ? { label: filters.label } : {}) }))
+        : await exec(args, env)).map(toSummary));
     },
 
     async show(id: string): Promise<BeadDetail | null> {
       if (!isValidBeadId(id)) {
         throw new BeadsReadError(`invalid bead id: ${JSON.stringify(id)}`);
       }
-      const key = `${beadsPath}::show::${id}`;
+      const key = `${source}::show::${id}`;
       return cached(key, LIST_CACHE_TTL_MS, async () => {
-        const rows = parseRawArray(await exec(['show', id, '--json'], env));
+        const rows = parseRawArray(kshetra.project ? await engine(r => r.show(id)) : await exec(['show', id, '--json'], env));
         const match = rows.find(r => r.id === id) ?? rows[0];
         return match ? toDetail(match) : null;
       });

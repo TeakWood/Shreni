@@ -6,6 +6,7 @@ import type { ActorHandle, Claim, ProjectHandle } from '../../taskgraph';
 import type { ShreniClient } from '../db/client';
 import { createHash, randomUUID } from 'crypto';
 import { LEASE_MS, retryUnavailable } from './leases';
+import { engineReads } from './reads';
 
 // The engine's task store for merge and PR follow-up (policy spec, "The
 // lifecycle", "Boost and repeated expiry"). Moves on a claimed task are fenced
@@ -142,6 +143,8 @@ export function engineTaskStore(opts: {
       const attempt = await currentAttempt(taskId);
       if (attempt) await r(() => putEvidence(attempt, { gates: { prFollowup: w } }));
     },
+
+    reads: engineReads(shreni, tg),
 
     tracker: {
       // The project's memories, as bd prime printed them.

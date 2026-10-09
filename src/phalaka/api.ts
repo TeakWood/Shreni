@@ -356,7 +356,7 @@ export function registerPhalakaApi(app: FastifyInstance): void {
         const cfg = findKshetra(id);
         if (!cfg) return;
         try {
-          const status = await assembleKshetraStatus(cfg);
+          const status = await assembleKshetraStatus(cfg, { shared: true });
           enrichment.set(id, { activeBead: status.activeBead, queueDepth: status.queueDepth });
         } catch (err) {
           enrichment.set(id, { error: err instanceof Error ? err.message : String(err) });

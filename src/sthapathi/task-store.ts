@@ -35,6 +35,8 @@ export interface EngineTaskStore {
   writeWatermark(taskId: string, w: PrWatermark): Promise<void>;
   /** prime (memories), show (bd-shaped task JSON), notes, memories and flags for the agent loop. */
   tracker: TrackerCalls;
+  /** The CLI's and Phalaka's reads, bd-shaped, on the worker's own connection. */
+  reads?: import('../policy/sthapathi/reads.js').TrackerReads;
   /**
    * Files the health gate's repair task, as system (so it lands open), unless
    * one is already open. Returns whether it filed one.

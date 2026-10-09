@@ -1,5 +1,5 @@
 import { loadRegistry } from '../kshetra/registry';
-import { bd } from '../sthapathi/beads';
+import { withTrackerReads } from '../policy/sthapathi/reads';
 import { parseReadyOutput, rankCandidates } from '../sthapathi/pickup';
 import { parentsWithOpenChildren } from '../sthapathi/epics';
 import { DEFAULT_INTERVAL_MS, type CycleOutcome } from '../sthapathi/index';
@@ -99,6 +99,15 @@ export interface DrainDriver {
   counts(sinceMs: number): Promise<{ filed: number; merged: number; outOfScopeFiled: string[] }>;
 }
 
+function parseRows(raw: string): Record<string, unknown>[] {
+  try {
+    const arr: unknown = JSON.parse(raw);
+    return Array.isArray(arr) ? (arr as Record<string, unknown>[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 function defaultDelay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -109,12 +118,12 @@ function defaultDelay(ms: number): Promise<void> {
 export async function collectEpicScope(kshetra: KshetraConfig, epicId: string): Promise<Set<string>> {
   const scope = new Set<string>([epicId]);
   const queue: string[] = [epicId];
-  const client = bd(kshetra);
+  const children_ = (id: string) => withTrackerReads(kshetra, r => r.children(id));
   while (queue.length > 0) {
     const parent = queue.shift()!;
     let children: Task[];
     try {
-      children = parseReadyOutput(await client.children(parent));
+      children = parseReadyOutput(await children_(parent));
     } catch {
       // A parent with no children (or an unreadable payload) contributes nothing.
       continue;
@@ -264,7 +273,11 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
     inScope,
     scopeEpic: opts.epic,
   });
-  const client = bd(kshetra);
+  // bd's reads, or the engine's for a Kshetra on the task graph engine.
+  const client = {
+    list: (f: { status: string }) => withTrackerReads(kshetra, r => r.list(f)),
+    ready: () => withTrackerReads(kshetra, r => r.ready()),
+  };
   const idsInScope = (tasks: Task[]): string[] =>
     (scope ? tasks.filter(t => scope.has(t.id)) : tasks).map(t => t.id);
   return {
@@ -294,7 +307,12 @@ async function defaultDriver(kshetra: KshetraConfig, opts: DrainOptions): Promis
       // One bd list yields every parent-with-open-children at once. If it fails,
       // no ready bead is excluded (the pre-q08 behaviour) — classification only.
       let parents = new Set<string>();
-      try { parents = await parentsWithOpenChildren(kshetra); } catch { /* classify without it */ }
+      try {
+        parents = kshetra.project
+          // On the engine: the parents of the tasks not yet closed, from one list.
+          ? new Set(parseRows(await client.list({ status: 'proposed,open,in_progress,blocked,deferred' })).map(r => r.parent).filter((p): p is string => typeof p === 'string'))
+          : await parentsWithOpenChildren(kshetra);
+      } catch { /* classify without it */ }
       const readyIds = new Set(
         idsInScope(rankCandidates(parseReadyOutput(await client.ready()))).filter(id => !parents.has(id)),
       );

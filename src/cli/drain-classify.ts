@@ -1,4 +1,4 @@
-import { bd } from '../sthapathi/beads';
+import { withTrackerReads, type TrackerReads } from '../policy/sthapathi/reads';
 import type { KshetraConfig } from '../kshetra/config';
 
 // Per-bead stall classification for `shreni drain` (epic 7h3 / Study B3, bead
@@ -121,7 +121,12 @@ export async function classifyOpenBeads(
   openIds: string[],
   ctx: { paused: boolean; readyIds: Set<string> },
 ): Promise<StalledBead[]> {
-  const client = bd(kshetra);
+  return withTrackerReads(kshetra, client => classifyWith(client, openIds, ctx));
+}
+
+async function classifyWith(
+  client: TrackerReads, openIds: string[], ctx: { paused: boolean; readyIds: Set<string> },
+): Promise<StalledBead[]> {
   const out: StalledBead[] = [];
   for (const id of openIds) {
     let detail: BeadDetail | null = null;

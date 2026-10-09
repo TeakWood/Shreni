@@ -14,7 +14,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { loadRegistry } from '../kshetra/registry';
 import { resolveTargetKshetra } from './suthradhara';
-import { bd, parseAcceptanceCriteria } from '../sthapathi/beads';
+import { parseAcceptanceCriteria } from '../sthapathi/beads';
+import { withTrackerReads } from '../policy/sthapathi/reads';
 import { readLedger, parseLedgerLines } from '../ext/index';
 import type { LedgerEntry } from '../ext/index';
 import type { KshetraConfig } from '../kshetra/config';
@@ -431,7 +432,7 @@ export async function runShow(opts: ShowOpts): Promise<void> {
   // message rather than a raw bd stack.
   let showJson: string;
   try {
-    showJson = await bd(kshetra).show(beadId);
+    showJson = await withTrackerReads(kshetra, r => r.show(beadId));
   } catch (err) {
     throw new Error(`Bead not found in ${kshetra.id}: ${beadId} (${(err as Error).message})`);
   }

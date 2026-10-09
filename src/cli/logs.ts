@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { loadRegistry } from '../kshetra/registry';
-import { bd } from '../sthapathi/beads';
+import { withTrackerReads } from '../policy/sthapathi/reads';
 import type { KshetraConfig } from '../kshetra/config';
 
 // ── Note parsing ──────────────────────────────────────────────────────────────
@@ -79,11 +79,10 @@ function parseItems(raw: string): z.infer<typeof BeadsItemSchema>[] {
 }
 
 async function getBeadLogsForKshetra(kshetra: KshetraConfig): Promise<BeadLog[]> {
-  const bdClient = bd(kshetra);
-  const [inProgressRaw, closedRaw] = await Promise.all([
-    bdClient.list({ status: 'in_progress' }).catch(() => '[]'),
-    bdClient.list({ status: 'closed' }).catch(() => '[]'),
-  ]);
+  const [inProgressRaw, closedRaw] = await withTrackerReads(kshetra, r => Promise.all([
+    r.list({ status: 'in_progress' }).catch(() => '[]'),
+    r.list({ status: 'closed' }).catch(() => '[]'),
+  ])).catch(() => ['[]', '[]']);
 
   const items = [
     ...parseItems(inProgressRaw),
@@ -114,9 +113,8 @@ function parseShowItem(raw: string, beadId: string): z.infer<typeof BeadsItemSch
 
 async function findBeadLog(beadId: string, kshetras: KshetraConfig[]): Promise<{ log: BeadLog; kshetra: KshetraConfig } | null> {
   for (const k of kshetras) {
-    const bdClient = bd(k);
     try {
-      const item = parseShowItem(await bdClient.show(beadId), beadId);
+      const item = parseShowItem(await withTrackerReads(k, r => r.show(beadId)), beadId);
       if (item) {
         return {
           log: parseNotesToBeadLog(item.id, item.title, item.status ?? 'unknown', item.notes),
