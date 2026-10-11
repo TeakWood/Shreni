@@ -2,27 +2,14 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
-## Beads Issue Tracker
+## Task tracking
 
-This project uses **bd (beads)** for issue tracking. The beads database is symlinked as `.beads/` in this repo. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-> **Note:** `bd` auto-discovers the database via the `.beads/` symlink. No `BEADS_DIR` export needed when running from this project directory. If running from outside this repo, set `BEADS_DIR` to the checkout's `.beads/` directory.
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+Tasks live in Shreni's own task graph engine: this repo is a tracker project
+(`.shreni/tracker.yaml`), worked by hand with `shreni task` — see the Shreni
+block at the end of this file. Use `shreni task` for ALL task tracking — not
+TodoWrite, TaskCreate or markdown TODO lists — and `shreni task remember` for
+knowledge later sessions need, not MEMORY.md files. There is nothing to sync:
+tasks, notes and memories are in the database the moment a command returns.
 
 ## Session Completion
 
@@ -30,13 +17,13 @@ bd close <id>         # Complete work
 
 **MANDATORY WORKFLOW:**
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
+1. **File tasks for remaining work** - `shreni task create` for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
+3. **Update task state** - `shreni task finish` what is done, `shreni task note` or `release` what isn't
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   git push          # NOTE: pushes ONLY this repo. The beads DB is a SEPARATE repo with its own remote — see "Beads Repository & Sync" below; it does NOT ship with this push.
+   git push
    git status  # MUST show "up to date with origin"
    ```
 5. **Clean up** - Clear stashes, prune remote branches
@@ -48,34 +35,32 @@ bd close <id>         # Complete work
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
 
 ## Per-Task Workflow — Code Review Before Push (MANDATORY)
 
-**Whenever you implement a beads task (any `bd` issue), you MUST run the loop
-below. The code review is a HARD GATE: no code from a beads task is pushed until
-a review has run and its findings are resolved.** Work one bead at a time — finish
-this full loop for a bead before starting the next.
+**Whenever you implement a task (any `shreni task`), you MUST run the loop
+below. The code review is a HARD GATE: no code from a task is pushed until
+a review has run and its findings are resolved.** Work one task at a time — finish
+this full loop for a task before starting the next.
 
-1. **Claim** — `bd update <id> --claim`, then `bd show <id>`: read its acceptance
-   criteria and the spec section it names (for the task graph engine, in
+1. **Claim** — `shreni task claim <id>`, then `shreni task show <id>`: read its
+   acceptance checks and the spec section it names (for the task graph engine, in
    `docs/architecture/`).
 2. **Checks first** — write the acceptance criteria as tests and run them. Each
    must fail, for the reason the check describes, before you write the code.
 3. **Implement** the change until those tests pass.
 4. **Quality gates** — `pnpm typecheck` and `pnpm vitest run` must be green (also
    `pnpm build:web` when the Phalaka frontend under `src/phalaka/web/` changed, so
-   the committed `ui.ts` bundle is regenerated, and `pnpm test:integration`, once
-   it exists, when `src/taskgraph/` changed).
+   the committed `ui.ts` bundle is regenerated, and `pnpm test:integration`
+   when `src/taskgraph/` changed).
 5. **Code review — the gate** — run `/code-review` (high effort) or the
    code-review subagent over the diff, checked against the acceptance criteria and
-   the spec section the bead names. **Never push an unreviewed beads-task diff.**
+   the spec section the task names. **Never push an unreviewed task diff.**
 6. **Resolve findings** — fix every confirmed finding, or consciously accept it
    with a stated reason. A finding that shows the spec itself is wrong changes the
    spec first, then the code. Re-run the gates after any fix.
 7. **Push only after the review is clean** — commit and `git push` (per *Session
-   Completion*), then `bd close <id>` with a reason.
-8. **Sync the beads repo** — per *Beads Repository & Sync* below.
+   Completion*), then `shreni task finish <id> --reason "…"`.
 
 **CRITICAL RULES:**
 - The review runs BEFORE the push, not after — a pushed-then-reviewed diff defeats
@@ -83,59 +68,8 @@ this full loop for a bead before starting the next.
 - "Tests pass" is NOT a substitute for the review; run both.
 - If you skip the review because a change is trivial, say so explicitly and why —
   do not skip it silently.
-- An epic closes only when its user journeys pass on a real setup, not just in
-  tests — never close one only because its children closed.
-
-## Beads Repository & Sync
-
-**The beads DB is a SEPARATE git repository, not part of this repo.** `.beads/`
-is a symlink to a sibling checkout (`Shreni-beads`) that has its own remote
-(`github.com:TeakWood/Shreni-beads.git`). This repo tracks **nothing** under
-`.beads/`, so **`git push` of the Shreni repo does NOT ship any bead changes** —
-the beads repo is committed and pushed on its own.
-
-The remote's source of truth is `issues.jsonl` (the Dolt data under
-`embeddeddolt/` is local-only). bd auto-syncs periodically, but it is **not
-guaranteed to have exported your latest `bd create` / `update` / `close`** — the
-child beads of a just-created epic are a common miss, because the auto-sync can
-fire between the parent and the children.
-
-**MANDATORY: after ANY bead mutation (`bd create` / `bd update` / `bd close`),
-sync the beads repo explicitly — do not rely on auto-sync:**
-
-```bash
-bd export -o .beads/issues.jsonl             # run from the Shreni ROOT (see caveat below), regenerates issues.jsonl
-cd .beads                                    # the symlink resolves into the beads repo — ONLY for the git ops
-git add issues.jsonl
-git commit -m "chore(beads): sync <what changed>"
-git pull --rebase && git push                # ship to the beads remote
-git status                                   # MUST show "up to date with origin"
-```
-
-**Always pass `-o .beads/issues.jsonl` — a bare `bd export` writes to STDOUT,
-not to a file** (confirmed on bd 1.0.3). A bare `bd export` (or worse,
-`bd export >/dev/null`) leaves `issues.jsonl` untouched, so your mutations are
-silently NOT staged and never ship — the file may still look fresh because
-auto-sync wrote an older snapshot. The `-o` form is what regenerates the file.
-
-**Run `bd export` from the Shreni repo root, NOT from inside `.beads/`.** `bd`
-discovers its database by walking *up* from the **physical** cwd looking for a
-`.beads/` directory. `cd .beads` follows the symlink, so your physical cwd
-becomes `Shreni-beads`, whose workspace files (`config.yaml`, `embeddeddolt/`,
-`issues.jsonl`) live at its root with no `.beads/` child to find — so
-`bd export` there fails with `Error: no beads database found`. Export first from
-the root, then `cd .beads` only for the `git add/commit/push`. If you must export
-while inside `.beads/`, set the workspace explicitly:
-`BEADS_DIR=<abs path to Shreni>/.beads bd export -o issues.jsonl`.
-
-Verify a specific bead actually shipped:
-`grep '"id":"<bead-id>"' .beads/issues.jsonl` — if a bead you created isn't
-there, it was never exported and never pushed.
-
-**Caveat:** do NOT run manual git ops on the beads repo while a Shreni worker is
-running — concurrent access triggers `doSyncBeads` "no candidate for rebasing"
-pull errors. Stop the worker first (or let its own auto-sync handle it).
-
+- An epic finishes only when its user journeys pass on a real setup, not just in
+  tests — never finish one only because its children finished.
 
 ## Build & Test
 
@@ -150,20 +84,20 @@ pnpm dev            # run via tsx
 
 ## Architecture Overview
 
-Shreni is an autonomous coding-agent harness. **Sthapathi** (orchestrator) polls
-`bd` for ready tasks and drives a **Silpi** (coder) ↔ **Viharapala** (reviewer)
+Shreni is an autonomous coding-agent harness. **Sthapathi** (orchestrator) takes
+ready tasks from the task graph engine and drives a **Silpi** (coder) ↔ **Viharapala** (reviewer)
 loop, squash-merges approved work to `main`, and dispatches **Parikshaka** (test
 agent) asynchronously after merge. **Phalaka** is a loopback dashboard. Each
-managed project is an isolated **Kshetra** with its own repo, `bd` database, RAG
-index, and agent queue. See the README's Architecture section for the component
+managed project is an isolated **Kshetra** with its own repo, task graph project,
+RAG index, and agent queue. See the README's Architecture section for the component
 table and flow diagram.
 
 ## Conventions & Patterns
 
 - **One config per Kshetra** at `<repo>/.shreni/kshetra.yaml`; `~/.shreni/registry.json`
   is the only thing that resolves `id → configPath`. Paths are absolute.
-- **Sthapathi is the sole caller** of `bd update --claim` / `bd close`. Agents never
-  call `bd` directly — they receive task context as injected prompt data.
+- **Sthapathi is the sole claimer and finisher** of a Kshetra's tasks. Agents never
+  claim or finish one — they receive task context as injected prompt data.
 - **TypeScript strict**, tests via **vitest**, provider adapters behind a single
   `ProviderAdapter` interface (`src/agents/providers/`).
 
@@ -171,17 +105,17 @@ table and flow diagram.
 
 **When the operator asks to plan, design, or scope a feature** (new capability or
 a change to an existing one), adopt the five-stage flow below rather than jumping
-straight to code or beads. Each stage has a hat and an exit condition; do not
-advance until the exit condition is met, and **never file beads or write design
+straight to code or tasks. Each stage has a hat and an exit condition; do not
+advance until the exit condition is met, and **never file tasks or write design
 docs until Stage 5** — the operator approves the bundle first.
 
 | Stage | Hat | Purpose | Exit condition |
 |-------|-----|---------|----------------|
 | **1 · Discovery** | Product | Capture the raw idea: intent, the user and their problem, the "why now", rough success criteria. Detect new-feature vs. change-to-existing; if a change, locate and load the existing design doc. | Problem/outcome stated in the operator's words and reflected back; any existing doc loaded. |
 | **2 · Clarify** | Product → Technical | Active interview: resolve ambiguity, enumerate edge cases, non-functional requirements, explicit in/out of scope, priorities, constraints. | Readiness rubric satisfied; open questions answered or explicitly deferred. |
-| **3 · Decompose** | Technical | Grounded in the repo, break the feature into a parent epic + child beads with acceptance criteria, each sized for one Silpi ↔ Viharapala pass, ordered by dependency. | Every child has title, description, acceptance criteria, priority; deps drawn; nothing left as "and then figure out X". |
+| **3 · Decompose** | Technical | Grounded in the repo, break the feature into a parent epic + child tasks with acceptance checks, each sized for one Silpi ↔ Viharapala pass, ordered by dependency. | Every child has title, description, acceptance criteria, priority; deps drawn; nothing left as "and then figure out X". |
 | **4 · Design** | Technical | Synthesise the decisions into a design note: chosen approach, key components and their touch-points in **real files**, alternatives, risks. | The note explains *why* the decomposition looks the way it does, referencing real files. |
-| **5 · Confirm & commit** | — | Present the full bundle; operator edits/approves; **only then** write the doc + file the beads. | Operator confirms; artifacts written; bead ids echoed. |
+| **5 · Confirm & commit** | — | Present the full bundle; operator edits/approves; **only then** write the doc + file the tasks. | Operator confirms; artifacts written; task ids echoed. |
 
 Guidance:
 
@@ -189,7 +123,31 @@ Guidance:
   (use the repo map, search, or subagents) — no hand-wavy decomposition.
 - **Confirm is a hard gate.** Stage 5 is the first point at which anything is
   written; before it, everything is a proposal the operator can edit.
-- **Store the design note on the epic** (`bd create --design=...`) so it travels
+- **Store the design note on the epic** (`shreni task create --epic --description "…"`) so it travels
   with the work, and echo the epic + child ids back when done.
 - Scale the ceremony to the ask — a one-line tweak doesn't need five stages, but
   anything that becomes an epic does.
+
+<!-- shreni:begin tracker v1 -->
+## Task tracking
+
+This repo is tracked with `shreni task`. It is tracker-only: Shreni never runs work here.
+Use the installed `shreni`, never a build from this checkout.
+
+1. `shreni task ready` lists open tasks with nothing blocking them.
+2. `shreni task claim <id>` takes one. It is yours for 8 hours, and any
+   `shreni task note` on it renews the claim.
+3. Do the work. `shreni task note <id> "…"` records progress.
+4. `shreni task finish <id> --reason "…"` once it is reviewed and pushed,
+   or `shreni task release <id>` to give it back. An epic finishes
+   the same way once all its tasks are done.
+5. If you stop without finishing, the claim lapses after 8 hours. Three lapses
+   in a row block the task for the developer.
+
+Filing and remembering:
+
+    shreni task create --title "…"   # lands as proposed; the developer approves it
+    shreni task remember "…"         # an insight for later sessions
+
+Never run `shreni task approve` or `shreni task upgrade`; those are the developer's.
+<!-- shreni:end -->

@@ -1,0 +1,5 @@
+name: Shreni
+project: f2fcdabe-2389-4689-be1a-19e50254a895
+database: local
+providers:
+  - claude
