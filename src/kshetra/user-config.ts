@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { readFileSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { homedir } from 'os';
-import { join, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
 import * as yaml from 'js-yaml';
 import type { ProjectConfig } from './project-config.js';
 
@@ -135,4 +135,45 @@ export function resolveDatabase(
     ...(entry.user ? { user: entry.user } : {}),
     ...(password !== undefined ? { password } : {}),
   };
+}
+
+/**
+ * Adds a database entry to the user config, creating the file (readable by its
+ * owner only) when there is none. The rest of the file, comments included, is
+ * kept as written: the entry goes in under `databases:`, which is added when
+ * missing; a file it can't add to that way (a flow-style `databases` map, say)
+ * is rewritten whole, losing its comments. Returns whether that happened.
+ */
+export function addDatabaseEntry(name: string, url: string, configPath: string = USER_CONFIG_PATH): { rewritten: boolean } {
+  const resolved = resolve(configPath);
+  const raw = existsSync(resolved) ? readFileSync(resolved, 'utf8') : '';
+  const entry = `${JSON.stringify(name)}: { url: ${JSON.stringify(url)} }`;
+  const added = (text: string) => {
+    try {
+      const d = (yaml.load(text) as { databases?: Record<string, { url?: string }> } | null)?.databases;
+      return d?.[name]?.url === url;
+    } catch {
+      return false;
+    }
+  };
+  let text: string | undefined;
+  const header = /^(["']?)databases\1:[ \t]*(#.*)?$/m.exec(raw);
+  if (!header) {
+    if (!/^["']?databases["']?\s*:/m.test(raw)) text = `${raw}${raw && !raw.endsWith('\n') ? '\n' : ''}databases:\n  ${entry}\n`;
+  } else {
+    // A block map: the entry goes first, at its entries' indentation.
+    const at = header.index + header[0].length;
+    const next = raw.slice(at).split('\n').slice(1).find(l => l.trim() && !l.trim().startsWith('#'));
+    const indent = next && /^\s+/.exec(next)?.[0] || '  ';
+    text = `${raw.slice(0, at)}\n${indent}${entry}${raw.slice(at) || '\n'}`;
+  }
+  const rewritten = text === undefined || !added(text);
+  if (rewritten) {
+    const doc = (yaml.load(raw) ?? {}) as { databases?: Record<string, unknown> | null };
+    doc.databases = { ...(doc.databases ?? {}), [name]: { url } };
+    text = yaml.dump(doc);
+  }
+  mkdirSync(dirname(resolved), { recursive: true });
+  writeFileSync(resolved, text!, { mode: 0o600 });
+  return { rewritten };
 }

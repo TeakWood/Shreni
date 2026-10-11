@@ -5,7 +5,7 @@ import { sql } from 'kysely';
 import * as yaml from 'js-yaml';
 import { initKshetra, readProjectFields, recordProjectId, SHRENI_DIR, type InitEngine, type InitKshetraOpts } from './init-kshetra';
 import { loadTrackerConfig } from '../kshetra/project-config';
-import { loadUserConfig, resolveDatabase } from '../kshetra/user-config';
+import { addDatabaseEntry, loadUserConfig, resolveDatabase, USER_CONFIG_PATH } from '../kshetra/user-config';
 import { unregisterKshetra } from '../kshetra/registry';
 import { loadKshetraConfig } from '../kshetra/config';
 import { checkDatabase, type DbProbe } from '../policy/db/checks';
@@ -70,6 +70,44 @@ export interface EngineIo {
   /** What the Import phase uses: the pre-import dump, and where migrations are recorded. */
   dump(database: string): Promise<string>;
   manifestsDir: string;
+  /** The user config the Database phase reads and adds a missing entry to; later phases read ~/.shreni/config.yaml. */
+  userConfigPath?: string;
+}
+
+/** The url a machine's own database, `local`, gets when the developer gives none. */
+export const LOCAL_DATABASE_URL = 'postgres://localhost:5432/shreni';
+
+/**
+ * Adds the repo's database to the user config when the machine lacks it (policy
+ * spec, "The database"): asked for at a terminal, `local` defaulting to this
+ * machine's server; without one, only `local` can be assumed.
+ */
+async function ensureDatabaseEntry(
+  database: string, deps: Pick<InitDeps, 'interactive' | 'ask' | 'print'>, io: Pick<EngineIo, 'env' | 'userConfigPath'>,
+): Promise<void> {
+  const configPath = io.userConfigPath ?? USER_CONFIG_PATH;
+  if (io.env.SHRENI_DATABASE_URL || loadUserConfig(configPath).databases[database]) return;
+  const def = database === 'local' ? LOCAL_DATABASE_URL : undefined;
+  const missing = `this repo uses database "${database}", which ${configPath} doesn't name`;
+  let url = def;
+  if (deps.interactive()) {
+    url = (await deps.ask(`${missing}. Its url${def ? ` [${def}]` : ''}: `)).trim() || def;
+  }
+  if (!url) throw new Error(`${missing}; add it under databases (e.g. ${database}: { url: postgres://host:5432/shreni }), then run shreni init again`);
+  if (!/^postgres(ql)?:\/\//.test(url)) throw new Error(`a database url starts with postgres://, not ${JSON.stringify(url)}`);
+  let secret: boolean;
+  try {
+    const u = new URL(url);
+    secret = u.password !== '' || u.searchParams.has('password');
+  } catch {
+    throw new Error(`${JSON.stringify(url)} isn't a valid postgres:// url; a password with @ or / in it must be percent-encoded`);
+  }
+  if (secret) {
+    throw new Error(`init doesn't store a password; add ${database} to ${configPath} by hand with the password in an environment variable named by passwordEnv`);
+  }
+  const { rewritten } = addDatabaseEntry(database, url, configPath);
+  deps.print(`  ✓ added database "${database}" (${url}) to ${configPath}`);
+  if (rewritten) deps.print(`  ! ${configPath} was rewritten to add it, and its comments were dropped`);
 }
 
 /** Whether a beads export holds any issue. */
@@ -88,7 +126,8 @@ export function initEngine(
 ): InitEngine {
   return {
     async database(database) {
-      const target = resolveDatabase({ database }, loadUserConfig(), io.env);
+      await ensureDatabaseEntry(database, deps, io);
+      const target = resolveDatabase({ database }, loadUserConfig(io.userConfigPath), io.env);
       const report = await checkDatabase(target, io.probe, {
         interactive: deps.interactive(), ask: q => deps.ask(q), create: true, env: io.env,
         onLine: l => deps.print(`  ${l.severity === 'ok' ? '✓' : l.severity === 'warn' ? '!' : '✗'} ${l.text}`),
