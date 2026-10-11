@@ -18,7 +18,7 @@ import {
 } from '../policy/task/by-hand';
 import { NotFound, VersionMismatch } from '../taskgraph';
 import { loadState } from '../kshetra/state';
-import { blockBody, blockProblem, installPrimeHooks, writeBlock } from '../policy/init/instructions';
+import { blockBody, blockProblem, installPrimeHooks, leftoverWarning, writeBlock } from '../policy/init/instructions';
 import { PROVIDER_REGISTRY, providerFromCliName, providerInstructionFile } from '../agents/providers/registry';
 import type { Provider } from '../agents/providers/types';
 import type { KshetraConfig } from '../kshetra/config';
@@ -406,7 +406,7 @@ export function instructionTargets(found: FoundConfig<ProjectConfig>): {
 /** Writes the block into each file and, for Claude Code, the prime hooks; returns what it did, a line each. */
 export function setupInstructions(found: FoundConfig<ProjectConfig>): string[] {
   const t = instructionTargets(found);
-  const out = t.files.map(f => `${f}: ${writeBlock(f, t.mode)}`);
+  const out = t.files.flatMap(f => [`${f}: ${writeBlock(f, t.mode)}`, ...(leftoverWarning(f) ?? [])]);
   if (t.claude) out.push(`${join(t.repo, '.claude', 'settings.json')}: ${installPrimeHooks(t.repo) ? 'prime hooks installed' : 'prime hooks unchanged'}`);
   return out;
 }

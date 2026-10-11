@@ -341,6 +341,7 @@ Agent sessions learn the rules from their instruction file, so Shreni writes the
 - **Kept current.** Init writes the block, and `shreni task setup` rewrites it on demand, for example after an upgrade changes a template. `prime` warns when the block's version is behind, but never edits a committed file on its own.
 - **Hooks.** For Claude Code, setup also installs the session-start and pre-compaction hooks that run `shreni task prime`, in place of the `bd prime` hooks that `bd setup claude` installed in the beads days. Codex and Gemini get the block only.
 - **Replaces** the old `SHRENI INTEGRATION` section that init once appended to `CLAUDE.md` and never updated: setup swaps that exact text for the block.
+- **Beads instructions written by hand** stay where they are, because only the developer knows what in them still holds. Init, `shreni migrate` and `shreni task setup` list every line outside the block that still speaks of beads (a heading or line naming beads, a `bd` command, `BEADS_DIR`), grouped under the heading it sits in, with line numbers, and say to remove them or rewrite them for `shreni task`. The run still succeeds, and the file is never edited.
 
 **The two versions never mix.** In a Kshetra, Silpi runs natively and reads the same file as a person's session. A Kshetra file must never carry the by-hand workflow, or an agent could start claiming tasks.
 

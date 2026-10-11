@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { blockProblem, findBlock, installPrimeHooks, renderBlock, writeBlock } from './instructions';
+import { beadsLeftovers, blockProblem, findBlock, installPrimeHooks, leftoverWarning, renderBlock, writeBlock } from './instructions';
 import { LEGACY_SECTION as SHRENI_SECTION } from './instructions';
 
 // Instructions for agent sessions (policy spec): one block per instruction
@@ -102,6 +102,95 @@ describe('what setup never guesses at', () => {
     const text = readFileSync(file, 'utf8');
     expect(text).not.toContain('SHRENI INTEGRATION');
     expect(text.replace(/\r\n/g, '')).not.toContain('\n');
+  });
+});
+
+describe('beads instructions left behind', () => {
+  const HAND_WRITTEN = [
+    '# Project',
+    '',
+    '## Beads Issue Tracker',
+    '',
+    'This project uses **bd (beads)** for issue tracking.',
+    '',
+    '```bash',
+    'bd ready              # Find available work',
+    'bd update <id> --claim',
+    '```',
+    '',
+    '## Build & Test',
+    '',
+    'pnpm build',
+    '',
+    '## Beads Repository & Sync',
+    '',
+    'bd export -o .beads/issues.jsonl',
+    'cd .beads && git push',
+    '',
+  ].join('\n');
+
+  const lines = (text: string) => beadsLeftovers(text).map(l => [l.line, l.text]);
+
+  it('finds the headings, the bd commands and the .beads paths, with their line numbers', () => {
+    expect(lines(HAND_WRITTEN)).toEqual([
+      [3, '## Beads Issue Tracker'],
+      [5, 'This project uses **bd (beads)** for issue tracking.'],
+      [8, 'bd ready              # Find available work'],
+      [9, 'bd update <id> --claim'],
+      [16, '## Beads Repository & Sync'],
+      [18, 'bd export -o .beads/issues.jsonl'],
+      [19, 'cd .beads && git push'],
+    ]);
+  });
+
+  it('catches bd named by a path or quoted, never words that only contain bd', () => {
+    expect(lines('/usr/local/bin/bd ready\nrun "bd prime"\nbdd tests\nembedded db\nkbd layout\nbd 1.0.3\n').map(l => l[0])).toEqual([1, 2]);
+  });
+
+  it('never counts Shreni\'s own block, or a file with nothing of beads in it', () => {
+    expect(beadsLeftovers(`# Ours\n\n${renderBlock('tracker')}\n`)).toEqual([]);
+    expect(beadsLeftovers(`# Ours\n\n${renderBlock('kshetra')}\n`)).toEqual([]);
+    expect(beadsLeftovers('# Ours\n\nWe build with pnpm; bdd tests live in e2e/.\n')).toEqual([]);
+  });
+
+  it('skips every line inside a block, wherever it sits, and counts all of a broken one', () => {
+    const inside = 'bd x\n<!-- shreni:begin tracker v0 -->\nbd ready\n<!-- shreni:end -->\nbd y\n';
+    expect(lines(inside).map(l => l[0])).toEqual([1, 5]);
+    expect(lines(inside.replace(/\n/g, '\r\n'))).toEqual([[1, 'bd x'], [5, 'bd y']]);
+    expect(lines('<!-- shreni:begin tracker v0 -->\nbd ready\n<!-- shreni:end -->\nbd y')).toEqual([[4, 'bd y']]);
+    expect(lines('bd x\n<!-- shreni:begin tracker v0 -->\nbd ready\n<!-- shreni:end -->')).toEqual([[1, 'bd x']]);
+    expect(lines('<!-- shreni:begin tracker v0 -->\nbd ready\n').map(l => l[0])).toEqual([2]);
+  });
+
+  it('given the leftovers beside the written block, still finds them outside it', () => {
+    const text = `${HAND_WRITTEN}\n${renderBlock('tracker')}\n`;
+    expect(beadsLeftovers(text).map(l => l.line)).toEqual([3, 5, 8, 9, 16, 18, 19]);
+  });
+
+  it('warns naming the file and each section with all its lines, never editing it', () => {
+    const d = dir();
+    const file = join(d, 'CLAUDE.md');
+    writeFileSync(file, `intro: run bd ready\n${HAND_WRITTEN.replace('# Project\n', '')}\n## Notes\n\n\`\`\`bash\n# not a heading\nbd sync\n\`\`\`\n`);
+    writeBlock(file, 'tracker');
+    const before = readFileSync(file, 'utf8');
+    expect(leftoverWarning(file)).toEqual([
+      `${file}: beads instructions are still there, outside Shreni's block; remove them, or rewrite them for shreni task:`,
+      '  before any heading — line 1',
+      '  line 3: ## Beads Issue Tracker — lines 3, 5, 8, 9',
+      '  line 16: ## Beads Repository & Sync — lines 16, 18, 19',
+      '  line 21: ## Notes — line 25',
+    ]);
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    expect(leftoverWarning(join(d, 'none.md'))).toBeNull();
+    writeFileSync(file, '# clean\n');
+    expect(leftoverWarning(file)).toBeNull();
+  });
+
+  it('names every line however many there are', () => {
+    const d = dir();
+    const file = join(d, 'CLAUDE.md');
+    writeFileSync(file, Array.from({ length: 60 }, (_, i) => `bd show x-${i}`).join('\n'));
+    expect(leftoverWarning(file)![1]).toBe(`  before any heading — lines ${Array.from({ length: 60 }, (_, i) => i + 1).join(', ')}`);
   });
 });
 

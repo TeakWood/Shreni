@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from 'crypto';
 import { sql } from 'kysely';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { basename, dirname, join } from 'path';
 import { taskLifecycle } from '../lifecycle/lifecycle';
 import { importShreniProject, lastEventId } from '../db/bundle';
 import type { ShreniClient } from '../db/client';
 import { dryRun, parseBeadsExport, renderDryRun } from './beads-import';
 import type { ProjectMode } from '../init/project';
 import { legacyBeadsPath } from '../../kshetra/config';
+import { leftoverWarning } from '../init/instructions';
 
 // Moving a project off beads (migration plan, "Upgrading a Kshetra"):
 // preflight, dry run, confirmation, a dump, the import in one transaction,
@@ -121,7 +122,7 @@ export async function migrateOffBeads(
       throw new Error(`${t.configPath} names project ${t.project}, which isn't in this database; point database: at the one that holds it`);
     }
     const changed = cleanUp(t, t.project);
-    for (const c of changed) io.print(`  ${c}`);
+    report(t, changed, io);
     return { outcome: changed.length ? 'finished' : 'unchanged', projectId: t.project };
   }
   const imported = manifest ? await projectExists(shreni, manifest.projectId) : false;
@@ -178,9 +179,17 @@ export async function migrateOffBeads(
     writeManifest(io, manifest!);
   }
   const changed = cleanUp(t, manifest!.projectId);
-  for (const c of changed) io.print(`  ${c}`);
+  report(t, changed, io);
   if (opts.keepManifest === false) rmSync(manifestPath(io, t.id, t.configPath), { force: true });
   return { outcome: imported ? (changed.length ? 'finished' : 'unchanged') : 'migrated', projectId: manifest!.projectId };
+}
+
+/** What the clean-up changed, and the beads instructions written by hand it left: only the developer can rewrite those. */
+function report(t: MigrateTarget, changed: string[], io: Pick<MigrateIo, 'print'>): void {
+  for (const c of changed) io.print(`  ${c}`);
+  for (const f of t.touches.filter(f => basename(f) !== 'settings.json')) {
+    for (const l of leftoverWarning(f) ?? []) io.print(`  ${l}`);
+  }
 }
 
 async function projectExists(shreni: ShreniClient, id: string): Promise<boolean> {

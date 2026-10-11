@@ -626,6 +626,15 @@ describe('shreni task setup and prime', { timeout: PGLITE_TIMEOUT }, () => {
     expect(primed).not.toContain('Warning:');
   });
 
+  it('setup lists beads instructions left outside the block, and still succeeds', async () => {
+    const { repo, run } = await setup();
+    writeFileSync(join(repo, 'CLAUDE.md'), '# Ours\n\n## Beads Issue Tracker\n\nbd ready\n');
+    const out = await run('setup');
+    expect(out).toMatch(/CLAUDE\.md: added\n.*CLAUDE\.md: beads instructions are still there, outside Shreni's block/);
+    expect(out).toContain('  line 3: ## Beads Issue Tracker — lines 3, 5');
+    expect(readFileSync(join(repo, 'CLAUDE.md'), 'utf8')).toContain('## Beads Issue Tracker');
+  });
+
   it('prime warns about a file whose block is missing or behind, and still prints when the database is down', async () => {
     const { repo, run, deps } = await setup();
     writeFileSync(join(repo, 'CLAUDE.md'), '<!-- shreni:begin tracker v0 -->\nold\n<!-- shreni:end -->\n');

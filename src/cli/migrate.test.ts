@@ -95,6 +95,16 @@ describe('shreni migrate', { timeout: PGLITE_TIMEOUT }, () => {
     expect(await shreni.tg.projects.list()).toHaveLength(1);
   });
 
+  it('lists the beads instructions a developer wrote by hand, which the block doesn\'t replace', async () => {
+    const { k, deps, out } = await setup();
+    writeFileSync(join(k.repo, 'CLAUDE.md'), `# Web\n\n## Beads workflow\n\nbd ready\n${SHRENI_SECTION}`);
+    await migrateKshetra('web', deps, { yes: true });
+    const text = out.join('\n');
+    expect(text).toContain(`${join(k.repo, 'CLAUDE.md')}: beads instructions are still there, outside Shreni's block`);
+    expect(text).toContain('  line 3: ## Beads workflow — lines 3, 5');
+    expect(readFileSync(join(k.repo, 'CLAUDE.md'), 'utf8')).toMatch(/## Beads workflow[\s\S]*<!-- shreni:begin kshetra v1 -->/);
+  });
+
   it('given --undo before any write, then the fixture is restored byte for byte', async () => {
     const { shreni, k, deps } = await setup();
     const before = snapshot(k.repo);

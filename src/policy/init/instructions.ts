@@ -202,6 +202,62 @@ export function writeBlock(file: string, mode: ProjectMode): WriteOutcome {
   return blocks.length ? 'updated' : 'added';
 }
 
+/** A line that speaks of beads: the word, the bd CLI run with a subcommand, or BEADS_DIR. */
+const BEADS_LINE = [/\bbeads\b/i, /(^|[\s`$(|&;/"'])bd\s+[a-z-]+/, /\bBEADS_DIR\b/];
+const HEADING = /^#{1,6}\s/;
+
+/**
+ * The lines of an instruction file, outside Shreni's blocks, that still give
+ * beads instructions: what a repo wrote by hand in the beads days, which only
+ * its developer can rewrite. Code fences count, since a fenced bd command is
+ * an instruction too.
+ */
+export function beadsLeftovers(text: string): { line: number; text: string; section: { line: number; text: string } | null }[] {
+  let blocks: FoundBlock[] = [];
+  try {
+    blocks = findBlocks(text);
+  } catch {
+    // A broken block is setup's to refuse; every line is then outside one.
+  }
+  const out: ReturnType<typeof beadsLeftovers> = [];
+  let section: { line: number; text: string } | null = null;
+  let at = 0;
+  let fenced = false;
+  text.split('\n').forEach((raw, i) => {
+    const start = at;
+    at += raw.length + 1;
+    if (blocks.some(b => start >= b.start && start < b.end)) return;
+    const line = raw.replace(/\r$/, '');
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    // The heading a hit sits under: a fenced "# comment" is code, not a heading.
+    if (!fenced && HEADING.test(line)) section = { line: i + 1, text: line.trim() };
+    if (BEADS_LINE.some(r => r.test(line))) out.push({ line: i + 1, text: line.trim(), section });
+  });
+  return out;
+}
+
+/**
+ * Setup's warning about a file's beads leftovers, or null when it has none:
+ * each section they sit in, with every line number, so none is hidden however
+ * many there are. It never edits the file.
+ */
+export function leftoverWarning(file: string): string[] | null {
+  if (!existsSync(file)) return null;
+  const found = beadsLeftovers(readFileSync(file, 'utf8'));
+  if (!found.length) return null;
+  const sections = new Map<number, { title: string; lines: number[] }>();
+  for (const l of found) {
+    const key = l.section?.line ?? 0;
+    const s = sections.get(key) ?? { title: l.section ? `line ${l.section.line}: ${l.section.text}` : 'before any heading', lines: [] };
+    s.lines.push(l.line);
+    sections.set(key, s);
+  }
+  return [
+    `${file}: beads instructions are still there, outside Shreni's block; remove them, or rewrite them for shreni task:`,
+    ...[...sections.values()].map(s => `  ${s.title} — line${s.lines.length > 1 ? 's' : ''} ${s.lines.join(', ')}`),
+  ];
+}
+
 /** What prime says about a file's block: missing, of the other kind, or behind. */
 export function blockProblem(file: string, mode: ProjectMode): string | null {
   if (!existsSync(file)) return `${file} has no Shreni block; run shreni task setup`;
