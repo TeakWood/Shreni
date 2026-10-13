@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { sql } from 'kysely';
 import type { CommandContext } from './registry';
-import type { ActorHandle, ProjectHandle, Task } from '../taskgraph';
+import type { ActorHandle, ProjectHandle, Task, TaskPatch } from '../taskgraph';
 import { loadKshetraConfig, NotMigratedError } from '../kshetra/config';
 import { loadRegistry } from '../kshetra/registry';
 import { loadTrackerConfig, type ProjectConfig } from '../kshetra/project-config';
@@ -36,13 +36,13 @@ import { hostname } from 'os';
 // a Claude Code shell isn't, so a session can't approve by accident.
 
 export const TASK_SUBCOMMANDS = [
-  'ready', 'show', 'list', 'create', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'confirm', 'unblock', 'upgrade',
+  'ready', 'show', 'list', 'create', 'edit', 'note', 'remember', 'claim', 'finish', 'release', 'cancel', 'approve', 'confirm', 'unblock', 'upgrade',
   'setup', 'prime',
 ] as const;
 /** The developer's own calls, refused without an interactive terminal (an accident guard, not a security boundary). */
 const TERMINAL_ONLY = new Set(['approve', 'confirm', 'unblock', 'upgrade']);
 /** Calls that work a Kshetra's tasks, which its worker owns: by hand only while it is paused (assertHandsOnKshetra). */
-const HANDS_ON = new Set(['claim', 'finish', 'release', 'cancel', 'upgrade']);
+const HANDS_ON = new Set(['claim', 'finish', 'release', 'cancel', 'edit', 'upgrade']);
 export const TASK_USAGE = `<${TASK_SUBCOMMANDS.join('|')}> …`;
 
 const HELP = [
@@ -51,6 +51,8 @@ const HELP = [
   'shreni task list [--state <s,…>|--all] [--json]  tasks; every live one by default',
   'shreni task create --title "…" [--description "…"] [--parent <id>] [--priority 0-4] [--epic]',
   '                   [--check "given … when … then …"]…  lands as proposed, for the developer to approve',
+  'shreni task edit <id> [--title "…"] [--description "…"] [--priority 0-4] [--parent <id>|--no-parent]',
+  '                 [--check "given … when … then …"]… [--clear-checks]  correct a task not yet finished, keeping its id',
   'shreni task note <id> "…"                     a note on a task; renews your claim on it',
   'shreni task remember "…" [--key <key>]        an insight for later sessions',
   'shreni task claim <id>                        take one ready task, yours for 8 hours',
@@ -67,6 +69,10 @@ const HELP = [
 
 /** The states a list shows by default: every one not yet terminal. */
 const LIVE = ['proposed', 'open', 'claimed', 'waiting', 'blocked', 'parked'];
+/** The states the developer may edit a task in: the lifecycle's tasks.update permission. */
+const updatable = taskLifecycle.permissions['tasks.update']?.developer;
+const EDITABLE: string[] = updatable === true ? Object.keys(taskLifecycle.states) : (updatable ?? []);
+const EDIT_USAGE = 'edit <id> [--title "…"] [--description "…"] [--priority 0-4] [--parent <id>|--no-parent] [--check "…"]… [--clear-checks]';
 
 export interface TaskDeps {
   /** Where the project is looked for, walking up. */
@@ -468,6 +474,23 @@ async function openPlanOf(tg: ProjectHandle, taskId: string): Promise<string | n
   return plan.approvedAt || plan.discardedAt ? null : plan.id;
 }
 
+type Changes = Record<string, { from: unknown; to: unknown }> | undefined;
+
+/** What an edit changed, in words, in a fixed order (task.updated's payload is jsonb, which keeps none). */
+function describeChanges(changes: Changes): string {
+  const order = ['title', 'description', 'priority', 'parent', 'kind', 'tags', 'category', 'holdUntil', 'spec'];
+  const keys = Object.keys(changes ?? {}).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+  return keys.map(k => {
+    const { from, to } = changes![k];
+    if (k === 'title') return `title ${JSON.stringify(from)} → ${JSON.stringify(to)}`;
+    if (k === 'priority') return `priority ${from} → ${to}`;
+    if (k === 'parent') return `parent ${from ?? 'none'} → ${to ?? 'none'}`;
+    // A description can be long: whether it was set, cleared or changed is enough here.
+    if (k === 'description') return `description ${from == null ? 'set' : to == null ? 'cleared' : 'changed'}`;
+    return `${k} changed`;
+  }).join(', ') || 'nothing';
+}
+
 /** The one task id a subcommand takes. */
 function oneId(a: { positionals: string[] }, usage: string): string {
   const [id] = a.positionals;
@@ -506,9 +529,14 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
     const task = await tg.tasks.get(id);
     const checks = await shreni.db.selectFrom('shreni.acceptance_checks').select(['given', 'when', 'then', 'mode'])
       .where('project_id', '=', tg.id).where('task_id', '=', id).orderBy('created_at').orderBy('id').execute();
-    const notes = (await tg.tasks.history(id))
-      .filter(e => e.kind === 'note' || (e.kind.startsWith('move:') && typeof e.payload?.reason === 'string'))
-      .map(e => ({ at: e.at, actor: e.actor, text: String(e.kind === 'note' ? e.payload?.text : `${e.kind.slice(5)}: ${e.payload?.reason}`) }));
+    // Notes, moves with a reason, and edits (task.updated), oldest first.
+    const notes = (await tg.tasks.history(id)).flatMap(e => {
+      const [kind, text] = e.kind === 'note' ? ['note', String(e.payload?.text)]
+        : e.kind.startsWith('move:') && typeof e.payload?.reason === 'string' ? ['move', `${e.kind.slice(5)}: ${e.payload.reason}`]
+          : e.kind === 'task.updated' ? ['edit', `edited: ${describeChanges(e.payload?.changes as Changes)}`]
+            : [null, null];
+      return kind === null ? [] : [{ at: e.at, actor: e.actor, kind, text }];
+    });
     if (json) return deps.print(JSON.stringify({ ...task, checks, notes }));
     const out = [
       `${task.id}  ${task.title}${task.kind === 'container' ? '  (epic)' : ''}`,
@@ -525,7 +553,7 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
       for (const d of task.deps) out.push(`  ${d.id}  [${d.state}]`);
     }
     if (notes.length) {
-      out.push('', 'Notes:');
+      out.push('', 'History:');
       for (const n of notes) out.push(`  ${new Date(n.at).toISOString()}  ${n.actor}: ${n.text}`);
     }
     deps.print(out.join('\n'));
@@ -596,6 +624,90 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
     if (json) return deps.print(JSON.stringify({ ...task, checks }));
     deps.print(`filed ${task.id} (${task.state})${plan ? ` in plan ${plan}` : ''}: ${task.title}` +
       `${checks.length ? ` · ${checks.length} check${checks.length > 1 ? 's' : ''}` : ''}`);
+  },
+
+  async edit({ ctx, deps, tg, me, shreni }) {
+    const a = parseArgs(ctx.args, {
+      valued: ['--title', '--description', '--priority', '--parent'], repeated: ['--check'], bool: ['--no-parent', '--clear-checks'], positionals: 1,
+    });
+    const id = oneId(a, EDIT_USAGE);
+    const { '--title': title, '--description': description, '--priority': priority, '--parent': parent } = a.values;
+    const clear = a.bools.has('--clear-checks');
+    // Everything is read before anything is changed, so a bad flag changes nothing.
+    if (title !== undefined && !title.trim()) throw new Error('--title can\'t be empty');
+    if (priority !== undefined && !/^[0-4]$/.test(priority)) throw new Error('--priority takes 0 to 4');
+    if (parent !== undefined && a.bools.has('--no-parent')) throw new Error('give --parent or --no-parent, not both');
+    const checks = (a.repeated['--check'] ?? []).map(parseCheck);
+    const patch: TaskPatch = {
+      ...(title !== undefined ? { title } : {}),
+      // An empty description clears it.
+      ...(description !== undefined ? { description: description.trim() ? description : null } : {}),
+      ...(priority !== undefined ? { priority: Number(priority) } : {}),
+      ...(parent !== undefined ? { parent } : a.bools.has('--no-parent') ? { parent: null } : {}),
+    };
+    if (!Object.keys(patch).length && !checks.length && !clear) throw new Error(`Usage: shreni task ${EDIT_USAGE}`);
+    const task = await tg.tasks.get(id);
+    if (taskLifecycle.states[task.state]?.terminal) throw new Error(`${id} is ${task.state}: a finished task isn't edited`);
+    if (!EDITABLE.includes(task.state)) {
+      // A claimed task's work is under way on what it says; whoever holds it gives it back first.
+      throw new Error(`${id} is ${task.state}; ${task.state === 'claimed' ? 'release it first' : `a task is edited while ${EDITABLE.join(', ')}`}`);
+    }
+    if (checks.length && task.kind === 'container') throw new Error('an epic takes no --check; give its tasks the checks');
+    if (patch.parent !== undefined && patch.parent !== task.parentId) {
+      // A plan is approved as one (031a.18), and an edit can't move a task between
+      // plans: a task moved into or out of an open plan would open without it, or with it.
+      const from = await openPlanOf(tg, id);
+      const to = patch.parent ? await openPlanOf(tg, patch.parent) : null;
+      if (from !== to) {
+        throw new Error(from
+          ? `${id} is in plan ${from}, still to be approved as one; moving it would take it out: cancel it, and file it again where it belongs`
+          : `${patch.parent} is in plan ${to}, still to be approved; ${id} can't join it by an edit: cancel it, and file it again with --parent ${patch.parent}`);
+      }
+    }
+
+    const changed: string[] = [];
+    if (Object.keys(patch).length) {
+      // The engine records the change (task.updated, with the old and new values) only when there is one.
+      const after = await me.tasks.update(id, patch);
+      // Only the fields asked for: another writer's change meanwhile isn't this edit's.
+      for (const f of ['title', 'description', 'priority'] as const) if (f in patch && after[f] !== task[f]) changed.push(f);
+      if ('parent' in patch && after.parentId !== task.parentId) changed.push('parent');
+    }
+    const before = clear ? await checksOf(shreni, tg.id, id) : [];
+    if (checks.length || before.length) {
+      try {
+        await shreni.transaction(async db => {
+          // The engine guards its fields; the checks are Shreni's, so the state is checked again here, locked.
+          const { rows } = await sql<{ state: string }>`select state from taskgraph.tasks
+            where project_id = ${tg.id} and id = ${id} for update`.execute(db);
+          if (!EDITABLE.includes(rows[0]?.state ?? '')) throw new Error(`${id} became ${rows[0]?.state ?? 'gone'} meanwhile`);
+          if (clear) await db.deleteFrom('shreni.acceptance_checks').where('project_id', '=', tg.id).where('task_id', '=', id).execute();
+          if (checks.length) {
+            await db.insertInto('shreni.acceptance_checks')
+              // As in create: each check a microsecond on, to read back in order.
+              .values(checks.map((c, i) => ({
+                project_id: tg.id, task_id: id, ...c, mode: 'auto',
+                created_at: sql<Date>`now() + ${i} * interval '1 microsecond'`,
+              })))
+              .execute();
+          }
+        });
+      } catch (err) {
+        throw new Error(`${changed.length ? `edited ${id}'s ${changed.join(', ')}, but ` : ''}its checks were not changed: ${(err as Error).message}`);
+      }
+      // The checks are Shreni's, not the engine's, so their change is recorded as a note on the task.
+      const text = `edited checks: ${[
+        ...(before.length ? [`removed ${before.length}`] : []),
+        ...(checks.length ? [`added: ${checks.map(c => `Given ${c.given}, when ${c.when}, then ${c.then}`).join('; ')}`] : []),
+      ].join('; ')}`;
+      try {
+        await me.notes.add(id, text);
+      } catch (err) {
+        throw new Error(`${id}'s checks were changed, but the note recording it failed (${(err as Error).message}); note it by hand: ${text}`);
+      }
+      changed.push('checks');
+    }
+    deps.print(changed.length ? `edited ${id}: ${changed.join(', ')}` : `nothing changed on ${id}`);
   },
 
   async note({ ctx, deps, me }) {

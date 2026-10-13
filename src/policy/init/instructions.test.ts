@@ -56,7 +56,7 @@ describe('the block', () => {
     writeFileSync(file, renderBlock('kshetra'));
     expect(blockProblem(file, 'tracker')).toMatch(/has the kshetra block, but this is a tracker project/);
     writeFileSync(file, '<!-- shreni:begin tracker v0 -->\nx\n<!-- shreni:end -->');
-    expect(blockProblem(file, 'tracker')).toMatch(/block is v0, behind v1/);
+    expect(blockProblem(file, 'tracker')).toMatch(/block is v0, behind v2/);
     writeFileSync(file, renderBlock('tracker'));
     expect(blockProblem(file, 'tracker')).toBeNull();
   });

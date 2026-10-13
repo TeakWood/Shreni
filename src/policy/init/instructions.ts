@@ -9,7 +9,7 @@ import type { ProjectMode } from './project';
 // could start claiming tasks.
 
 /** Each block's current version; prime warns about a file whose block is older. */
-export const BLOCK_VERSION: Readonly<Record<ProjectMode, number>> = { tracker: 1, kshetra: 1 };
+export const BLOCK_VERSION: Readonly<Record<ProjectMode, number>> = { tracker: 2, kshetra: 1 };
 
 const TRACKER = `## Task tracking
 
@@ -29,6 +29,7 @@ Use the installed \`shreni\`, never a build from this checkout.
 Filing and remembering:
 
     shreni task create --title "…"   # lands as proposed; the developer approves it
+    shreni task edit <id> …          # correct a task filed wrong; it keeps its id
     shreni task remember "…"         # an insight for later sessions
 
 Never run \`shreni task approve\` or \`shreni task upgrade\`; those are the developer's.`;

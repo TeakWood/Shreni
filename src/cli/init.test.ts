@@ -91,7 +91,7 @@ describe('shreni init: the mode', { timeout: PGLITE_TIMEOUT }, () => {
     expect(existsSync(REGISTRY) ? readFileSync(REGISTRY, 'utf8') : null).toBe(before);
     expect(d.kshetraCalls).not.toHaveBeenCalled();
     // Its instruction file gets the tracker block, and Claude Code the prime hooks.
-    expect(readFileSync(join(r, 'CLAUDE.md'), 'utf8')).toMatch(/^<!-- shreni:begin tracker v1 -->/);
+    expect(readFileSync(join(r, 'CLAUDE.md'), 'utf8')).toMatch(/^<!-- shreni:begin tracker v2 -->/);
     expect(readFileSync(join(r, '.claude', 'settings.json'), 'utf8')).toContain('shreni task prime');
 
     // shreni start, run from inside the repo, naming it.

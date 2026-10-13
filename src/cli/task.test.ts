@@ -698,13 +698,154 @@ describe('a project on an older lifecycle', { timeout: PGLITE_TIMEOUT }, () => {
   });
 });
 
+describe('shreni task edit', { timeout: PGLITE_TIMEOUT }, () => {
+  const checksOn = (shreni: ShreniClient, id: string) => shreni.db.selectFrom('shreni.acceptance_checks')
+    .select(['given', 'when', 'then']).where('task_id', '=', id).orderBy('created_at').orderBy('id').execute();
+
+  it('given a proposed task in a tracker project, when the developer edits its title, description and priority, then show has them under the same id', async () => {
+    const { tg, run } = await setup();
+    const t = JSON.parse(await run('create', '--title', 'Sign in', '--description', 'the form', '--json'));
+    expect(await run('edit', t.id, '--title', 'Sign in with email', '--description', 'the email form', '--priority', '1'))
+      .toBe(`edited ${t.id}: title, description, priority`);
+    expect(await tg.tasks.get(t.id)).toMatchObject({ id: t.id, title: 'Sign in with email', description: 'the email form', priority: 1, state: 'proposed' });
+    const shown = await run('show', t.id);
+    expect(shown).toMatch(new RegExp(`^${t.id}  Sign in with email\nstate proposed · P1`));
+    expect(shown).toContain('\nthe email form\n');
+  });
+
+  it('given a task with acceptance checks, when the developer clears them and gives one, then the task has exactly that one', async () => {
+    const { shreni, run } = await setup();
+    const t = JSON.parse(await run('create', '--title', 'x', '--check', 'given a when b then c', '--check', 'given d when e then f', '--json'));
+    expect(await run('edit', t.id, '--clear-checks', '--check', 'given a, when b, then c')).toBe(`edited ${t.id}: checks`);
+    expect(await checksOn(shreni, t.id)).toEqual([{ given: 'a', when: 'b', then: 'c' }]);
+    // A --check alone adds to the checks there are.
+    await run('edit', t.id, '--check', 'given g when h then i');
+    expect(await checksOn(shreni, t.id)).toEqual([{ given: 'a', when: 'b', then: 'c' }, { given: 'g', when: 'h', then: 'i' }]);
+    // --clear-checks alone leaves none.
+    await run('edit', t.id, '--clear-checks');
+    expect(await checksOn(shreni, t.id)).toEqual([]);
+  });
+
+  it('given a done or cancelled task, when the developer edits it, then it is refused and the task is unchanged', async () => {
+    const { tg, run } = await setup();
+    const sys = tg.as({ id: 's', role: 'system' });
+    const done = await sys.tasks.create({ title: 'done one' });
+    expect(await run('claim', done.id)).toMatch(/claimed/);
+    await run('finish', done.id, '--reason', 'r');
+    const gone = await sys.tasks.create({ title: 'gone one' });
+    await run('cancel', gone.id, '--reason', 'r');
+    for (const [t, state] of [[done, 'done'], [gone, 'cancelled']] as const) {
+      await expect(run('edit', t.id, '--title', 'x')).rejects.toThrow(new RegExp(`${t.id} is ${state}: a finished task isn't edited`));
+      expect((await tg.tasks.get(t.id)).title).toBe(t.title);
+    }
+  });
+
+  it('refuses a claimed task, saying to release it first, and edits it once released', async () => {
+    const { tg, run } = await setup();
+    const t = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'a' });
+    await run('claim', t.id);
+    await expect(run('edit', t.id, '--title', 'b')).rejects.toThrow(new RegExp(`${t.id} is claimed; release it first`));
+    await run('release', t.id);
+    await run('edit', t.id, '--title', 'b');
+    expect((await tg.tasks.get(t.id)).title).toBe('b');
+  });
+
+  it('given a Kshetra that is not paused, when the developer edits a task, then it is refused the same way claim is', async () => {
+    const { tg, run, deps } = await setup('kshetra');
+    const t = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'a' });
+    await expect(run('edit', t.id, '--title', 'b')).rejects.toThrow(/needs an interactive terminal/);
+    deps.interactive = () => true;
+    await expect(run('edit', t.id, '--title', 'b')).rejects.toThrow(/isn't paused; pause it first/);
+    expect((await tg.tasks.get(t.id)).title).toBe('a');
+    deps.kshetra = () => ({ paused: true, localWorker: null });
+    await run('edit', t.id, '--title', 'b');
+    expect((await tg.tasks.get(t.id)).title).toBe('b');
+  });
+
+  it('given an edit, when the developer runs show, then the history records the edit, by whom and what changed', async () => {
+    const { run } = await setup();
+    const t = JSON.parse(await run('create', '--title', 'old', '--priority', '2', '--check', 'given a when b then c', '--json'));
+    await run('edit', t.id, '--title', 'new', '--priority', '1', '--description', 'longer words');
+    await run('edit', t.id, '--clear-checks', '--check', 'given d when e then f');
+    const history = (await run('show', t.id)).split('\nHistory:\n')[1];
+    expect(history).toMatch(new RegExp(`  \\S+Z  ${ME}: edited: title "old" → "new", description set, priority 2 → 1\n`));
+    expect(history).toMatch(new RegExp(`  \\S+Z  ${ME}: edited checks: removed 1; added: Given d, when e, then f`));
+    const json = JSON.parse(await run('show', t.id, '--json'));
+    expect(json.notes.map((n: { text: string }) => n.text)).toEqual([
+      'edited: title "old" → "new", description set, priority 2 → 1', 'edited checks: removed 1; added: Given d, when e, then f',
+    ]);
+  });
+
+  it('moves a task under an epic, and out again, keeping its id', async () => {
+    const { tg, run } = await setup();
+    const dev = tg.as({ id: ME, role: 'developer' });
+    const epic = await dev.tasks.create({ title: 'Accounts', kind: 'container' });
+    const t = await dev.tasks.create({ title: 'a' });
+    await run('edit', t.id, '--parent', epic.id);
+    expect((await tg.tasks.get(t.id)).parentId).toBe(epic.id);
+    expect(await run('show', t.id)).toContain(`edited: parent none → ${epic.id}`);
+    await run('edit', t.id, '--no-parent');
+    expect((await tg.tasks.get(t.id)).parentId).toBeNull();
+  });
+
+  it('never moves a task into or out of a plan still to be approved', async () => {
+    const { tg, run } = await setup();
+    const epic = JSON.parse(await run('create', '--title', 'Accounts', '--epic', '--json'));
+    const inside = JSON.parse(await run('create', '--title', 'Sign in', '--parent', epic.id, '--json'));
+    const lone = JSON.parse(await run('create', '--title', 'lone', '--json'));
+    await expect(run('edit', lone.id, '--parent', epic.id))
+      .rejects.toThrow(new RegExp(`${epic.id} is in plan ${epic.planId}, still to be approved; ${lone.id} can't join it by an edit`));
+    await expect(run('edit', inside.id, '--no-parent')).rejects.toThrow(new RegExp(`${inside.id} is in plan ${epic.planId}, still to be approved as one`));
+    expect((await tg.tasks.get(lone.id)).parentId).toBeNull();
+    expect((await tg.tasks.get(inside.id)).parentId).toBe(epic.id);
+    // Other fields of a task in the plan are edited as any other.
+    await run('edit', inside.id, '--title', 'Sign in with email');
+    expect((await tg.tasks.get(inside.id)).title).toBe('Sign in with email');
+  });
+
+  it('clears a description given empty, and edits a parked task', async () => {
+    const { tg, run } = await setup();
+    const t = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'a', description: 'old words' });
+    await tg.as({ id: ME, role: 'developer' }).move(t.id, 'park');
+    expect(await run('edit', t.id, '--description', '')).toBe(`edited ${t.id}: description`);
+    expect(await tg.tasks.get(t.id)).toMatchObject({ description: null, state: 'parked' });
+    expect(await run('show', t.id)).toContain('edited: description cleared');
+  });
+
+  it('refuses what it can\'t do before changing anything', async () => {
+    const { shreni, tg, run } = await setup();
+    const t = JSON.parse(await run('create', '--title', 'a', '--check', 'given a when b then c', '--json'));
+    const epic = JSON.parse(await run('create', '--title', 'E', '--epic', '--json'));
+    await expect(run('edit', t.id)).rejects.toThrow(/Usage: shreni task edit <id>/);
+    await expect(run('edit')).rejects.toThrow(/Usage: shreni task edit <id>/);
+    await expect(run('edit', t.id, '--title', ' ')).rejects.toThrow(/--title can't be empty/);
+    await expect(run('edit', t.id, '--priority', '9')).rejects.toThrow(/0 to 4/);
+    await expect(run('edit', t.id, '--parent', epic.id, '--no-parent')).rejects.toThrow(/--parent or --no-parent, not both/);
+    await expect(run('edit', t.id, '--clear-checks', '--title', 'b', '--check', 'it works')).rejects.toThrow(/given … when … then/);
+    await expect(run('edit', epic.id, '--check', 'given a when b then c')).rejects.toThrow(/epic takes no --check/);
+    await expect(run('edit', 'web-nope', '--title', 'b')).rejects.toThrow(/web-nope/);
+    expect((await tg.tasks.get(t.id)).title).toBe('a');
+    expect(await checksOn(shreni, t.id)).toHaveLength(1);
+    // The same values again: nothing to record.
+    expect(await run('edit', t.id, '--title', 'a')).toBe(`nothing changed on ${t.id}`);
+    expect((await tg.tasks.history(t.id)).filter(e => e.kind === 'task.updated' || e.kind === 'note')).toEqual([]);
+  });
+
+  it('help lists edit and its flags', async () => {
+    const { run } = await setup();
+    const help = await run('help');
+    expect(help).toMatch(/shreni task edit <id> \[--title "…"\] \[--description "…"\] \[--priority 0-4\] \[--parent <id>\|--no-parent\]/);
+    expect(help).toMatch(/\[--check "given … when … then …"\]… \[--clear-checks\]/);
+  });
+});
+
 describe('shreni task setup and prime', { timeout: PGLITE_TIMEOUT }, () => {
   it('setup writes the tracker block for each agent CLI and the prime hooks; prime prints it with the memories', async () => {
     const { repo, run } = await setup();
     writeFileSync(join(repo, '.shreni', 'tracker.yaml'), `${readFileSync(join(repo, '.shreni', 'tracker.yaml'), 'utf8')}providers: [claude, codex]\n`);
     writeFileSync(join(repo, 'CLAUDE.md'), '# Ours\n');
     expect(await run('setup')).toMatch(/CLAUDE\.md: added\n.*AGENTS\.md: created\n.*settings\.json: prime hooks installed/);
-    expect(readFileSync(join(repo, 'CLAUDE.md'), 'utf8')).toMatch(/^# Ours\n\n<!-- shreni:begin tracker v1 -->/);
+    expect(readFileSync(join(repo, 'CLAUDE.md'), 'utf8')).toMatch(/^# Ours\n\n<!-- shreni:begin tracker v2 -->/);
 
     await run('remember', 'use pnpm, never npm', '--key', 'pnpm');
     const primed = await run('prime');
@@ -729,7 +870,7 @@ describe('shreni task setup and prime', { timeout: PGLITE_TIMEOUT }, () => {
     const primed = await run('prime');
     expect(primed).toMatch(/^## Task tracking/);
     expect(primed).toContain('(memories unavailable: connect ECONNREFUSED)');
-    expect(primed).toMatch(/Warning: .*CLAUDE\.md's block is v0, behind v1; run shreni task setup/);
+    expect(primed).toMatch(/Warning: .*CLAUDE\.md's block is v0, behind v2; run shreni task setup/);
     expect(readFileSync(join(repo, 'CLAUDE.md'), 'utf8')).toContain('tracker v0');
   });
 

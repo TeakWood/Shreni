@@ -279,7 +279,7 @@ A project can be tracked without ever being worked: Shreni keeps its task graph,
 - **How it's found.** The repo holds `.shreni/tracker.yaml` with the project's uuid and its other settings (Project config), so `shreni task` knows which project the current directory belongs to. There is no `kshetra.yaml` and no entry in `~/.shreni/registry.json`.
 - **How it's enforced.** `shreni start` refuses a tracker project, `shreni init` makes it a Kshetra only when asked explicitly, and the policy layer refuses every orchestrator call on it. Its tasks are only ever worked by hand.
 
-**Working by hand.** In a tracker project, a person, or a Claude Code session acting for them, works a task by hand with the developer role. In a Kshetra only the developer does, and only while its worker is paused: there `shreni task claim`, `finish`, `release`, `cancel` and `upgrade` refuse unless the Kshetra is paused and the terminal is interactive, so a session never works a Kshetra's tasks, as the Kshetra block also says. The paused flag is kept on the machine that ran `shreni pause`, so a worker holding the Kshetra's lock from another machine refuses them outright.
+**Working by hand.** In a tracker project, a person, or a Claude Code session acting for them, works a task by hand with the developer role. In a Kshetra only the developer does, and only while its worker is paused: there `shreni task claim`, `finish`, `release`, `cancel`, `edit` and `upgrade` refuse unless the Kshetra is paused and the terminal is interactive, so a session never works a Kshetra's tasks, as the Kshetra block also says. The paused flag is kept on the machine that ran `shreni pause`, so a worker holding the Kshetra's lock from another machine refuses them outright.
 
 - `shreni task claim <id>` takes one specific ready task, through the engine's claim with a filter on the id ([Claiming and leases](task-graph-engine.md#claiming-and-leases)). The lease lasts 8 hours by default. The attempt records the developer (`user` in `~/.shreni/config.yaml`, defaulting to `git config user.email`) and a worker of `cli:<user>@<host>`.
 - **Later calls find the claim by its holder.** `note`, `finish` and `release` run in new processes, so they get the task's live attempt back with the engine's `claims.resume`, which returns it only to the developer who holds it; every write is then fenced as a worker's is. Each of those calls renews the lease. Anyone else gets `LeaseHeld`, naming the holder. `shreni task release <id> --force` takes it back, and the event records who did.
@@ -287,6 +287,7 @@ A project can be tracked without ever being worked: Shreni keeps its task graph,
 - `shreni task finish <id> --reason "…"` fires `finish`, and `checksPassed` applies as for any task. No test gate runs by hand, so a task with acceptance checks finishes only with `--checks-passed`, the developer's confirmation that each check holds; finish records it on the attempt's evidence and otherwise refuses, listing the checks. On an epic it fires `completeContainer` ([Containers](#containers)). `shreni task release <id>` gives the task back.
 - **Manual checks are the developer's.** On a Kshetra, green gates and an approval pass a task's auto checks only. A task with a manual check lands, by push or by a merged PR, its finish is refused, and it is flagged for the developer; finish records on the attempt that the work landed before it moves. `shreni task confirm <id>` lists its checks and, once the developer answers yes, records `acceptance.passed` on its attempt and fires `confirm`, which takes it from `blocked` to `done`. Its guard, `checksConfirmed`, passes only for a task with a manual check whose newest attempt landed and passed, so a task flagged for anything else, such as a declined PR, is never confirmed. In a tracker project, `finish --checks-passed` does the same for a claimed task.
 - **A blocked task goes back by hand.** `shreni task unblock <id> --reason "…"` fires `unblock`, so a task flagged for a human, after a declined PR, a failed push or three lapsed claims, is open again once the developer has dealt with the cause; the reason is on the event. A boosted follow-up keeps its boost and its branch. Otherwise the worker starts it afresh, and refuses while the task's old `bead-` branch is still there, so `unblock` names that branch and the command that deletes it, and never deletes it itself, since it may hold work done by hand.
+- **A task filed wrong is edited, not filed again.** `shreni task edit <id>` changes its title, description, priority or parent through the engine's `tasks.update`, which records the old and new values as `task.updated`; `--check` adds acceptance checks and `--clear-checks` removes them first, recorded as a note, since the checks are Shreni's. The id, notes and history stay. It follows the developer's `tasks.update` permission, so a task is edited while proposed, open, blocked or parked: a finished one never, and a claimed one once its holder releases it. In a Kshetra it is hands-on, like `claim`. An edit never moves a task into or out of a plan still to be approved, since a plan is approved as one: that is cancelled and filed again. `shreni task show` lists the edits with the notes, under History. (Decision 2026-10-13, qg7.)
 - `approve`, `confirm`, `unblock` and `upgrade` need an interactive terminal, which a Claude Code shell isn't, so a session can't approve by accident. That is an accident guard, not a security boundary.
 
 ## Init
@@ -350,7 +351,7 @@ Agent sessions learn the rules from their instruction file, so Shreni writes the
 **Tracker block**, for tracker-only repos such as Shreni's own. It is the by-hand workflow ([Working by hand](#tracker-only-projects)):
 
 ```markdown
-<!-- shreni:begin tracker v1 -->
+<!-- shreni:begin tracker v2 -->
 ## Task tracking
 
 This repo is tracked with `shreni task`. It is tracker-only: Shreni never runs work here.
@@ -369,6 +370,7 @@ Use the installed `shreni`, never a build from this checkout.
 Filing and remembering:
 
     shreni task create --title "…"   # lands as proposed; the developer approves it
+    shreni task edit <id> …          # correct a task filed wrong; it keeps its id
     shreni task remember "…"         # an insight for later sessions
 
 Never run `shreni task approve` or `shreni task upgrade`; those are the developer's.
