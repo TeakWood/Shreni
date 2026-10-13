@@ -3,6 +3,7 @@ import { preFlightFresh, PreFlightError, BaseRedError } from '../sthapathi/picku
 import { runSilpiViharapalaLoop } from '../sthapathi/dispatch';
 import { handleCycleError, AgentAbortedError } from '../sthapathi/errors';
 import { resetWorkTree } from '../sthapathi/recover';
+import { stopOrphanedAgents } from '../agents/agent-procs';
 import { untrackCommittedRepoMap } from '../sthapathi/repo-map-migration';
 import { runWatchdogOnce } from '../sthapathi/watchdog';
 import { branchName } from '../sthapathi/branch';
@@ -386,6 +387,12 @@ export function createWorkerRuntime(
   }
 
   async function startup(): Promise<void> {
+    // A killed worker's agents may still be running in the checkout: stop them
+    // before anything else touches it (Shreni-beads-031a.19).
+    for (const a of await stopOrphanedAgents(kshetra.id)) {
+      log(`stopped ${a.agent} pid ${a.pid} left running by dead worker ${a.workerPid} on ${a.beadId} in ${a.cwd} ` +
+        `(killed pid ${a.killed.join(', ')})`);
+    }
     // Load the optional extension FIRST, before any events are emitted or the
     // loop is driven, so a registered extension's sinks/meter are in place from
     // the very first event. Loud ablation banner (epic 8wi): one line per active
@@ -428,7 +435,7 @@ export function createWorkerRuntime(
       throw err;
     }
     // Leases return interrupted work by themselves; only the work tree needs resetting.
-    await resetWorkTree(kshetra);
+    for (const d of await resetWorkTree(kshetra)) log(`discarded branch ${d.branch} (last commit ${d.lastCommit})`);
     if (clearStuckPauseOnRecover(kshetra)) log('cleared stale stuck pause after recovery');
     // Self-heal a legacy repo that committed .shreni/repo-map.md before it was
     // gitignored, so its post-merge regen stops dirtying the tree and wedging
@@ -480,6 +487,7 @@ export function createWorkerRuntime(
         run.controller.abort(new AgentAbortedError('self-heal'));
         run.done
           .then(() => resetWorkTree(kshetra))
+          .then(discarded => { for (const d of discarded) log(`discarded branch ${d.branch} (last commit ${d.lastCommit})`); })
           .then(() => log('self-heal complete — back to IDLE'))
           .catch((err: unknown) => logErr('self-heal failed:', err))
           .finally(() => { healing = false; });

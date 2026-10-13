@@ -19,7 +19,8 @@ vi.mock('../policy/sthapathi/connect', () => ({
   openKshetraEngine: async () => ({ shreni, close: async () => {} }),
 }));
 vi.mock('../sthapathi/dispatch', () => ({ runSilpiViharapalaLoop: (...a: unknown[]) => run(...(a as [])) }));
-vi.mock('../sthapathi/recover', async orig => ({ ...(await orig<object>()), resetWorkTree: async () => {} }));
+let discarded: { branch: string; lastCommit: string }[] = [];
+vi.mock('../sthapathi/recover', async orig => ({ ...(await orig<object>()), resetWorkTree: async () => discarded }));
 // The work tree check is stubbed; the health gate runs for real, on a stubbed suite.
 let baseGreen = true;
 vi.mock('../sthapathi/health', async orig => ({
@@ -194,6 +195,38 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     // doesn't move its task gives the claim back.
     expect(await t.pglite.query<any>(`select outcome from taskgraph.attempts`).then(r => r.rows)).toEqual([{ outcome: 'release' }]);
     await runtime.close();
+  });
+
+  // Shreni-beads-031a.19: a worker killed mid-run leaves its Silpi running.
+  it("on start, stops a dead worker's agent before claiming, and reports it and the discarded branch", async () => {
+    const { tg, kshetra } = await setup();
+    await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'Do the thing', priority: 2 });
+    const { spawn, spawnSync } = await import('child_process');
+    const { recordAgent } = await import('../agents/agent-procs');
+    // An agent in its own process group, as runAgent starts one, whose worker is gone.
+    const agent = spawn('sleep', ['300'], { detached: true, stdio: 'ignore' });
+    const pid = agent.pid!;
+    const workerPid = spawnSync('true').pid!;
+    onTestFinished(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } });
+    recordAgent(kshetra.id, { pid, workerPid, agent: 'silpi', beadId: 'web-k6g', bin: 'sleep', cwd: kshetra.repo.path, startedAt: new Date().toISOString() });
+    discarded = [{ branch: 'bead-web-k6g/lint', lastCommit: '64a4a58 lint rules' }];
+    onTestFinished(() => { discarded = []; });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((m: string) => { logs.push(m); });
+    onTestFinished(() => spy.mockRestore());
+
+    const { createWorkerRuntime } = await import('./worker-runtime');
+    const runtime = createWorkerRuntime(kshetra, { entrypoint: 'drain' });
+    onTestFinished(() => runtime.close());
+    await runtime.startup();
+
+    await new Promise(r => agent.exitCode !== null || agent.signalCode !== null ? r(null) : agent.once('exit', r));
+    expect(agent.signalCode).toBe('SIGKILL');
+    expect((await tg.tasks.list({})).map(t => t.state)).toEqual(['open']);
+    expect(logs).toContainEqual(expect.stringContaining(`stopped silpi pid ${pid} left running by dead worker ${workerPid} on web-k6g`));
+    expect(logs).toContainEqual(expect.stringContaining('discarded branch bead-web-k6g/lint (last commit 64a4a58 lint rules)'));
+    // Stopping comes first: nothing else touched the checkout before it.
+    expect(logs.findIndex(l => l.includes('stopped silpi'))).toBeLessThan(logs.findIndex(l => l.includes('worker lock held')));
   });
 
   it('refuses a Kshetra with no project (still on beads), naming shreni migrate', async () => {

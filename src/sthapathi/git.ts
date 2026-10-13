@@ -163,6 +163,12 @@ export function git(kshetraOrPath: KshetraConfig | string) {
       return prefix ? all.filter(b => b.startsWith(prefix)) : all;
     },
 
+    // `<short sha> <subject>` of the commit at `ref`.
+    async lastCommit(ref: string): Promise<string> {
+      const { stdout } = await run(['log', '-1', '--format=%h %s', ref, '--'], repoPath);
+      return stdout.trim();
+    },
+
     async status(): Promise<{ modified: string[]; staged: string[]; untracked: string[] }> {
       const { stdout } = await run(['status', '--porcelain'], repoPath);
       const modified: string[] = [];

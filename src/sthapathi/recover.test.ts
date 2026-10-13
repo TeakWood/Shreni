@@ -6,6 +6,7 @@ import type { KshetraConfig } from '../kshetra/config.js';
 const calls: string[] = [];
 const mockBranches = vi.fn<() => Promise<string[]>>();
 const mockDeleteBranch = vi.fn<(b: string, o?: unknown) => Promise<void>>();
+const mockLastCommit = vi.fn<(ref: string) => Promise<string>>();
 
 vi.mock('./git.js', () => ({
   git: vi.fn(() => ({
@@ -14,6 +15,7 @@ vi.mock('./git.js', () => ({
     clean: async () => { calls.push('clean'); },
     branches: mockBranches,
     deleteBranch: mockDeleteBranch,
+    lastCommit: mockLastCommit,
   })),
 }));
 
@@ -29,6 +31,7 @@ beforeEach(() => {
   calls.length = 0;
   mockBranches.mockResolvedValue([]);
   mockDeleteBranch.mockResolvedValue(undefined);
+  mockLastCommit.mockImplementation(async ref => `abc123 work on ${ref}`);
 });
 
 describe('resetWorkTree', () => {
@@ -49,5 +52,12 @@ describe('resetWorkTree', () => {
     await resetWorkTree(KSHETRA, { keepBranch: 'bead-a/x' });
     expect(mockDeleteBranch).toHaveBeenCalledTimes(1);
     expect(mockDeleteBranch).toHaveBeenCalledWith('bead-b/y', { force: true });
+  });
+
+  // Shreni-beads-031a.19: recovery says what it discarded.
+  it('returns each deleted branch with its last commit', async () => {
+    mockBranches.mockResolvedValue(['bead-a/x', 'bead-b/y']);
+    const discarded = await resetWorkTree(KSHETRA, { keepBranch: 'bead-b/y' });
+    expect(discarded).toEqual([{ branch: 'bead-a/x', lastCommit: 'abc123 work on bead-a/x' }]);
   });
 });

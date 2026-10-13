@@ -552,3 +552,54 @@ describe('runAgent session identity (Shreni-beads-228)', () => {
     expect(mockEmitted.filter(e => e.type === 'turn_usage').map(e => [e.sessionId, e.turnIndex])).toEqual([[s1, 0], [s2, 0]]);
   });
 });
+
+// Shreni-beads-031a.19: every agent is recorded while it runs, so a restart
+// after the worker is killed can find and stop it.
+describe('runAgent agent records', () => {
+  it('records the running agent with this worker and the task, and forgets it once it exits', async () => {
+    const { agentsDir } = await import('./agent-procs');
+    const { readdirSync, readFileSync, existsSync } = await import('fs');
+    const files = (): string[] => (existsSync(agentsDir('myapp')) ? readdirSync(agentsDir('myapp')) : []);
+    // An earlier test's agent is forgotten on its close, which may land after it ended.
+    for (let i = 0; i < 100 && files().length > 0; i++) await new Promise(r => setTimeout(r, 10));
+    mockGetAdapter.mockReturnValue(sleepAdapter(30));
+    const controller = new AbortController();
+    const p = runAgent(OPTS(controller.signal));
+    for (let i = 0; i < 100 && files().length === 0; i++) await new Promise(r => setTimeout(r, 10));
+    const [file] = files();
+    const rec = JSON.parse(readFileSync(`${agentsDir('myapp')}/${file}`, 'utf8'));
+    expect(rec).toMatchObject({ workerPid: process.pid, agent: 'silpi', beadId: 'bd-1', bin: 'sleep', cwd: process.cwd() });
+    expect(file).toBe(`${rec.pid}.json`);
+    controller.abort();
+    await expect(p).rejects.toBeInstanceOf(AgentAbortedError);
+    for (let i = 0; i < 100 && files().length > 0; i++) await new Promise(r => setTimeout(r, 10));
+    expect(files()).toEqual([]);
+  });
+});
+
+describe('runAgent process group', () => {
+  it("an abort kills the agent's tool calls too, not just the agent", async () => {
+    const { execFileSync } = await import('child_process');
+    const { agentsDir } = await import('./agent-procs');
+    const { readdirSync, readFileSync } = await import('fs');
+    mockGetAdapter.mockReturnValue({
+      name: 'anthropic' as const,
+      buildSpawn: () => ({ bin: 'sh', args: ['-c', 'sleep 304 & wait'] }),
+      createParser: () => ({ onLine: () => {}, finalize: () => ({ structuredOutput: {}, resultText: '', toolCallCount: 0 }) }),
+    });
+    const controller = new AbortController();
+    const p = runAgent(OPTS(controller.signal));
+    const sleeps = (): string => execFileSync('ps', ['-A', '-o', 'stat=,command='], { encoding: 'utf8' })
+      .split('\n').filter(l => /sleep 304/.test(l) && !/^\s*Z/.test(l)).join('\n');
+    for (let i = 0; i < 100 && !sleeps(); i++) await new Promise(r => setTimeout(r, 10));
+    expect(sleeps()).not.toBe('');
+    // Recorded as the leader of its own group, its pid being the group id.
+    const recs = readdirSync(agentsDir('myapp')).map(f => JSON.parse(readFileSync(`${agentsDir('myapp')}/${f}`, 'utf8')));
+    const rec = recs.find(r => r.bin === 'sh')!;
+    expect(execFileSync('ps', ['-o', 'pgid=', '-p', String(rec.pid)], { encoding: 'utf8' }).trim()).toBe(String(rec.pid));
+    controller.abort();
+    await expect(p).rejects.toBeInstanceOf(AgentAbortedError);
+    for (let i = 0; i < 100 && sleeps(); i++) await new Promise(r => setTimeout(r, 10));
+    expect(sleeps()).toBe('');
+  });
+});

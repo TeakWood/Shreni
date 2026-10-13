@@ -3,6 +3,7 @@ import { createWorkerRuntime, workerPreconditionError } from './worker-runtime';
 import { WorkerLockHeld } from '../policy/sthapathi/leases';
 import { parseLabels } from './labels';
 import { claimForThisProcess } from './pid';
+import { OrphanAgentAlive } from '../agents/agent-procs';
 
 // A worker process drives exactly one kshetra. Its id is passed as argv[2] by
 // `shreni start`. Each worker has its own PID + logs under ~/.shreni/kshetra/<id>/,
@@ -78,7 +79,9 @@ runtime.startup()
     console.error(`[shreni worker:${kshetraId}] startup failed:`, err);
     // Another worker already runs this Kshetra (possibly on another machine):
     // refuse to start rather than arm a loop that would pick up nothing.
-    if (err instanceof WorkerLockHeld) {
+    // A dead worker's agent that survived being killed still writes to the
+    // checkout: never work alongside it.
+    if (err instanceof WorkerLockHeld || err instanceof OrphanAgentAlive) {
       releaseOwnership();
       process.exit(1);
     }

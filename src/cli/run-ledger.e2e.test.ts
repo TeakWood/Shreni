@@ -30,7 +30,7 @@ vi.mock('../ext/loader', () => ({ loadExtension: async () => false, DEFAULT_EXT_
 vi.mock('../sthapathi/lot-manifest', () => ({
   collectLotManifest: async () => ({ subject: {}, process: {} }),
 }));
-vi.mock('../sthapathi/recover', () => ({ resetWorkTree: async () => {} }));
+vi.mock('../sthapathi/recover', () => ({ resetWorkTree: async () => [] }));
 vi.mock('../sthapathi/repo-map-migration', () => ({ untrackCommittedRepoMap: async () => false }));
 vi.mock('../sthapathi/watchdog', () => ({ runWatchdogOnce: async () => {} }));
 vi.mock('../sthapathi/merge', () => ({ reconcilePullRequests: async () => {} }));

@@ -8,6 +8,7 @@ import type { ModelSelection, UsageRecord } from '../ext/index.js';
 import { getAdapter } from './providers/index.js';
 import { AgentRunError } from './providers/types.js';
 import type { AgentRunnerOpts, AgentRunResult, AdapterEmit, TokenUsage } from './providers/types.js';
+import { recordAgent, trackLiveAgent, untrackLiveAgent, signalAgent, AGENT_OWN_GROUP } from './agent-procs.js';
 
 // Fingerprint the exact inputs a run was dispatched with, for the run_started
 // ledger entry (4a2.2). A stable SHA-256 over the resolved provider/model, the
@@ -429,10 +430,27 @@ function runAttempt(opts: AgentRunnerOpts): Promise<AgentRunResult> {
       cwd: opts.cwd,
       env: { ...process.env, ...(spec.env ?? {}) },
       stdio: [spec.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      // Its own process group, which its tool calls inherit, so the agent can be
+      // stopped whole, even by a restart after this worker is killed.
+      detached: AGENT_OWN_GROUP,
     });
 
+    // Recorded while it runs, so a restart after this worker is killed can stop
+    // it (Shreni-beads-031a.19). A failed write never fails the run.
+    const pid = proc.pid;
+    if (pid !== undefined) {
+      try {
+        recordAgent(opts.kshetraId, {
+          pid, workerPid: process.pid, agent: opts.agentName, beadId: opts.beadId,
+          bin: spec.bin, cwd: opts.cwd, startedAt: new Date().toISOString(),
+        });
+      } catch { /* best-effort */ }
+      trackLiveAgent(opts.kshetraId, pid);
+      proc.on('close', () => untrackLiveAgent(pid));
+    }
+
     const onAbort = (): void => {
-      proc.kill('SIGKILL');
+      if (pid === undefined || !signalAgent(pid, 'SIGKILL')) proc.kill('SIGKILL');
       reject(new AgentAbortedError());
     };
     opts.signal?.addEventListener('abort', onAbort, { once: true });
