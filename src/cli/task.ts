@@ -16,7 +16,7 @@ import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import {
   assertHandsOnKshetra, byHandWorker, cancelByHand, checksOf, claimByHand, confirmable, confirmByHand, finishByHand, noteByHand, releaseByHand,
 } from '../policy/task/by-hand';
-import { NotFound, VersionMismatch } from '../taskgraph';
+import { InvalidRequest, NotFound, VersionMismatch } from '../taskgraph';
 import { loadState } from '../kshetra/state';
 import { blockBody, blockProblem, installPrimeHooks, leftoverWarning, writeBlock } from '../policy/init/instructions';
 import { PROVIDER_REGISTRY, providerFromCliName, providerInstructionFile } from '../agents/providers/registry';
@@ -57,7 +57,7 @@ const HELP = [
   'shreni task finish <id> --reason "…" [--checks-passed]  finish your task, or complete an epic',
   'shreni task release <id> [--force] [--reason "…"]  give a task back; --force takes back someone else\'s',
   'shreni task cancel <id> --reason "…" [--with-children] [--drop-deps]',
-  'shreni task approve <id>                      approve a plan or a lone task (terminal only)',
+  'shreni task approve <id>                      approve a plan, an epic with its tasks, or a lone task (terminal only)',
   'shreni task confirm <id> [--reason "…"]        confirm a flagged task\'s acceptance checks hold, and finish it (terminal only)',
   'shreni task unblock <id> --reason "…"         give a blocked task back to open, once its cause is dealt with (terminal only)',
   'shreni task upgrade [--force]                 move the project to this Shreni\'s lifecycle (terminal only)',
@@ -457,6 +457,17 @@ type Run = (s: {
   found: ReturnType<typeof findProjectConfig>; user: string;
 }) => Promise<void>;
 
+/** The open plan a task was filed in: neither approved nor discarded, so work may still join it. */
+async function openPlanOf(tg: ProjectHandle, taskId: string): Promise<string | null> {
+  const t = await tg.tasks.get(taskId).catch(err => {
+    if (err instanceof NotFound) return null;
+    throw err;
+  });
+  if (!t?.planId) return null;
+  const plan = await tg.plans.get(t.planId);
+  return plan.approvedAt || plan.discardedAt ? null : plan.id;
+}
+
 /** The one task id a subcommand takes. */
 function oneId(a: { positionals: string[] }, usage: string): string {
   const [id] = a.positionals;
@@ -530,13 +541,35 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
     // An epic finishes when its children settle; checks on it would never be run.
     if (checks.length && a.bools.has('--epic')) throw new Error('an epic takes no --check; give its tasks the checks');
     if (priority !== undefined && !/^[0-4]$/.test(priority)) throw new Error('--priority takes 0 to 4');
-    const task = await me.tasks.create({
+    // An epic filed by hand is a plan, so approving it opens its tasks in one
+    // step: a new epic starts a plan, and work under an epic whose plan is still
+    // open joins it. Under an approved epic, work is a lone task again.
+    if (parent) await tg.tasks.get(parent);   // a parent that isn't there fails before any plan is started
+    const parentPlan = parent ? await openPlanOf(tg, parent) : null;
+    const newPlan = !parentPlan && a.bools.has('--epic') ? (await me.plans.create({ title })).id : null;
+    let plan = parentPlan ?? newPlan;
+    const file = () => me.tasks.create({
       title,
       ...(description ? { description } : {}),
       ...(parent ? { parent } : {}),
+      ...(plan ? { plan } : {}),
       ...(priority !== undefined ? { priority: Number(priority) } : {}),
       ...(a.bools.has('--epic') ? { kind: 'container' as const } : {}),
     });
+    let task: Task;
+    try {
+      task = await file();
+    } catch (err) {
+      if (parentPlan && err instanceof InvalidRequest && !(await openPlanOf(tg, parent!))) {
+        // The parent's plan was approved meanwhile: later work under it is a lone task.
+        plan = null;
+        task = await file();
+      } else {
+        // A plan started for this epic and left empty is discarded, not left open.
+        if (newPlan) await me.plans.discard(newPlan, { via: 'cli' }).catch(() => {});
+        throw err;
+      }
+    }
     if (checks.length) {
       try {
         await shreni.transaction(db => db.insertInto('shreni.acceptance_checks')
@@ -561,7 +594,8 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
       }
     }
     if (json) return deps.print(JSON.stringify({ ...task, checks }));
-    deps.print(`filed ${task.id} (${task.state}): ${task.title}${checks.length ? ` · ${checks.length} check${checks.length > 1 ? 's' : ''}` : ''}`);
+    deps.print(`filed ${task.id} (${task.state})${plan ? ` in plan ${plan}` : ''}: ${task.title}` +
+      `${checks.length ? ` · ${checks.length} check${checks.length > 1 ? 's' : ''}` : ''}`);
   },
 
   async note({ ctx, deps, me }) {
@@ -651,24 +685,34 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
 
   async approve({ ctx, deps, tg, me, shreni }) {
     const id = oneId(parseArgs(ctx.args, { positionals: 1 }), 'approve <id>');
-    const plan = await tg.plans.get(id).catch(err => {
+    // A plan by its id, or the open plan a task was filed in (an epic filed by
+    // hand and its tasks): approving it opens the whole plan.
+    const asPlan = await tg.plans.get(id).catch(err => {
       if (err instanceof NotFound) return null;
       throw err;
     });
+    const planId = asPlan ? id : await openPlanOf(tg, id);
+    const plan = asPlan ?? (planId ? await tg.plans.get(planId) : null);
     // What is approved is shown first, checks included: the tasks, and the validators' findings.
     const shown = async (t: Task) => [
       `  ${line(t)}`,
       ...(await checksOf(shreni, tg.id, t.id)).map(c => `      Given ${c.given}, when ${c.when}, then ${c.then}${c.mode === 'manual' ? ' (manual)' : ''}`),
     ];
-    const planTasks = () => tg.tasks.list({ plan: id, orderBy: 'created' });
+    const planTasks = () => tg.tasks.list({ plan: planId!, orderBy: 'created' });
     const before = plan ? await planTasks() : [await tg.tasks.get(id)];
-    const out = [plan ? `plan ${id}: ${plan.title}` : 'task'];
+    if (planId && !asPlan) {
+      // Named by one of its tasks: say so, unless that task is the plan's only root (its epic).
+      const inPlan = new Set(before.map(t => t.id));
+      const roots = before.filter(t => !t.parentId || !inPlan.has(t.parentId));
+      if (roots.length !== 1 || roots[0].id !== id) deps.print(`${id} is in plan ${planId}; approving it opens the whole plan`);
+    }
+    const out = [plan ? `plan ${planId}: ${plan.title}` : 'task'];
     for (const t of before) out.push(...await shown(t));
     if (plan) {
-      const report = await me.plans.validate(id);
+      const report = await me.plans.validate(planId!);
       for (const f of report.findings) out.push(`  ${f.severity}: ${f.message}`);
       deps.print(out.join('\n'));
-      if (!report.ok) throw new Error(`plan ${id} doesn't pass validation; fix the errors above first`);
+      if (!report.ok) throw new Error(`plan ${planId} doesn't pass validation; fix the errors above first`);
     } else {
       deps.print(out.join('\n'));
     }
@@ -677,12 +721,14 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
     if (plan) {
       // Approve only what was shown: a plan still being filed may have grown meanwhile.
       const now = (await planTasks()).map(t => t.id).sort().join(',');
-      if (now !== before.map(t => t.id).sort().join(',')) throw new Error(`plan ${id} changed while you looked; run approve again`);
-      for (const f of (await me.plans.approve(id, { via: 'cli' })).findings) deps.print(`  ${f.severity}: ${f.message}`);
+      if (now !== before.map(t => t.id).sort().join(',')) throw new Error(`plan ${planId} changed while you looked; run approve again`);
+      for (const f of (await me.plans.approve(planId!, { via: 'cli' })).findings) deps.print(`  ${f.severity}: ${f.message}`);
+      const opened = before.filter(t => t.state === 'proposed').length;
+      deps.print(`approved ${id}: ${opened} task${opened === 1 ? '' : 's'} open`);
     } else {
       await me.tasks.approve(id, { via: 'cli' });
+      deps.print(`approved ${id}`);
     }
-    deps.print(`approved ${id}`);
   },
 
   async upgrade({ ctx, deps, tg, me, shreni, found }) {

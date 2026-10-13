@@ -102,7 +102,7 @@ describe('shreni task', { timeout: PGLITE_TIMEOUT }, () => {
   it('files an epic, and a task under it with a priority', async () => {
     const { tg, run } = await setup();
     const epic = JSON.parse(await run('create', '--title', 'Accounts', '--epic', '--json'));
-    expect(await run('create', '--title', 'Sign in', '--parent', epic.id, '--priority', '1')).toMatch(/filed .* \(proposed\): Sign in/);
+    expect(await run('create', '--title', 'Sign in', '--parent', epic.id, '--priority', '1')).toMatch(new RegExp(`filed .* \\(proposed\\) in plan ${epic.planId}: Sign in`));
     expect(await tg.tasks.list({ parent: epic.id })).toEqual([expect.objectContaining({ title: 'Sign in', priority: 1 })]);
     expect(epic.kind).toBe('container');
   });
@@ -449,6 +449,93 @@ describe('shreni task by hand: claim, finish, release, cancel, approve, upgrade'
     deps.ask = async () => 'no';
     await expect(run('approve', id)).rejects.toThrow(/not approved/);
     expect(printed.join('\n')).toMatch(/Given a, when b, then c/);
+  });
+
+  it('given an epic and two children filed with create, when the developer approves the epic and types its id, then all three open', async () => {
+    const { tg, run, deps } = await setup();
+    deps.interactive = () => true;
+    const filed = async (...args: string[]) => JSON.parse(await run('create', ...args, '--json'));
+    const epic = await filed('--epic', '--title', 'Accounts');
+    const a = await filed('--parent', epic.id, '--title', 'sign up', '--check', 'given a new user when they sign up then they are signed in');
+    const b = await filed('--parent', epic.id, '--title', 'sign in');
+    // The epic files a plan of its own, and its children join it.
+    expect(epic.planId).toBeTruthy();
+    expect([a.planId, b.planId]).toEqual([epic.planId, epic.planId]);
+    expect(await run('ready')).not.toMatch(/sign/);
+
+    const printed: string[] = [];
+    deps.print = l => printed.push(l);
+    deps.ask = async () => epic.id;
+    await run('approve', epic.id);
+    const shown = printed.join('\n');
+    expect(shown).toMatch(new RegExp(`plan ${epic.planId}: Accounts`));
+    for (const t of [epic, a, b]) expect(shown).toContain(t.id);
+    expect(shown).toMatch(/Given a new user, when they sign up, then they are signed in/);
+    expect(shown).toMatch(new RegExp(`approved ${epic.id}: 3 tasks open`));
+    for (const t of [epic, a, b]) expect((await tg.tasks.get(t.id)).state).toBe('open');
+    expect((await tg.plans.get(epic.planId)).approvedAt).toBeTruthy();
+  });
+
+  it('a lone create, and a child of an epic already approved, stay lone tasks approved on their own', async () => {
+    const { tg, run, deps } = await setup();
+    deps.interactive = () => true;
+    const filed = async (...args: string[]) => JSON.parse(await run('create', ...args, '--json'));
+    const lone = await filed('--title', 'lone');
+    expect(lone).toMatchObject({ planId: null, origin: 'manual' });
+    const epic = await filed('--epic', '--title', 'E');
+    // An epic is approved with its tasks: alone, its plan fails validation.
+    deps.ask = async () => epic.id;
+    await expect(run('approve', epic.id)).rejects.toThrow(/doesn't pass validation/);
+    await filed('--parent', epic.id, '--title', 'first');
+    await run('approve', epic.id);
+    // The epic's plan is approved: later work under it is filed on its own.
+    const later = await filed('--parent', epic.id, '--title', 'later');
+    expect(later).toMatchObject({ planId: null, origin: 'manual', state: 'proposed' });
+    deps.ask = async () => later.id;
+    expect(await run('approve', later.id)).toMatch(new RegExp(`approved ${later.id}$`));
+    expect((await tg.tasks.get(later.id)).state).toBe('open');
+  });
+
+  it('a nested epic and its task join the outer epic\'s plan, and the epic\'s own line names the plan', async () => {
+    const { tg, run } = await setup();
+    const out = await run('create', '--epic', '--title', 'Outer');
+    const [, outerId, planId] = /^filed (\S+) \(proposed\) in plan (\S+): Outer$/.exec(out)!;
+    const inner = JSON.parse(await run('create', '--epic', '--parent', outerId, '--title', 'Inner', '--json'));
+    const task = JSON.parse(await run('create', '--parent', inner.id, '--title', 'work', '--json'));
+    expect([inner.planId, task.planId]).toEqual([planId, planId]);
+    expect((await tg.plans.list({})).map(p => p.id)).toEqual([planId]);
+  });
+
+  it('a parent that isn\'t there fails before any plan is started', async () => {
+    const { tg, run } = await setup();
+    await expect(run('create', '--epic', '--parent', 'web-nope', '--title', 'E')).rejects.toThrow(/web-nope/);
+    expect(await tg.plans.list({})).toEqual([]);
+    expect(await tg.tasks.list({})).toEqual([]);
+  });
+
+  it('work filed by hand under an epic Suthradhara is still planning joins its plan', async () => {
+    const { t, tg, run } = await setup();
+    await t.pglite.query(`insert into taskgraph.plans (project_id, id, title, meta) values ($1, 'web-plan-9', 'Planned', '{}')`, [tg.id]);
+    const epic = await tg.as({ id: 'p', role: 'planner' }).tasks.create({ title: 'E', kind: 'container', plan: 'web-plan-9' });
+    const mine = JSON.parse(await run('create', '--parent', epic.id, '--title', 'by hand', '--json'));
+    expect(mine).toMatchObject({ planId: 'web-plan-9', origin: 'plan', state: 'proposed' });
+  });
+
+  it('approving a child of an epic still proposed approves the epic\'s whole plan, shown first', async () => {
+    const { tg, run, deps } = await setup();
+    deps.interactive = () => true;
+    const filed = async (...args: string[]) => JSON.parse(await run('create', ...args, '--json'));
+    const epic = await filed('--epic', '--title', 'E');
+    const a = await filed('--parent', epic.id, '--title', 'a');
+    deps.ask = async () => 'no';
+    const printed: string[] = [];
+    deps.print = l => printed.push(l);
+    await expect(run('approve', a.id)).rejects.toThrow(/not approved/);
+    expect(printed.join('\n')).toMatch(new RegExp(`${a.id} is in plan ${epic.planId}; approving it opens the whole plan`));
+    expect(printed.join('\n')).toContain(epic.id);
+    deps.ask = async () => a.id;
+    await run('approve', a.id);
+    for (const t of [epic, a]) expect((await tg.tasks.get(t.id)).state).toBe('open');
   });
 
   it('upgrade, at a terminal, says when the project is already on this lifecycle', async () => {
