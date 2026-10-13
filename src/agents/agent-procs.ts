@@ -25,8 +25,11 @@ export interface AgentRecord {
   startedAt: string;
 }
 
-export interface StoppedAgent extends AgentRecord {
-  /** Every pid that was in the agent's group (and the dead worker's) when it was stopped. */
+/** A dead worker's agent, as recovery found it. */
+export interface OrphanedAgent extends AgentRecord {
+  /** 'stopped': still running, now killed. 'exited': gone already, leaving nothing running. */
+  status: 'stopped' | 'exited';
+  /** Every pid killed for it: its group's, and the dead worker's group's. Empty when it had exited. */
   killed: number[];
 }
 
@@ -111,10 +114,14 @@ const startedBy = (p: Proc, iso: string): boolean => p.startMs <= Date.parse(iso
  * Stops every recorded agent whose worker is dead, with SIGKILL: its whole
  * process group, and the dead worker's own group (where it led one), so
  * the gate runs and tool calls it left go too. Its work is discarded by the
- * work-tree reset that follows. Returns what it stopped. A record with nothing
- * left running, or from before the last boot, is dropped. Throws
- * OrphanAgentAlive, naming the pids, if any survive or the process table
- * can't be read.
+ * work-tree reset that follows.
+ *
+ * Returns each dead worker's agent with what was done: 'stopped' with the pids
+ * killed, or 'exited' when nothing of it was left running. Their records are
+ * then dropped. A record from before the last boot is dropped unreported.
+ * Throws OrphanAgentAlive, naming the pids, if any survive or the process
+ * table can't be read; the records are then kept, to be reported by the next
+ * start.
  *
  * A group only counts as the recorded one if its leader started by the time
  * of the record or, leader gone, the record is from since the last boot: while
@@ -124,7 +131,7 @@ const startedBy = (p: Proc, iso: string): boolean => p.startMs <= Date.parse(iso
 export async function stopOrphanedAgents(
   kshetraId: string,
   opts: { isWorkerLive?: (pid: number) => boolean } = {},
-): Promise<StoppedAgent[]> {
+): Promise<OrphanedAgent[]> {
   const bootMs = Date.now() - uptime() * 1000;
   const records = readRecords(kshetraId).filter(rec => {
     if (Date.parse(rec.startedAt) > bootMs) return true;
@@ -144,8 +151,11 @@ export async function stopOrphanedAgents(
   };
   const members = (pgid: number): number[] => table.filter(p => p.pgid === pgid).map(p => p.pid);
 
-  const stopped: StoppedAgent[] = [];
+  const found: OrphanedAgent[] = [];
   const signalled = new Set<number>();
+  // An agent that is not its own group's leader (its spawn couldn't make one)
+  // is killed by itself.
+  const lone = new Set<number>();
   for (const rec of records) {
     if (workerLive(rec)) continue;
     // A live agent that started after its record is a reused pid; the record
@@ -155,20 +165,24 @@ export async function stopOrphanedAgents(
     const groups = [rec.pid, rec.workerPid].filter(g =>
       g !== ownGroup && !signalled.has(g) && members(g).length > 0 &&
       (g === rec.pid || !byPid.has(g) || startedBy(byPid.get(g)!, rec.startedAt)));
-    if (groups.length === 0) {
-      if (!leader) forgetAgent(kshetraId, rec.pid);
+    const alone = leader && members(rec.pid).length === 0 ? [rec.pid] : [];
+    if (groups.length === 0 && alone.length === 0) {
+      if (!leader) found.push({ ...rec, status: 'exited', killed: [] });
       continue;
     }
-    const killed = groups.flatMap(members);
     for (const g of groups) { signalAgent(g, 'SIGKILL'); signalled.add(g); }
-    stopped.push({ ...rec, killed });
+    for (const p of alone) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } lone.add(p); }
+    found.push({ ...rec, status: 'stopped', killed: [...new Set([...alone, ...groups.flatMap(members)])] });
   }
-  const exists = (g: number): boolean => signalAgent(g, 0);
-  for (let i = 0; i < 100 && [...signalled].some(exists); i++) await new Promise(r => setTimeout(r, 20));
-  const survivors = [...signalled].filter(exists);
+  const alive = (): number[] => [
+    ...[...signalled].filter(g => signalAgent(g, 0)),
+    ...[...lone].filter(p => { try { process.kill(p, 0); return true; } catch { return false; } }),
+  ];
+  for (let i = 0; i < 100 && alive().length > 0; i++) await new Promise(r => setTimeout(r, 20));
+  const survivors = alive();
   if (survivors.length > 0) throw new OrphanAgentAlive(survivors);
-  for (const s of stopped) forgetAgent(kshetraId, s.pid);
-  return stopped;
+  for (const a of found) forgetAgent(kshetraId, a.pid);
+  return found;
 }
 
 // Agents this process runs now, by pid (= group id), with their Kshetra. In

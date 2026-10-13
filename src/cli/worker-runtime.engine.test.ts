@@ -229,6 +229,32 @@ describe('the worker runtime on the engine', { timeout: PGLITE_TIMEOUT }, () => 
     expect(logs.findIndex(l => l.includes('stopped silpi'))).toBeLessThan(logs.findIndex(l => l.includes('worker lock held')));
   });
 
+  // Shreni-beads-031a.20: the orphan committed, then exited before the restart.
+  it("on start, names a dead worker's agent that had already exited, and signals nothing", async () => {
+    const { kshetra } = await setup();
+    const { spawnSync } = await import('child_process');
+    const { recordAgent, agentsDir } = await import('../agents/agent-procs');
+    const { readdirSync } = await import('fs');
+    const pid = spawnSync('true').pid!;
+    const workerPid = spawnSync('true').pid!;
+    recordAgent(kshetra.id, { pid, workerPid, agent: 'silpi', beadId: 'web-dzg', bin: 'claude', cwd: kshetra.repo.path, startedAt: new Date().toISOString() });
+    const kill = vi.spyOn(process, 'kill');
+    onTestFinished(() => kill.mockRestore());
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((m: string) => { logs.push(m); });
+    onTestFinished(() => spy.mockRestore());
+
+    const { createWorkerRuntime } = await import('./worker-runtime');
+    const runtime = createWorkerRuntime(kshetra, { entrypoint: 'drain' });
+    onTestFinished(() => runtime.close());
+    await runtime.startup();
+
+    expect(logs).toContainEqual(expect.stringContaining(`silpi pid ${pid} of dead worker ${workerPid} on web-dzg had already exited`));
+    expect(logs.findIndex(l => l.includes('had already exited'))).toBeLessThan(logs.findIndex(l => l.includes('worker lock held')));
+    expect(kill.mock.calls.filter(([, sig]) => sig !== 0)).toEqual([]);
+    expect(readdirSync(agentsDir(kshetra.id))).not.toContain(`${pid}.json`);
+  });
+
   it('refuses a Kshetra with no project (still on beads), naming shreni migrate', async () => {
     const { workerPreconditionError } = await import('./worker-runtime');
     const { kshetra } = await setup();

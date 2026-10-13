@@ -61,7 +61,7 @@ describe('stopOrphanedAgents', () => {
     const stopped = await stopOrphanedAgents(KSHETRA);
 
     expect(members(pid)).toEqual([]);
-    expect(stopped).toEqual([expect.objectContaining({ pid, workerPid, agent: 'silpi', beadId: 'eslint-k6g' })]);
+    expect(stopped).toEqual([expect.objectContaining({ pid, workerPid, agent: 'silpi', beadId: 'eslint-k6g', status: 'stopped' })]);
     expect(stopped[0].killed.sort()).toEqual(tree.sort());
     expect(readdirSync(agentsDir(KSHETRA))).not.toContain(`${pid}.json`);
   });
@@ -128,10 +128,27 @@ describe('stopOrphanedAgents', () => {
     expect(stopped[0].killed).toEqual([pid]);
   });
 
-  it('drops the record of an agent with nothing left running', async () => {
+  it("kills a dead worker's live agent that doesn't lead its own group", async () => {
+    // Spawned without a group of its own, as an agent would be if making one failed.
+    const agent = spawn('sleep', ['308'], { stdio: 'ignore' });
+    const pid = agent.pid!;
+    try {
+      recordAgent(KSHETRA, rec({ pid, workerPid: spawnSync('true').pid!, bin: 'sleep' }));
+      const stopped = await stopOrphanedAgents(KSHETRA);
+      expect(stopped).toEqual([expect.objectContaining({ pid, status: 'stopped', killed: [pid] })]);
+      await new Promise(r => agent.exitCode !== null || agent.signalCode !== null ? r(null) : agent.once('exit', r));
+      expect(agent.signalCode).toBe('SIGKILL');
+    } finally {
+      agent.kill('SIGKILL');
+    }
+  });
+
+  // Shreni-beads-031a.20: so the log can still name it.
+  it('returns an agent with nothing left running as already exited, killing nothing, and drops its record', async () => {
     const dead = spawnSync('true').pid!;
-    recordAgent(KSHETRA, rec({ pid: dead, workerPid: dead }));
-    expect(await stopOrphanedAgents(KSHETRA)).toEqual([]);
+    const workerPid = spawnSync('true').pid!;
+    recordAgent(KSHETRA, rec({ pid: dead, workerPid }));
+    expect(await stopOrphanedAgents(KSHETRA)).toEqual([expect.objectContaining({ pid: dead, workerPid, agent: 'silpi', beadId: 'eslint-k6g', status: 'exited', killed: [] })]);
     expect(readdirSync(agentsDir(KSHETRA))).not.toContain(`${dead}.json`);
   });
 });
