@@ -94,6 +94,13 @@ export interface TaskDeps {
   backup(config: ProjectConfig, kind: DumpKind): Promise<string>;
   /** Whether the Kshetra is paused, and its worker on this machine as host/pid (its lock's name), or null. */
   kshetra(id: string): { paused: boolean; localWorker: string | null };
+  /** Whether output is colored. */
+  color: boolean;
+}
+
+/** Color for a terminal only: never with NO_COLOR set (no-color.org), nor on a dumb one. */
+export function colorOn(stdoutTTY: boolean | undefined, env: NodeJS.ProcessEnv): boolean {
+  return !!stdoutTTY && !env.NO_COLOR && env.TERM !== 'dumb';
 }
 
 const defaultDeps = (): TaskDeps => ({
@@ -102,6 +109,7 @@ const defaultDeps = (): TaskDeps => ({
   open: (config, opts) => openKshetraEngine(config, { name: 'shreni-task', ...opts }),
   user: () => loadUserConfig().user,
   print: line => console.log(line),
+  color: colorOn(process.stdout.isTTY, process.env),
   interactive: () => !!process.stdin.isTTY && !!process.stdout.isTTY,
   async ask(question) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -226,6 +234,50 @@ export function memoryKey(content: string): string {
 
 const line = (t: Task) =>
   `${t.id}  P${t.priority}  ${t.title}${t.kind === 'container' ? '  (epic)' : ''}  [${t.state}]`;
+
+// ANSI SGR colors for list's tree.
+const ID_COLOR = 36;
+const TITLE_COLOR = 37;
+const STATE_COLORS: Record<string, number> = { proposed: 35, open: 32, claimed: 33, waiting: 34, blocked: 31 };
+/** A state's color: parked, done, cancelled and any other are gray. */
+export const stateColor = (state: string): number => STATE_COLORS[state] ?? 90;
+
+// Tasks filed in one transaction share a created time; their ids then keep
+// the filing order, compared by number (web-ab.2 before web-ab.10).
+const byId = new Intl.Collator('en', { numeric: true });
+const created = (a: Task, b: Task) => +a.createdAt - +b.createdAt || byId.compare(a.id, b.id);
+
+// A title is one line of text: a newline or an escape code in it would break the tree.
+// eslint-disable-next-line no-control-regex
+const oneLine = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
+
+/**
+ * The tasks as a tree, one per line as `<id> [<state>]: <title>`, children
+ * under their parent with ├── / └── / │, in created order. A task whose
+ * parent isn't among them stands at the top level.
+ */
+function treeLines(tasks: Task[], color: boolean): string[] {
+  const paint = (code: number, s: string) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
+  const ids = new Set(tasks.map(t => t.id));
+  const children = new Map<string, Task[]>();
+  const roots: Task[] = [];
+  for (const t of [...tasks].sort(created)) {
+    if (!t.parentId || !ids.has(t.parentId)) roots.push(t);
+    else if (children.has(t.parentId)) children.get(t.parentId)!.push(t);
+    else children.set(t.parentId, [t]);
+  }
+  const out: string[] = [];
+  const draw = (t: Task, lead: string, branch: string, next: string): void => {
+    out.push(`${lead}${branch}${paint(ID_COLOR, t.id)} ${paint(stateColor(t.state), `[${t.state}]`)}: ${paint(TITLE_COLOR, oneLine(t.title))}`);
+    const kids = children.get(t.id) ?? [];
+    kids.forEach((k, i) => {
+      const last = i === kids.length - 1;
+      draw(k, lead + next, last ? '└── ' : '├── ', last ? '    ' : '│   ');
+    });
+  };
+  for (const r of roots) draw(r, '', '', '');
+  return out;
+}
 
 export async function runTask(ctx: CommandContext, overrides: Partial<TaskDeps> = {}): Promise<void> {
   const deps: TaskDeps = { ...defaultDeps(), ...overrides };
@@ -518,7 +570,7 @@ const SUBCOMMANDS: Record<Exclude<(typeof TASK_SUBCOMMANDS)[number], 'setup' | '
     }
     const tasks = await tg.tasks.list({ ...(a.bools.has('--all') ? {} : { states: states ?? LIVE }), orderBy: 'created' });
     if (json) return deps.print(JSON.stringify(tasks));
-    deps.print(tasks.length ? tasks.map(line).join('\n') : 'no tasks');
+    deps.print(tasks.length ? treeLines(tasks, deps.color).join('\n') : 'no tasks');
   },
 
   async show({ ctx, deps, tg, shreni }) {

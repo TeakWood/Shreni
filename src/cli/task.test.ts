@@ -8,7 +8,7 @@ import { createTestDb, PGLITE_TIMEOUT } from '../taskgraph/test/pglite';
 import { openShreni, type ShreniClient } from '../policy/db/client';
 import { taskLifecycle } from '../policy/lifecycle/lifecycle';
 import { makeContext } from './registry';
-import { ensureLifecycleCurrent, findProjectConfig, lifecycleGap, parseCheck, runTask, type TaskDeps } from './task';
+import { colorOn, ensureLifecycleCurrent, findProjectConfig, lifecycleGap, parseCheck, runTask, stateColor, type TaskDeps } from './task';
 import { defineLifecycle } from '../taskgraph';
 import type { KshetraConfig } from '../kshetra/config';
 import { takeWorkerLock } from '../policy/sthapathi/leases';
@@ -39,6 +39,7 @@ async function setup(kind: 'tracker' | 'kshetra' = 'tracker') {
     open: async () => ({ shreni, close: async () => {} }),
     user: () => ME,
     print: line => out.push(line),
+    color: false,
     interactive: () => false,
     ask: async () => '',
     kshetra: () => ({ paused: false, localWorker: null }),
@@ -902,5 +903,107 @@ describe('shreni task setup and prime', { timeout: PGLITE_TIMEOUT }, () => {
     deps2.open = async (c, o) => { seen.push(o); return open(c); };
     await run2('prime');
     expect(seen).toEqual([{ connectTimeout: 3 }]);
+  });
+});
+
+// Shreni-beads-29t: list draws the tree, children under their epic.
+describe('shreni task list as a tree', { timeout: PGLITE_TIMEOUT }, () => {
+  async function tree() {
+    const s = await setup();
+    const sys = s.tg.as({ id: 's', role: 'system' });
+    const epic = await sys.tasks.create({ title: 'Accounts', kind: 'container' });
+    const a = await sys.tasks.create({ title: 'Sign in', parent: epic.id });
+    const sub = await sys.tasks.create({ title: 'Sessions', kind: 'container', parent: epic.id });
+    const c = await sys.tasks.create({ title: 'Remember me', parent: sub.id });
+    const lone = await sys.tasks.create({ title: 'Lone' });
+    return { ...s, epic, a, sub, c, lone };
+  }
+
+  it("prints '<id> [<state>]: <title>' per line, children under their epic with tree glyphs, a lone task at the top", async () => {
+    const { run, epic, a, sub, c, lone } = await tree();
+    expect(await run('list')).toBe([
+      `${epic.id} [open]: Accounts`,
+      `├── ${a.id} [open]: Sign in`,
+      `└── ${sub.id} [open]: Sessions`,
+      `    └── ${c.id} [open]: Remember me`,
+      `${lone.id} [open]: Lone`,
+    ].join('\n'));
+  });
+
+  it('keeps the │ rule down past a child that has children of its own', async () => {
+    const { run, tg, epic, a, sub, c, lone } = await tree();
+    const last = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'Sign out', parent: epic.id });
+    expect(await run('list')).toBe([
+      `${epic.id} [open]: Accounts`,
+      `├── ${a.id} [open]: Sign in`,
+      `├── ${sub.id} [open]: Sessions`,
+      `│   └── ${c.id} [open]: Remember me`,
+      `└── ${last.id} [open]: Sign out`,
+      `${lone.id} [open]: Lone`,
+    ].join('\n'));
+  });
+
+  it('keeps siblings filed together in filing order, numbering included', async () => {
+    const { run, tg, shreni } = await setup();
+    const sys = tg.as({ id: 's', role: 'system' });
+    const epic = await sys.tasks.create({ title: 'Big', kind: 'container' });
+    const kids = [];
+    for (let i = 1; i <= 11; i++) kids.push(await sys.tasks.create({ title: `step ${i}`, parent: epic.id }));
+    // As if filed in one transaction: one created time for all.
+    await sql`update taskgraph.tasks set created_at = (select created_at from taskgraph.tasks where id = ${epic.id}) where project_id = ${tg.id}`.execute(shreni.db);
+    const lines = (await run('list')).split('\n');
+    expect(lines.slice(1).map(l => l.replace(/^[├└]── /, '').split(' ')[0])).toEqual(kids.map(k => k.id));
+  });
+
+  it('prints a title with a newline or an escape code in it on one line, the codes made spaces', async () => {
+    const { run, tg } = await setup();
+    const t = await tg.as({ id: 's', role: 'system' }).tasks.create({ title: 'two\nlines \x1b[31mred' });
+    expect(await run('list')).toBe(`${t.id} [open]: two lines  [31mred`);
+  });
+
+  it('puts a child whose epic is filtered out by --state at the top level', async () => {
+    const { run, tg, epic } = await tree();
+    const child = await tg.as({ id: ME, role: 'developer' }).tasks.create({ title: 'Reset password', parent: epic.id });
+    expect(await run('list', '--state', 'proposed')).toBe(`${child.id} [proposed]: Reset password`);
+  });
+
+  it('with color on, wraps the id and the state each in ANSI color codes, and the title in white', async () => {
+    const { run, deps, epic, a } = await tree();
+    deps.color = true;
+    const out = await run('list');
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    expect(out).toMatch(new RegExp(`^\\x1b\\[\\d+m${esc(epic.id)}\\x1b\\[0m \\x1b\\[32m${esc('[open]')}\\x1b\\[0m: \\x1b\\[37mAccounts\\x1b\\[0m$`, 'm'));
+    expect(out).toMatch(new RegExp(`^├── \\x1b\\[\\d+m${esc(a.id)}\\x1b\\[0m \\x1b\\[32m${esc('[open]')}\\x1b\\[0m: \\x1b\\[37mSign in\\x1b\\[0m$`, 'm'));
+  });
+
+  it('colors each state its own way', () => {
+    expect(['proposed', 'open', 'claimed', 'waiting', 'blocked', 'parked', 'done', 'cancelled'].map(stateColor))
+      .toEqual([35, 32, 33, 34, 31, 90, 90, 90]);
+  });
+
+  it('has no ANSI codes when color is off', async () => {
+    const { run, deps } = await tree();
+    deps.color = false;
+    expect(await run('list')).not.toMatch(/\x1b\[/);
+  });
+
+  it('turns color on only for a TTY with NO_COLOR unset', () => {
+    expect(colorOn(true, {})).toBe(true);
+    expect(colorOn(false, {})).toBe(false);
+    expect(colorOn(true, { NO_COLOR: '1' })).toBe(false);
+    expect(colorOn(undefined, {})).toBe(false);
+    expect(colorOn(true, { TERM: 'dumb' })).toBe(false);
+  });
+
+  it('--json prints the same array as before, color on or not', async () => {
+    const { run, deps, tg } = await tree();
+    deps.color = true;
+    const expected = JSON.stringify(await tg.tasks.list({ states: ['proposed', 'open', 'claimed', 'waiting', 'blocked', 'parked'], orderBy: 'created' }));
+    expect(await run('list', '--json')).toBe(expected);
+  });
+
+  it('ready is unchanged', async () => {
+    const { run, a } = await tree();
+    expect(await run('ready')).toMatch(new RegExp(`^${a.id}  P2  Sign in  \\[open\\]$`, 'm'));
   });
 });
