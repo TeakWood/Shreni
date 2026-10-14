@@ -316,7 +316,7 @@ The follow-up questions differ too. A Kshetra keeps today's provider, model and 
 - **Tracker to Kshetra:** `shreni init --mode kshetra` on a tracker repo, confirmed by typing the project's name. It is the only way a tracker repo is ever worked.
 - **Kshetra to tracker:** allowed once no worker is running, after a y/N in a terminal; it removes the repo from the registry and keeps the project. `kshetra.yaml` is gitignored, so its settings are kept aside in `kshetra.yaml.bak`, not deleted.
 - **`shreni start`** refuses a Kshetra whose repo holds a `tracker.yaml`, and, run from a tracker repo, refuses when there is nothing else to start or it names the tracker.
-- **Init again in the same mode** refreshes the project and resumes any phase left unfinished.
+- **Init again in the same mode** refreshes the project and resumes any phase left unfinished. An existing `kshetra.yaml` is kept as it is, comments included: init adds only `project` and `database` when they are missing, and asks none of the questions the file already answers. The file's `id` is the slug. A flag naming a setting (`--slug`, `--provider`, `--model`, `--merge-policy`, `--language`, `--pack`) is not applied, with a warning. Init still checks what the file names, warning without changing it: a base branch missing on origin, or a `repo.remote` that isn't origin. A file that doesn't load, or whose `repo.path` is another repo, stops init before any phase runs. Its dry run lists each setting it would change in the file, or says it changes none.
 
 ## Project config
 

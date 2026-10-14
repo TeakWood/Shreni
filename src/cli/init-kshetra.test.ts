@@ -42,6 +42,7 @@ vi.mock('fs', () => ({
   readlinkSync: mockReadlinkSync,
   chmodSync: mockChmodSync,
   rmSync: mockRmSync,
+  realpathSync: Object.assign((p: string) => p, { native: (p: string) => p }),
 }));
 
 const mockRegisterKshetra = vi.fn();
@@ -98,7 +99,6 @@ const {
   printPackTemplateDiffs,
   upgradeKshetraStack,
   smokeCheckToolchain,
-  readExistingGates,
   formatGatesSummary,
   createRagIndexStub,
   registerWithSthapathi,
@@ -108,6 +108,7 @@ const {
   resolveMergePolicy,
   resolveInitMainBranch,
   recordProjectId,
+  remoteKey,
 } = await import('./init-kshetra');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -682,32 +683,6 @@ describe('smokeCheckToolchain', () => {
 
 // ── Quality gates at init (yds.15) ───────────────────────────────────────────
 
-describe('readExistingGates', () => {
-  it('returns undefined when no config exists', () => {
-    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toBeUndefined();
-  });
-
-  it('returns the gates block from an existing config', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('id: myapp\ngates:\n  coverage:\n    level: block\n');
-    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toEqual({
-      coverage: { level: 'block' },
-    });
-  });
-
-  it('returns undefined when the config has no gates block', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('id: myapp\n');
-    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toBeUndefined();
-  });
-
-  it('returns undefined on unparseable YAML', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('id: [unclosed');
-    expect(readExistingGates('/repos/myapp/.shreni/kshetra.yaml')).toBeUndefined();
-  });
-});
-
 describe('formatGatesSummary', () => {
   const defaults = {
     test: { level: 'block' as const },
@@ -796,6 +771,9 @@ describe('registerWithSthapathi', () => {
 describe('initKshetra', () => {
   const ID = '00000000-0000-4000-8000-000000000001';
   const CONFIG = '/repos/myapp/.shreni/kshetra.yaml';
+  /** The smallest kshetra.yaml that loads, with `extra` top-level lines below its name. */
+  const valid = (extra = '') =>
+    `id: myapp\nname: Myapp\n${extra}repo:\n  path: /repos/myapp\n  remote: git@github.com:TeakWood/myapp.git\nstack:\n  language: typescript\n`;
   /** Files written, read back as the real fs would. */
   function disk(initial: Record<string, string> = {}) {
     const files = new Map(Object.entries(initial));
@@ -934,7 +912,7 @@ describe('initKshetra', () => {
     });
 
     it('a re-run keeps the project and database the config names', async () => {
-      files.set(CONFIG, `id: myapp\nname: Myapp\nproject: ${ID}\ndatabase: acme\n`);
+      files.set(CONFIG, valid(`project: ${ID}\ndatabase: acme\n`));
       const e = engine([]);
       await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
       expect(e.database).toHaveBeenCalledWith('acme');
@@ -972,7 +950,7 @@ describe('initKshetra', () => {
   });
 
   it('preserves an existing gates block on re-init instead of resetting to defaults', async () => {
-    files.set(CONFIG, 'id: myapp\ngates:\n  coverage:\n    level: block\n');
+    files.set(CONFIG, `${valid()}gates:\n  coverage:\n    level: block\n`);
     await init({ slug: 'myapp', path: '/repos/myapp' });
     expect(files.get(CONFIG)).toMatch(/coverage:\s*\n\s*level: block/);
   });
@@ -1104,6 +1082,198 @@ describe('initKshetra', () => {
     ).rejects.toThrow('Nothing to upgrade');
   });
 
+  describe('on an existing kshetra.yaml (hols.11)', () => {
+    // A tuned config, as bantu's was: a non-default base branch, a pinned merge
+    // policy, its own stack commands and model, and comments — no project yet.
+    const TUNED = [
+      '# bantu — tuned by hand',
+      'id: myapp',
+      'name: Myapp',
+      'repo:',
+      '  path: /repos/myapp',
+      '  remote: git@github.com:TeakWood/myapp.git',
+      '  mainBranch: study/main # the study base',
+      '  branchPattern: bead-{id}/{slug}',
+      '  mergePolicy: push',
+      'stack:',
+      '  language: typescript',
+      '  packageManager: npm',
+      "  buildCommand: ''",
+      '  testRunner: npm run test:unit',
+      '  coverageCommand: npm run cov',
+      '  lintCommand: npm run lint:ci',
+      'agents:',
+      '  provider: anthropic',
+      '  model: claude-opus-5 # pinned',
+      '  maxRoundsPerBead: 3',
+      '',
+    ].join('\n');
+
+    it('keeps every setting and comment, adding only the database and the project', async () => {
+      files.set(CONFIG, TUNED);
+      await init({ slug: 'myapp', path: '/repos/myapp' });
+      const expected = TUNED.replace('name: Myapp\n', `name: Myapp\nproject: ${ID}\ndatabase: local\n`);
+      expect(files.get(CONFIG)).toBe(expected);
+      expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', CONFIG);
+    });
+
+    it('asks none of the setup questions the config already answers', async () => {
+      files.set(CONFIG, TUNED);
+      mockQuestion.mockImplementation((_q, cb) => cb(''));
+      const tty = process.stdin.isTTY;
+      process.stdin.isTTY = true;
+      try {
+        await init({ slug: 'myapp', path: '/repos/myapp', noPack: true });
+      } finally {
+        process.stdin.isTTY = tty;
+      }
+      expect(mockPromptProvider).not.toHaveBeenCalled();
+      expect(mockQuestion).not.toHaveBeenCalled();
+      // The preflight checks the provider the config names.
+      expect(mockCheckProviderInstalled).toHaveBeenCalledWith('anthropic');
+    });
+
+    it('warns that a flag naming a setting is not applied to the existing config', async () => {
+      files.set(CONFIG, TUNED);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await init({ slug: 'myapp', path: '/repos/myapp', model: 'claude-sonnet-4-6', mergePolicy: 'pr' });
+      expect(files.get(CONFIG)).toContain('model: claude-opus-5 # pinned');
+      const out = warn.mock.calls.map(c => c.join(' ')).join('\n');
+      expect(out).toMatch(/--model.*--merge-policy.*not applied/);
+      warn.mockRestore();
+    });
+
+    it('rewrites a value holding # in place, not as a second key', () => {
+      files.set('/c.yaml', 'name: web\ndatabase: "team#1" # prod\n');
+      recordProjectId('/c.yaml', ID);
+      expect(files.get('/c.yaml')).toBe(`name: web\nproject: ${ID}\ndatabase: "team#1" # prod\n`);
+      recordProjectId('/c.yaml', 'a#b');
+      expect(files.get('/c.yaml')!.match(/^project:/gm)).toHaveLength(1);
+    });
+
+    it('registers the project with the remote the config names', async () => {
+      files.set(CONFIG, TUNED.replace('TeakWood/myapp.git', 'Acme/app.git'));
+      const e = engine([]);
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
+      expect(e.project).toHaveBeenCalledWith(expect.objectContaining({ repoUrl: 'git@github.com:Acme/app.git' }));
+    });
+
+    it('keeps a comment on the database line, and a leading --- marker', async () => {
+      files.set(CONFIG, `---\n${valid('database: acme # prod cluster\n')}`);
+      await init({ slug: 'myapp', path: '/repos/myapp' });
+      const text = files.get(CONFIG)!;
+      expect(text).toMatch(/^---\nid: myapp\nname: Myapp\nproject: .*\ndatabase: acme # prod cluster\n/);
+    });
+
+    it('runs a codex config that names no model, the schema default standing', async () => {
+      files.set(CONFIG, `${valid()}agents:\n  provider: openai\n`);
+      await init({ slug: 'myapp', path: '/repos/myapp', model: 'gpt-x' });
+      expect(mockCheckProviderInstalled).toHaveBeenCalledWith('openai');
+      expect(mockRegisterKshetra).toHaveBeenCalled();
+    });
+
+    it('registers under the config id', async () => {
+      files.set(CONFIG, valid());
+      await init({ slug: 'bantu', path: '/repos/myapp' });
+      expect(mockRegisterKshetra).toHaveBeenCalledWith('myapp', CONFIG);
+    });
+
+    it('checks the base branch it names on origin, warning when it is missing, and asks nothing', async () => {
+      files.set(CONFIG, TUNED);
+      mockCheckBaseBranch.mockResolvedValue({ exists: false });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await init({ slug: 'myapp', path: '/repos/myapp' });
+      expect(warn.mock.calls.map(c => c.join(' ')).join('\n')).toContain('origin/study/main is missing');
+      expect(mockQuestion).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('warns when repo.remote is not the origin it finds, keeping the file', async () => {
+      files.set(CONFIG, TUNED.replace('TeakWood/myapp.git', 'Old/myapp.git'));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await init({ slug: 'myapp', path: '/repos/myapp' });
+      expect(warn.mock.calls.map(c => c.join(' ')).join('\n')).toMatch(/repo\.remote .* is git@github\.com:Old\/myapp\.git, but origin is git@github\.com:TeakWood\/myapp\.git/);
+      expect(files.get(CONFIG)).toContain('remote: git@github.com:Old/myapp.git');
+      warn.mockRestore();
+    });
+
+    it('stops, naming the remote to add, when the repo has no origin, and creates no GitHub repo', async () => {
+      files.set(CONFIG, TUNED);
+      resolveExecByCommand({ 'git remote get-url origin': null });
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(init({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow(/no origin remote; .* git -C \/repos\/myapp remote add origin git@github\.com:TeakWood\/myapp\.git/);
+      expect(mockExecFile.mock.calls.find(c => c[0] === 'gh')).toBeUndefined();
+      // The re-run it prints carries only the path: the file answers the rest.
+      expect(err.mock.calls.map(c => c.join(' ')).join('\n')).toMatch(/shreni init --mode kshetra --path \/repos\/myapp$/m);
+      err.mockRestore();
+    });
+
+    it('preflights a provider a role overrides, as well as the flat one', async () => {
+      files.set(CONFIG, `${TUNED}  viharapala:\n    provider: openai\n    model: gpt-x\n`);
+      mockCheckProviderInstalled.mockImplementation(((p: string) =>
+        p === 'openai' ? { ok: false, bin: 'codex', message: 'install codex' } : { ok: true, bin: 'claude' }) as never);
+      await expect(init({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow('install codex');
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      mockCheckProviderInstalled.mockImplementation(() => ({ ok: true, bin: 'claude' }));
+    });
+
+    it('names the file when it is not valid YAML, before any phase', async () => {
+      files.set(CONFIG, 'id: [unclosed\n');
+      const e = engine([]);
+      await expect(initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e })).rejects.toThrow(`${CONFIG} is not valid YAML`);
+      expect(e.database).not.toHaveBeenCalled();
+    });
+
+    it('does not load a pack it will not apply', async () => {
+      files.set(CONFIG, TUNED);
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await init({ slug: 'myapp', path: '/repos/myapp', pack: 'nextjs-vitest', dryRun: true });
+      expect(mockLoadPackByName).not.toHaveBeenCalled();
+    });
+
+    it('stops before any phase when the config names another repo.path', async () => {
+      files.set(CONFIG, valid().replace('path: /repos/myapp', 'path: /old/myapp'));
+      const e = engine([]);
+      await expect(initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e })).rejects.toThrow(/repo\.path \/old\/myapp, not \/repos\/myapp/);
+      expect(e.database).not.toHaveBeenCalled();
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it('stops before any phase when the kept config does not load', async () => {
+      files.set(CONFIG, 'id: myapp\nname: Myapp\n');
+      const e = engine([]);
+      await expect(initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e })).rejects.toThrow(/Schema validation failed/);
+      expect(e.database).not.toHaveBeenCalled();
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it('--dry-run lists each setting it would change in kshetra.yaml', async () => {
+      files.set(CONFIG, TUNED);
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      await init({ slug: 'myapp', path: '/repos/myapp', dryRun: true });
+      const out = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
+      expect(out).toMatch(/kshetra\.yaml changes:\n\s+\+ database: local\n\s+\+ project: <registered by init>/);
+      expect(out).not.toContain('mergePolicy: push (default)');
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it('--dry-run says it changes no setting when the config has its project and database', async () => {
+      files.set(CONFIG, TUNED.replace('name: Myapp\n', `name: Myapp\nproject: ${ID}\ndatabase: acme\n`));
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      await init({ slug: 'myapp', path: '/repos/myapp', dryRun: true });
+      const out = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
+      expect(out).toContain('kshetra.yaml changes: none');
+    });
+  });
+
+  it('--dry-run on a fresh repo says it writes a new kshetra.yaml', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await init({ slug: 'myapp', path: '/repos/myapp', dryRun: true });
+    const out = logSpy.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(out).toContain('kshetra.yaml changes: a new file');
+  });
+
   it('a re-run resumes without duplicating the app repo, the config or the project', async () => {
     const e = engine();
     await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
@@ -1114,6 +1284,18 @@ describe('initKshetra', () => {
     expect(files.get(CONFIG)!.match(/^project:/gm)).toHaveLength(1);
     expect(files.get('/repos/myapp/CLAUDE.md')!.match(/shreni:begin/g)).toHaveLength(1);
     expect(mockRegisterKshetra).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('remoteKey', () => {
+  it('treats the ssh, https and .git-less forms of one repo as the same remote', () => {
+    const key = remoteKey('git@github.com:Acme/app.git');
+    expect(remoteKey('https://github.com/acme/app')).toBe(key);
+    expect(remoteKey('https://user@github.com/Acme/app.git/')).toBe(key);
+    expect(remoteKey('ssh://git@github.com/Acme/app.git')).toBe(key);
+    expect(remoteKey('github.com:acme/app')).toBe(key);
+    expect(remoteKey('ssh://git@github.com:22/acme/app.GIT')).toBe(key);
+    expect(remoteKey('git@github.com:Acme/other.git')).not.toBe(key);
   });
 });
 

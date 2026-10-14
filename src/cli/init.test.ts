@@ -111,6 +111,32 @@ describe('shreni init: the mode', { timeout: PGLITE_TIMEOUT }, () => {
     expect(d.kshetraCalls).toHaveBeenCalledWith(expect.objectContaining({ slug: 'web', path: resolve(r), engine: expect.any(Object) }));
   });
 
+  it('on an existing kshetra.yaml, takes the slug from its id without asking, warning that --slug is not applied', async () => {
+    const r = repo();
+    mkdirSync(join(r, '.shreni'));
+    writeFileSync(join(r, '.shreni', 'kshetra.yaml'), 'id: myapp\nname: Myapp\n');
+    const engine = vi.fn(deps(null).engine);
+    const d = deps(null, { interactive: () => true, engine });
+    await runInit({ mode: 'kshetra', path: r, slug: 'bantu' }, d);
+    expect(d.kshetraCalls).toHaveBeenCalledWith(expect.objectContaining({ slug: 'myapp' }));
+    expect(engine).toHaveBeenCalledWith(expect.objectContaining({ name: 'myapp' }));
+    expect(d.out.join('\n')).toMatch(/--slug bantu not applied: .*kshetra\.yaml names id myapp/);
+    // No flag, no warning: the id is simply the slug.
+    const quiet = deps(null, { interactive: () => true });
+    await runInit({ mode: 'kshetra', path: r }, quiet);
+    expect(quiet.kshetraCalls).toHaveBeenCalledWith(expect.objectContaining({ slug: 'myapp' }));
+    expect(quiet.out.join('\n')).not.toContain('not applied');
+  });
+
+  it('a kshetra.yaml that is not valid YAML stops init, naming the file, before the slug question', async () => {
+    const r = repo();
+    mkdirSync(join(r, '.shreni'));
+    writeFileSync(join(r, '.shreni', 'kshetra.yaml'), 'id: [unclosed\n');
+    const d = deps(null, { interactive: () => true, ask: async () => { throw new Error('asked'); } });
+    await expect(runInit({ mode: 'kshetra', path: r }, d)).rejects.toThrow(/kshetra\.yaml is not valid YAML/);
+    expect(d.kshetraCalls).not.toHaveBeenCalled();
+  });
+
   it('--mode kshetra runs the Kshetra phases with the engine\'s, passing every option through', async () => {
     const d = deps(null);
     const r = repo();

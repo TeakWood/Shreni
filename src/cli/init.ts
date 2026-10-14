@@ -239,7 +239,13 @@ export async function runInit(opts: InitOpts, deps: InitDeps = defaultInitDeps()
   const current = isTracker ? loadTrackerConfig(trackerPath) : undefined;
   // The name the repo already goes by: the tracker's, or the Kshetra's id.
   const slugDefault = current?.name ?? (isKshetra ? kshetraId(kshetraPath) : undefined) ?? basename(path);
-  const slug = opts.slug ?? (deps.interactive() ? await withDefault(deps, mode === 'kshetra' ? 'Kshetra slug' : 'Project name', slugDefault) : slugDefault);
+  // A kept kshetra.yaml already names the Kshetra (hols.11): its id is the slug,
+  // and init asks nothing the file answers.
+  const keptId = mode === 'kshetra' && isKshetra && !opts.upgrade ? kshetraId(kshetraPath) : undefined;
+  if (keptId && opts.slug && opts.slug !== keptId) {
+    deps.print(`  ⚠ --slug ${opts.slug} not applied: ${kshetraPath} names id ${keptId}, and init keeps its settings.`);
+  }
+  const slug = keptId ?? opts.slug ?? (deps.interactive() ? await withDefault(deps, mode === 'kshetra' ? 'Kshetra slug' : 'Project name', slugDefault) : slugDefault);
 
   if (mode === 'kshetra') {
     // Tracker to Kshetra: only ever asked for, and confirmed by name. A run
@@ -260,12 +266,15 @@ export async function runInit(opts: InitOpts, deps: InitDeps = defaultInitDeps()
 
 /** The id a kshetra.yaml names, read without checking the rest of the file. */
 function kshetraId(file: string): string | undefined {
+  let doc: { id?: unknown } | null;
   try {
-    const id = (yaml.load(readFileSync(file, 'utf8')) as { id?: unknown } | null)?.id;
-    return typeof id === 'string' && id ? id : undefined;
-  } catch {
-    return undefined;
+    doc = yaml.load(readFileSync(file, 'utf8')) as { id?: unknown } | null;
+  } catch (err) {
+    // Before any question is asked: init keeps this file, so it must load.
+    throw new Error(`${file} is not valid YAML (${(err as Error).message}); fix it or move it aside, then init again`);
   }
+  const id = doc?.id;
+  return typeof id === 'string' && id ? id : undefined;
 }
 
 async function withDefault(deps: InitDeps, question: string, def: string): Promise<string> {

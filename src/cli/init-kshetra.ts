@@ -1,12 +1,12 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { writeFileSync, appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'fs';
 import { resolve, join } from 'path';
 import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
 import { ragIndexDir } from '../kshetra/state-locations';
 import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
-import { GATES_DEFAULTS, loadKshetraConfig, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
+import { AGENT_ROLES, GATES_DEFAULTS, loadKshetraConfig, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
 import { setupInstructions } from './task';
 import { onBeads } from '../policy/migrate/kshetra';
 import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
@@ -78,21 +78,88 @@ export interface InitEngine {
 /** The project and database an existing config names, kept across a re-run. */
 export function readProjectFields(configPath: string): { project?: string; database?: string } {
   if (!existsSync(configPath)) return {};
-  const doc = yaml.load(readFileSync(configPath, 'utf8')) as Record<string, unknown> | null;
+  let doc: Record<string, unknown> | null;
+  try {
+    doc = yaml.load(readFileSync(configPath, 'utf8')) as Record<string, unknown> | null;
+  } catch (err) {
+    throw new Error(`${configPath} is not valid YAML (${(err as Error).message}); fix it or move it aside, then init again`);
+  }
   const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
   return { project: str(doc?.project), database: str(doc?.database) };
 }
 
-/** Writes `project: <uuid>` into a config, in place: the rest of the file, comments too, stays as it is. */
-export function recordProjectId(configPath: string, id: string): void {
+/**
+ * Writes `<key>: <value>` into a config's top level, in place: the rest of the
+ * file, comments too, stays as it is. A missing key goes below the first of
+ * `after` the file has, else at the top.
+ */
+function recordTopLevel(configPath: string, key: string, value: string, after: string[]): void {
   const text = readFileSync(configPath, 'utf8');
-  const line = `project: ${id}`;
-  const next = /^project:.*$/m.test(text)
-    ? text.replace(/^project:.*$/m, line)
-    : /^name:.*$/m.test(text)
-      ? text.replace(/^(name:.*)$/m, `$1\n${line}`)
+  const line = `${key}: ${value}`;
+  // The key's value, and any comment after it, which a rewrite keeps.
+  const own = new RegExp(`^${key}:[ \\t]*([^\\n]*?)([ \\t]+#.*)?$`, 'm');
+  const found = own.exec(text);
+  if (found && found[1].replace(/^(['"])(.*)\1$/, '$2') === value) return;
+  const anchor = after.map(k => new RegExp(`^(${k}:.*)$`, 'm')).find(re => re.test(text));
+  const next = found
+    ? text.replace(own, `${line}$2`)
+    : anchor
+      ? text.replace(anchor, `$1\n${line}`)
       : `${line}\n${text}`;
   if (next !== text) writeFileSync(configPath, next, 'utf8');
+}
+
+/** Writes `project: <uuid>` into a config, in place. */
+export function recordProjectId(configPath: string, id: string): void {
+  recordTopLevel(configPath, 'project', id, ['name', 'id']);
+}
+
+/** Writes `database: <name>` into a config, in place. */
+export function recordDatabase(configPath: string, database: string): void {
+  recordTopLevel(configPath, 'database', database, ['project', 'name', 'id']);
+}
+
+/**
+ * An existing kshetra.yaml, which init keeps as it is (hols.11). It must load
+ * and name this repo, or init stops before any phase rather than build over it.
+ */
+export function loadExistingConfig(configPath: string, repoPath: string): KshetraConfig | undefined {
+  if (!existsSync(configPath)) return undefined;
+  const config = loadKshetraConfig(configPath);
+  // The same repo reached through a symlink, or in another letter case on a
+  // case-insensitive volume, is still this repo.
+  const real = (p: string) => { try { return realpathSync.native(p); } catch { return resolve(p); } };
+  if (real(config.repo.path) !== real(repoPath)) {
+    throw new Error(
+      `${configPath} names repo.path ${config.repo.path}, not ${repoPath}; ` +
+        `fix repo.path or move the file aside, then init again`,
+    );
+  }
+  return config;
+}
+
+/** A git remote as host/path, so ssh and https forms of one repo compare equal. */
+export function remoteKey(url: string): string {
+  return url
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z+]+:\/\/(?:[^@/]+@)?/, '')
+    .replace(/^[^@/:]+@/, '')
+    .replace(/^([^/:]+):\d*\//, '$1/')
+    .replace(/^([^/:]+):/, '$1/')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '');
+}
+
+function stackFromConfig(stack: StackConfig): DetectedStack {
+  return {
+    language: stack.language,
+    packageManager: stack.packageManager,
+    buildCommand: stack.buildCommand,
+    testRunner: stack.testRunner,
+    lintCommand: stack.lintCommand,
+    unknown: false,
+  };
 }
 
 // Resolve the selected provider + model from init opts (§3.5). Validates the
@@ -311,20 +378,6 @@ export async function printPackTemplateDiffs(pack: Pack, repoPath: string): Prom
 
 // ── Quality gates at init (yds.15) ───────────────────────────────────────────
 
-// A re-init never clobbers an operator's gate tuning: when the existing config
-// already carries a gates block, it is preserved verbatim. Any parse problem
-// falls through to the defaults path (the config is regenerated anyway).
-export function readExistingGates(configPath: string): Record<string, unknown> | undefined {
-  if (!existsSync(configPath)) return undefined;
-  try {
-    const existing = yaml.load(readFileSync(configPath, 'utf8')) as Record<string, unknown> | null;
-    const gates = existing?.['gates'];
-    return gates && typeof gates === 'object' ? (gates as Record<string, unknown>) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 // Print what will actually gate this Kshetra: the enforcement level per gate
 // and, for the delegate-first gates, the command the toolchain resolved ('' =
 // a visible skip; unset = the language-profile default fills in at runtime).
@@ -454,10 +507,7 @@ export async function resolveInitMainBranch(
   try {
     ({ exists } = await checkBaseBranch(kshetra));
   } catch (err) {
-    console.warn(
-      `  ⚠ could not check origin for "${branch}": ${(err as Error).message}. ` +
-        `Continuing — the daemon will validate it at runtime.`,
-    );
+    console.warn(couldNotCheckBranch(branch, err));
     return branch;
   }
 
@@ -477,12 +527,28 @@ export async function resolveInitMainBranch(
       );
     }
   } else {
-    console.warn(
-      `  ⚠ origin/${branch} is missing — the daemon will PAUSE this Kshetra until it exists. ` +
-        `Create it later with: shreni base-branch create ${slug}`,
-    );
+    console.warn(missingBranch(branch, slug));
   }
   return branch;
+}
+
+const missingBranch = (branch: string, slug: string) =>
+  `  ⚠ origin/${branch} is missing — the daemon will PAUSE this Kshetra until it exists. ` +
+  `Create it later with: shreni base-branch create ${slug}`;
+const couldNotCheckBranch = (branch: string, err: unknown) =>
+  `  ⚠ could not check origin for "${branch}": ${(err as Error).message}. ` +
+  `Continuing — the daemon will validate it at runtime.`;
+
+// A kept config's base branch, checked on origin (hols.11): a missing one gets
+// the warning the interview gives, since the daemon pauses the Kshetra on it.
+async function warnMissingBaseBranch(config: KshetraConfig, slug: string): Promise<void> {
+  const branch = config.repo.mainBranch;
+  try {
+    const { exists } = await checkBaseBranch(config);
+    if (!exists) console.warn(missingBranch(branch, slug));
+  } catch (err) {
+    console.warn(couldNotCheckBranch(branch, err));
+  }
 }
 
 // Suggest-and-confirm (84m.3). A single top scorer asks Y/n; a tie asks which
@@ -664,7 +730,9 @@ interface InitPhase {
 
 // Reconstruct the exact command to re-run init, so a failure message can tell the
 // operator precisely how to resume (completed phases will no-op).
-function buildReRunCommand(opts: InitKshetraOpts): string {
+function buildReRunCommand(opts: InitKshetraOpts, kept: boolean): string {
+  // A kept config answers everything else, so its flags would not apply.
+  if (kept) return `shreni init --mode kshetra --path ${opts.path}`;
   const parts = ['shreni init --mode kshetra', `--slug ${opts.slug}`, `--path ${opts.path}`];
   if (opts.org) parts.push(`--org ${opts.org}`);
   if (opts.provider) parts.push(`--provider ${opts.provider}`);
@@ -722,13 +790,28 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   if (opts.upgrade && !opts.pack) {
     throw new Error('--upgrade requires --pack <name>.');
   }
+  const configTarget = join(repoPath, SHRENI_DIR, 'kshetra.yaml');
+  // The database and project the config names, kept on a re-run; a tracker's
+  // when this Kshetra replaces one.
+  const own = readProjectFields(configTarget);
+  // A Kshetra still on beads is moved by shreni migrate, which imports its tasks;
+  // init would register an empty project and leave them behind.
+  if (!opts.upgrade && existsSync(configTarget) && !own.project && onBeads({ repo: { path: repoPath } }, configTarget)) {
+    throw new Error(`${opts.slug} is still on beads; run shreni migrate ${opts.slug} to move its tasks to the engine, then init again if needed`);
+  }
+  // An existing kshetra.yaml is the operator's (hols.11): init keeps it as it
+  // is, adds only the project and database it owns, and asks nothing it answers.
+  const existing = opts.upgrade ? undefined : loadExistingConfig(configTarget, repoPath);
+  const slug = existing?.id ?? opts.slug;
+
   // Load + validate the pack before anything mutates (a bad pack aborts clean).
-  let pack: Pack | undefined = opts.pack ? loadPackByName(opts.pack) : undefined;
+  // A kept config takes no pack, so one named for it is not loaded.
+  let pack: Pack | undefined = opts.pack && !existing ? loadPackByName(opts.pack) : undefined;
 
   // No explicit --pack: score installed packs' detect blocks and SUGGEST the
   // best match with interactive confirm (84m.3). Never silently applied: a
   // non-TTY run and --no-pack keep today's bare-profile path byte-identically.
-  if (!pack && !opts.noPack && process.stdin.isTTY) {
+  if (!existing && !pack && !opts.noPack && process.stdin.isTTY) {
     pack = await confirmSuggestedPack(repoPath);
   }
 
@@ -751,7 +834,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     await printPackTemplateDiffs(pack, repoPath);
     return;
   }
-  const reRunCmd = buildReRunCommand(opts);
+  const reRunCmd = buildReRunCommand(opts, !!existing);
 
   // ── Preflight (§3.5) — provider selection + install hard gate + detection ────
   // This runs BEFORE any network call or filesystem write and is the whole of
@@ -759,12 +842,24 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   // interactively (default Claude); otherwise take the flag (or fall through to
   // the Claude default). An invalid provider throws with the valid set; a missing
   // provider CLI is a hard gate that leaves the repo untouched.
-  const providerName =
-    opts.provider ?? (process.stdin.isTTY ? await promptProvider() : undefined);
-  const agents = resolveAgents({ provider: providerName, model: opts.model });
+  // An existing config's agents are the ones that run, so the preflight checks those.
+  const agents = existing
+    ? { provider: existing.agents.provider, model: existing.agents.model }
+    : resolveAgents({
+        provider: opts.provider ?? (process.stdin.isTTY ? await promptProvider() : undefined),
+        model: opts.model,
+      });
   const preflight = checkProviderInstalled(agents.provider);
   if (!preflight.ok) {
     throw new Error(preflight.message);
+  }
+  // A kept config may give a role its own provider; that CLI must be there too.
+  const roleProviders = existing
+    ? [...new Set(AGENT_ROLES.map(r => existing.agents[r]?.provider).filter((p): p is Provider => !!p && p !== agents.provider))]
+    : [];
+  for (const p of roleProviders) {
+    const check = checkProviderInstalled(p);
+    if (!check.ok) throw new Error(check.message);
   }
   const providerLabel = `${PROVIDER_REGISTRY[agents.provider].cliName} (${agents.model})`;
   console.log(`Provider: ${providerLabel} — CLI found at "${preflight.bin}".`);
@@ -775,22 +870,35 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     );
   }
 
+  if (existing) {
+    const ignored = [
+      ['--provider', opts.provider], ['--model', opts.model], ['--merge-policy', opts.mergePolicy],
+      ['--language', opts.language], ['--pack', opts.pack],
+    ].filter(([, v]) => v !== undefined).map(([flag]) => flag);
+    console.log(`  Keeping the settings in ${configTarget}.`);
+    if (ignored.length) {
+      console.warn(
+        `  ⚠ ${ignored.join(', ')} not applied: ${configTarget} exists and init keeps its settings; ` +
+          `edit the file to change them` +
+          `${opts.pack ? ` (--pack ${opts.pack} --upgrade applies a pack's stack, but rewrites the file without its comments)` : ''}.`,
+      );
+    }
+  }
+
   // Detect the ecosystem from marker files (pure read); an explicit --language
   // overrides the detected language but keeps any detected packageManager/commands.
-  // A selected pack replaces detection: its merged stack is authoritative.
-  const stack: DetectedStack = packStack
-    ? {
-        language: packStack.language,
-        packageManager: packStack.packageManager,
-        buildCommand: packStack.buildCommand,
-        testRunner: packStack.testRunner,
-        lintCommand: packStack.lintCommand,
-        unknown: false,
-      }
+  // A selected pack replaces detection: its merged stack is authoritative. An
+  // existing config's stack is the one the gates run.
+  const stack: DetectedStack = existing
+    ? stackFromConfig(existing.stack)
+    : packStack
+    ? stackFromConfig(packStack)
     : opts.language
       ? { ...detectToolchain(repoPath), language: opts.language }
       : detectToolchain(repoPath);
-  if (pack) {
+  if (existing) {
+    // Nothing detected: the config's stack stands.
+  } else if (pack) {
     console.log(`  Using pack ${pack.name}@${pack.version} (${stack.language}).`);
   } else if (stack.unknown) {
     console.warn(
@@ -806,50 +914,56 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     console.warn(`  ⚠ ${warning}`);
   }
 
-  const configTarget = join(repoPath, SHRENI_DIR, 'kshetra.yaml');
-
   // ── Quality gates (yds.15) ───────────────────────────────────────────────────
-  // An existing gates block is operator-owned and preserved verbatim; otherwise
-  // start from the defaults, show them, and (on a TTY, outside --dry-run) offer
-  // the two advisory levels for adjustment. Either way the block is written
-  // explicitly into the generated config.
-  const existingGates = readExistingGates(configTarget);
-  let gates: Record<string, unknown> | GatesConfig;
-  if (existingGates) {
-    gates = existingGates;
-    console.log(`  Keeping the existing gates block from ${configTarget}.`);
-  } else {
+  // A kept config keeps its gates. Otherwise start from the defaults, show them,
+  // and (on a TTY, outside --dry-run) offer the two advisory levels for
+  // adjustment; the block is written explicitly into the generated config.
+  let gates: GatesConfig | undefined;
+  if (!existing) {
     gates = {
       test: { ...GATES_DEFAULTS.test },
       lint: { ...GATES_DEFAULTS.lint },
       coverage: { ...GATES_DEFAULTS.coverage },
       diffSize: { ...GATES_DEFAULTS.diffSize },
     };
-    console.log(formatGatesSummary(gates as GatesConfig, stack));
+    console.log(formatGatesSummary(gates, stack));
     if (process.stdin.isTTY && !opts.dryRun) {
       const answer = (
         await promptLine('Accept these gate levels? [Y/n]: ')
       ).trim();
       if (answer && !/^y(es)?$/i.test(answer)) {
         gates = await promptGates();
-        console.log(formatGatesSummary(gates as GatesConfig, stack));
+        console.log(formatGatesSummary(gates, stack));
       }
     }
   }
   // repo.mergePolicy (wax): flag wins, else prompt on a TTY, else silent default.
-  const mergePolicy = await resolveMergePolicy(opts.mergePolicy, {
+  const mergePolicy = existing ? undefined : await resolveMergePolicy(opts.mergePolicy, {
     isTTY: Boolean(process.stdin.isTTY),
     dryRun: opts.dryRun,
   });
 
+  const replaced = opts.replaces ? readProjectFields(opts.replaces) : {};
+  const kept = { project: own.project ?? replaced.project, database: own.database ?? replaced.database };
+  const database = kept.database ?? 'local';
+
   if (opts.dryRun) {
     console.log('\n--dry-run — plan only, nothing written:');
     console.log(`  provider:    ${providerLabel}`);
-    console.log(`  mergePolicy: ${mergePolicy ?? 'push'}${mergePolicy ? '' : ' (default)'}`);
+    if (!existing) console.log(`  mergePolicy: ${mergePolicy ?? 'push'}${mergePolicy ? '' : ' (default)'}`);
     console.log(`  repo:        ${repoPath}`);
     console.log(`  config:      ${configTarget}`);
     if (pack) console.log(`  pack:        ${pack.name}@${pack.version}`);
-    console.log(`  conventions: ${join(repoPath, STYLE_GUIDE_FILE)}, ${join(repoPath, ARCH_FILE)}${pack ? `, ${join(repoPath, REVIEW_GUIDE_FILE)}` : ''}`);
+    if (!existing) console.log(`  conventions: ${join(repoPath, STYLE_GUIDE_FILE)}, ${join(repoPath, ARCH_FILE)}${pack ? `, ${join(repoPath, REVIEW_GUIDE_FILE)}` : ''}`);
+    if (existing) {
+      const changes = [
+        ...(own.database ? [] : [`+ database: ${database}`]),
+        ...(own.project ? [] : [`+ project: ${kept.project ?? '<registered by init>'}`]),
+      ];
+      console.log(`  kshetra.yaml changes:${changes.length ? changes.map(c => `\n    ${c}`).join('') : ' none'}`);
+    } else {
+      console.log('  kshetra.yaml changes: a new file');
+    }
     console.log('\nRe-run without --dry-run to apply.');
     return;
   }
@@ -868,28 +982,33 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   // repo.mainBranch (uvu.3): resolved in the Base branch phase (after origin
   // exists), consumed by generateKshetraYaml in the Config phase.
   let mainBranch = 'main';
-  // The database and project the config names, kept on a re-run; a tracker's
-  // when this Kshetra replaces one.
-  const own = readProjectFields(configTarget);
-  // A Kshetra still on beads is moved by shreni migrate, which imports its tasks;
-  // init would register an empty project and leave them behind.
-  if (existsSync(configTarget) && !own.project && onBeads({ repo: { path: repoPath } }, configTarget)) {
-    throw new Error(`${opts.slug} is still on beads; run shreni migrate ${opts.slug} to move its tasks to the engine, then init again if needed`);
-  }
-  const replaced = opts.replaces ? readProjectFields(opts.replaces) : {};
-  const kept = { project: own.project ?? replaced.project, database: own.database ?? replaced.database };
-  const database = kept.database ?? 'local';
   let repoRemote = '';
   const engine = opts.engine;
 
   const phases: InitPhase[] = [
     {
       name: 'App repo',
-      recovery:
-        `ensure \`gh\` is authenticated (gh auth status) and you can push to GitHub; ` +
-        `or create the repo at ${repoPath} yourself with an 'origin' remote and re-run.`,
+      recovery: existing
+        ? `give ${repoPath} the git repo and 'origin' remote ${configTarget} names (repo.remote), and re-run.`
+        : `ensure \`gh\` is authenticated (gh auth status) and you can push to GitHub; ` +
+          `or create the repo at ${repoPath} yourself with an 'origin' remote and re-run.`,
       run: async () => {
-        await ensureAppRepo(getOrg, opts.slug, repoPath);
+        // A kept config names its remote: init wires nothing new on GitHub for it.
+        if (existing) {
+          if (!existsSync(join(repoPath, '.git'))) {
+            throw new Error(`${repoPath} is not a git repo; clone ${existing.repo.remote} there, then init again`);
+          }
+          try {
+            await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
+          } catch {
+            throw new Error(
+              `${repoPath} has no origin remote; ${configTarget} names ${existing.repo.remote}: ` +
+                `git -C ${repoPath} remote add origin ${existing.repo.remote}, then init again`,
+            );
+          }
+          return;
+        }
+        await ensureAppRepo(getOrg, slug, repoPath);
       },
     },
     {
@@ -898,7 +1017,12 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
         `ensure the repo at ${repoPath} has an 'origin' remote you can push to, ` +
         `or set repo.mainBranch in the config to a branch that exists on origin.`,
       run: async () => {
-        mainBranch = await resolveInitMainBranch(repoPath, opts.slug, {
+        // A kept config names its base branch: check it, asking nothing.
+        if (existing) {
+          await warnMissingBaseBranch(existing, slug);
+          return;
+        }
+        mainBranch = await resolveInitMainBranch(repoPath, slug, {
           isTTY: Boolean(process.stdin.isTTY),
         });
       },
@@ -916,39 +1040,49 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
       run: async () => {
         repoRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
         addToGitignore(repoPath);
-        // repoPath is already absolute; the loader does NOT expand ~ or
-        // resolve relatives, so init bakes absolute paths in.
-        // A pack materializes its own conventions templates (skip-and-warn);
-        // otherwise the generic stubs are scaffolded as before.
-        const conventions = pack
-          ? materializePackTemplates(pack, repoPath)
-          : scaffoldConventions(repoPath);
-        const yamlContent = generateKshetraYaml({
-          slug: opts.slug,
-          repoPath,
-          repoRemote,
-          mainBranch,
-          stack,
-          packStack,
-          pack: pack ? `${pack.name}@${pack.version}` : undefined,
-          conventions,
-          agents,
-          mergePolicy,
-          gates,
-          database,
-          project: kept.project,
-        });
-        configPath = writeKshetraConfig(repoPath, yamlContent);
+        if (existing) {
+          if (!own.database) recordDatabase(configPath, database);
+          if (remoteKey(existing.repo.remote) !== remoteKey(repoRemote)) {
+            console.warn(
+              `  ⚠ repo.remote in ${configPath} is ${existing.repo.remote}, but origin is ${repoRemote}; ` +
+                `edit repo.remote if workers should push to origin.`,
+            );
+          }
+        } else {
+          // repoPath is already absolute; the loader does NOT expand ~ or
+          // resolve relatives, so init bakes absolute paths in.
+          // A pack materializes its own conventions templates (skip-and-warn);
+          // otherwise the generic stubs are scaffolded as before.
+          const conventions = pack
+            ? materializePackTemplates(pack, repoPath)
+            : scaffoldConventions(repoPath);
+          const yamlContent = generateKshetraYaml({
+            slug: opts.slug,
+            repoPath,
+            repoRemote,
+            mainBranch,
+            stack,
+            packStack,
+            pack: pack ? `${pack.name}@${pack.version}` : undefined,
+            conventions,
+            agents,
+            mergePolicy,
+            gates,
+            database,
+            project: kept.project,
+          });
+          configPath = writeKshetraConfig(repoPath, yamlContent);
+        }
         // The Kshetra block in its provider's file, and the prime hooks (policy spec, "Instructions for agent sessions").
         for (const l of setupInstructions({ kind: 'kshetra', path: configPath, config: loadKshetraConfig(configPath) })) console.log(`  ${l}`);
-        createRagIndexStub(opts.slug);
+        createRagIndexStub(slug);
       },
     },
     {
       name: 'Project',
       recovery: `run shreni db check; if the config names a project this database lacks, fix database: or delete project:.`,
       run: async () => {
-        const id = await engine.project({ database, existing: kept.project, repoUrl: repoRemote });
+        const id = await engine.project({ database, existing: kept.project, repoUrl: existing?.repo.remote ?? repoRemote });
         recordProjectId(configPath, id);
         // The repo is one kind of project or the other, never both.
         if (opts.replaces && existsSync(opts.replaces)) {
@@ -961,7 +1095,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
       name: 'Register',
       recovery: `check that ~/.shreni/registry.json is writable.`,
       run: async () => {
-        registerWithSthapathi(opts.slug, configPath);
+        registerWithSthapathi(slug, configPath);
       },
     },
   ];
@@ -972,7 +1106,7 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   // enabled. Only the provider name (not the slug/paths/remote) is sent.
   emitTelemetry('kshetra_init', { provider: agents.provider });
 
-  console.log(`\n✓ Initialization done — Shreni is now ready to work on "${opts.slug}".`);
+  console.log(`\n✓ Initialization done — Shreni is now ready to work on "${slug}".`);
   console.log(`  provider:   ${providerLabel}`);
   console.log(`  config:     ${configPath}`);
   console.log(`\nRun \`shreni start\` to begin.`);
