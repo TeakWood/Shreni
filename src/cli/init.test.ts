@@ -128,6 +128,26 @@ describe('shreni init: the mode', { timeout: PGLITE_TIMEOUT }, () => {
     expect(quiet.out.join('\n')).not.toContain('not applied');
   });
 
+  it('derives the default slug from a mixed-case folder in lowercase, other characters as hyphens (b8b)', async () => {
+    const r = join(repo(), 'Foo_Bar');
+    mkdirSync(join(r, '.git'), { recursive: true });
+    const d = deps(null);
+    await runInit({ mode: 'kshetra', path: r, yes: true }, d);
+    expect(d.kshetraCalls).toHaveBeenCalledWith(expect.objectContaining({ slug: 'foo-bar' }));
+  });
+
+  it('asks a slug again until it can be an id, and stops without a terminal when the folder gives none (b8b)', async () => {
+    const r = repo();
+    const answers = ['My_App', '-x', 'my-app'];
+    const d = deps(null, { interactive: () => true, ask: async () => answers.shift() ?? '' });
+    await runInit({ mode: 'kshetra', path: r }, d);
+    expect(d.kshetraCalls).toHaveBeenCalledWith(expect.objectContaining({ slug: 'my-app' }));
+    expect(d.out.filter(l => l.includes("can't be a Kshetra id"))).toHaveLength(2);
+    const odd = join(repo(), '___');
+    mkdirSync(join(odd, '.git'), { recursive: true });
+    await expect(runInit({ mode: 'kshetra', path: odd }, deps(null))).rejects.toThrow(/the folder name ___ gives no Kshetra id; pass --slug <id>/);
+  });
+
   it('a kshetra.yaml that is not valid YAML stops init, naming the file, before the slug question', async () => {
     const r = repo();
     mkdirSync(join(r, '.shreni'));

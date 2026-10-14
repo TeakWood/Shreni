@@ -109,6 +109,7 @@ const {
   resolveInitMainBranch,
   recordProjectId,
   remoteKey,
+  kshetraSlug,
 } = await import('./init-kshetra');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1274,6 +1275,49 @@ describe('initKshetra', () => {
     expect(out).toContain('kshetra.yaml changes: a new file');
   });
 
+  it('refuses a slug the id rule rejects before anything runs or is written, naming the rule (b8b)', async () => {
+    const e = engine([]);
+    await expect(initKshetra({ slug: 'Bad_Slug', path: '/repos/myapp', engine: e }))
+      .rejects.toThrow(/slug "Bad_Slug" .*lowercase letters, digits and hyphens/);
+    expect(mockExecFile).not.toHaveBeenCalled();
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(e.database).not.toHaveBeenCalled();
+  });
+
+  it('refuses a slug with a leading or doubled hyphen, but not on --upgrade, which takes the id from the file (b8b)', async () => {
+    await expect(init({ slug: '-foo', path: '/repos/myapp' })).rejects.toThrow(/slug "-foo" can't be a Kshetra id.*--slug foo/);
+    await expect(init({ slug: 'a--b', path: '/repos/myapp' })).rejects.toThrow(/can't be a Kshetra id/);
+    mockLoadPackByName.mockReturnValue(FAKE_PACK);
+    files.set(CONFIG, valid());
+    mockExecFile.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
+    await init({ slug: 'MyApp', path: '/repos/myapp', pack: 'nextjs-vitest', upgrade: true });
+    expect(files.get(CONFIG)).toContain('pack: nextjs-vitest@1');
+  });
+
+  it('a Config phase failing after origin resolved names neither origin nor the config, and the re-run keeps the written file (b8b)', async () => {
+    mockWriteFileSync.mockImplementation(((p: string, c: string) => {
+      if (p.endsWith('CLAUDE.md')) throw new Error('EACCES: CLAUDE.md');
+      files.set(p, c);
+    }) as never);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(init({ slug: 'myapp', path: '/repos/myapp', provider: 'claude' })).rejects.toThrow('EACCES');
+    const out = err.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(out).toContain('To recover: fix what the error above names, then re-run.');
+    expect(out).toMatch(/shreni init --mode kshetra --path \/repos\/myapp$/m);
+    err.mockRestore();
+  });
+
+  it('a Config phase failing on the config it wrote names the config in its recovery, not the origin remote (b8b)', async () => {
+    // The written config comes back unloadable.
+    mockWriteFileSync.mockImplementation(((p: string, c: string) => { files.set(p, p === CONFIG ? 'id: [unclosed\n' : c); }) as never);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(init({ slug: 'myapp', path: '/repos/myapp' })).rejects.toThrow();
+    const out = err.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(out).toMatch(/To recover: fix .*kshetra\.yaml/);
+    expect(out).not.toContain("'origin' remote");
+    err.mockRestore();
+  });
+
   it('a re-run resumes without duplicating the app repo, the config or the project', async () => {
     const e = engine();
     await initKshetra({ slug: 'myapp', path: '/repos/myapp', engine: e });
@@ -1284,6 +1328,15 @@ describe('initKshetra', () => {
     expect(files.get(CONFIG)!.match(/^project:/gm)).toHaveLength(1);
     expect(files.get('/repos/myapp/CLAUDE.md')!.match(/shreni:begin/g)).toHaveLength(1);
     expect(mockRegisterKshetra).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('kshetraSlug (b8b)', () => {
+  it('lowercases, turns each run of other characters into one hyphen, and trims hyphens', () => {
+    expect(kshetraSlug('Foo_Bar')).toBe('foo-bar');
+    expect(kshetraSlug('Shreni-sandbox')).toBe('shreni-sandbox');
+    expect(kshetraSlug('  My App (v2)! ')).toBe('my-app-v2');
+    expect(kshetraSlug('___')).toBe('');
   });
 });
 

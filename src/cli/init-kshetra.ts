@@ -6,7 +6,7 @@ import * as yaml from 'js-yaml';
 import { registerKshetra } from '../kshetra/registry';
 import { ragIndexDir } from '../kshetra/state-locations';
 import { loadPackByName, listPacks, mergeStack, type Pack } from '../kshetra/packs';
-import { AGENT_ROLES, GATES_DEFAULTS, loadKshetraConfig, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
+import { AGENT_ROLES, GATES_DEFAULTS, KSHETRA_ID_RE, KshetraConfigError, loadKshetraConfig, type GatesConfig, type StackConfig, type KshetraConfig } from '../kshetra/config';
 import { setupInstructions } from './task';
 import { onBeads } from '../policy/migrate/kshetra';
 import { checkBaseBranch, createBaseBranch } from '../sthapathi/base-branch';
@@ -136,6 +136,24 @@ export function loadExistingConfig(configPath: string, repoPath: string): Kshetr
     );
   }
   return config;
+}
+
+/** A name as a Kshetra id: lowercase, any run of other characters a hyphen (b8b). */
+export function kshetraSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Why a slug can't be a Kshetra id, or undefined when it can. Stricter than the
+ * schema's id rule: no leading, trailing or doubled hyphen, as kshetraSlug makes.
+ */
+export function slugProblem(slug: string): string | undefined {
+  if (slug && KSHETRA_ID_RE.test(slug) && kshetraSlug(slug) === slug) return undefined;
+  const suggestion = kshetraSlug(slug);
+  return (
+    `slug "${slug}" can't be a Kshetra id: use lowercase letters, digits and hyphens between them` +
+    `${suggestion ? `, e.g. --slug ${suggestion}` : ''}`
+  );
 }
 
 /** A git remote as host/path, so ssh and https forms of one repo compare equal. */
@@ -725,7 +743,8 @@ export function registerWithSthapathi(slug: string, configPath: string): void {
 interface InitPhase {
   name: string;
   run(): Promise<void>;
-  recovery: string;
+  /** How to recover, or a function of the error when that depends on what failed. */
+  recovery: string | ((err: Error) => string);
 }
 
 // Reconstruct the exact command to re-run init, so a failure message can tell the
@@ -748,7 +767,7 @@ function buildReRunCommand(opts: InitKshetraOpts, kept: boolean): string {
 // Run the mutating phases in order, printing a running/done/failed line each. On
 // the first failure, print WHAT failed + HOW to recover + the exact re-run
 // command, then re-throw so the CLI exits non-zero. Later phases do not run.
-async function runInitPhases(phases: InitPhase[], reRunCmd: string): Promise<void> {
+async function runInitPhases(phases: InitPhase[], reRunCmd: () => string): Promise<void> {
   for (const phase of phases) {
     console.log(`▶ ${phase.name} …`);
     try {
@@ -757,8 +776,8 @@ async function runInitPhases(phases: InitPhase[], reRunCmd: string): Promise<voi
     } catch (err) {
       const e = err as Error;
       console.error(`  ✗ ${phase.name} failed: ${e.message}`);
-      console.error(`\n  To recover: ${phase.recovery}`);
-      console.error(`  Then re-run (completed phases are skipped):\n    ${reRunCmd}`);
+      console.error(`\n  To recover: ${typeof phase.recovery === 'string' ? phase.recovery : phase.recovery(e)}`);
+      console.error(`  Then re-run (completed phases are skipped):\n    ${reRunCmd()}`);
       throw err;
     }
   }
@@ -803,6 +822,12 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
   // is, adds only the project and database it owns, and asks nothing it answers.
   const existing = opts.upgrade ? undefined : loadExistingConfig(configTarget, repoPath);
   const slug = existing?.id ?? opts.slug;
+  // The slug becomes a new config's id, so it must pass the id rule before
+  // anything runs. A kept config and --upgrade take the id from the file.
+  if (!existing && !opts.upgrade) {
+    const problem = slugProblem(slug);
+    if (problem) throw new Error(problem);
+  }
 
   // Load + validate the pack before anything mutates (a bad pack aborts clean).
   // A kept config takes no pack, so one named for it is not loaded.
@@ -834,7 +859,8 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     await printPackTemplateDiffs(pack, repoPath);
     return;
   }
-  const reRunCmd = buildReRunCommand(opts, !!existing);
+  // Once this run has written kshetra.yaml, a re-run keeps it, so its flags would not apply.
+  const reRunCmd = () => buildReRunCommand(opts, !!existing || existsSync(configTarget));
 
   // ── Preflight (§3.5) — provider selection + install hard gate + detection ────
   // This runs BEFORE any network call or filesystem write and is the whole of
@@ -1034,9 +1060,14 @@ export async function initKshetra(opts: InitKshetraOpts): Promise<void> {
     },
     {
       name: 'Config',
-      recovery:
-        `ensure the repo at ${repoPath} has an 'origin' remote ` +
-        `(git -C ${repoPath} remote get-url origin).`,
+      // Origin is read first, so the advice depends on how far the phase got.
+      recovery: err =>
+        !repoRemote
+          ? `ensure the repo at ${repoPath} has an 'origin' remote ` +
+            `(git -C ${repoPath} remote get-url origin).`
+          : err instanceof KshetraConfigError
+            ? `fix ${configTarget} so it loads, then re-run.`
+            : `fix what the error above names, then re-run.`,
       run: async () => {
         repoRemote = await exec('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
         addToGitignore(repoPath);

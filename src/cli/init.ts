@@ -3,7 +3,7 @@ import { basename, join, resolve } from 'path';
 import { createInterface } from 'readline';
 import { sql } from 'kysely';
 import * as yaml from 'js-yaml';
-import { initKshetra, readProjectFields, recordProjectId, SHRENI_DIR, type InitEngine, type InitKshetraOpts } from './init-kshetra';
+import { initKshetra, kshetraSlug, slugProblem, readProjectFields, recordProjectId, SHRENI_DIR, type InitEngine, type InitKshetraOpts } from './init-kshetra';
 import { loadTrackerConfig } from '../kshetra/project-config';
 import { addDatabaseEntry, loadUserConfig, resolveDatabase, USER_CONFIG_PATH } from '../kshetra/user-config';
 import { unregisterKshetra } from '../kshetra/registry';
@@ -238,14 +238,25 @@ export async function runInit(opts: InitOpts, deps: InitDeps = defaultInitDeps()
   const isKshetra = existsSync(kshetraPath);
   const current = isTracker ? loadTrackerConfig(trackerPath) : undefined;
   // The name the repo already goes by: the tracker's, or the Kshetra's id.
-  const slugDefault = current?.name ?? (isKshetra ? kshetraId(kshetraPath) : undefined) ?? basename(path);
+  // A Kshetra's folder name only suggests its id, so it is made to fit the id rule (b8b).
+  const nameDefault = current?.name ?? (isKshetra ? kshetraId(kshetraPath) : undefined) ?? basename(path);
+  const slugDefault = mode === 'kshetra' ? kshetraSlug(nameDefault) : nameDefault;
   // A kept kshetra.yaml already names the Kshetra (hols.11): its id is the slug,
   // and init asks nothing the file answers.
   const keptId = mode === 'kshetra' && isKshetra && !opts.upgrade ? kshetraId(kshetraPath) : undefined;
   if (keptId && opts.slug && opts.slug !== keptId) {
     deps.print(`  ⚠ --slug ${opts.slug} not applied: ${kshetraPath} names id ${keptId}, and init keeps its settings.`);
   }
-  const slug = keptId ?? opts.slug ?? (deps.interactive() ? await withDefault(deps, mode === 'kshetra' ? 'Kshetra slug' : 'Project name', slugDefault) : slugDefault);
+  let slug = keptId ?? opts.slug;
+  // A Kshetra slug that can't be an id is asked again in a terminal; without one,
+  // init stops here, before any question that follows.
+  while (slug === undefined) {
+    const answer = deps.interactive() ? await withDefault(deps, mode === 'kshetra' ? 'Kshetra slug' : 'Project name', slugDefault) : slugDefault;
+    const problem = mode === 'kshetra' ? slugProblem(answer) : undefined;
+    if (!problem) slug = answer;
+    else if (deps.interactive()) deps.print(`  ${problem}`);
+    else throw new Error(answer ? problem : `the folder name ${basename(path)} gives no Kshetra id; pass --slug <id>`);
+  }
 
   if (mode === 'kshetra') {
     // Tracker to Kshetra: only ever asked for, and confirmed by name. A run

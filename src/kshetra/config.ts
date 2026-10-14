@@ -275,8 +275,11 @@ const BudgetConfigSchema = z.object({
 // database and plan.validators; a Kshetra adds everything a worker needs.
 // The schema isn't strict: an old config's `beads:` block is stripped on load,
 // and legacyBeadsPath reads it from the file for `shreni migrate`.
+/** A Kshetra id, which init takes from its slug. */
+export const KSHETRA_ID_RE = /^[a-z0-9-]+$/;
+
 export const KshetraConfigSchema = ProjectConfigBase.extend({
-  id: z.string().regex(/^[a-z0-9-]+$/, 'id must be lowercase alphanumeric with hyphens'),
+  id: z.string().regex(KSHETRA_ID_RE, 'id must be lowercase alphanumeric with hyphens'),
   repo: RepoConfigSchema,
   stack: StackConfigSchema,
   // Provenance only ("<name>@<version>", e.g. nextjs-vitest@1): records which
