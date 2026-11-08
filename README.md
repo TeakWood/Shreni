@@ -2,7 +2,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
-[![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](#prerequisites)
+[![Node ≥ 22](https://img.shields.io/badge/node-%E2%89%A522-brightgreen.svg)](#prerequisites)
 [![Built with TypeScript](https://img.shields.io/badge/built%20with-TypeScript-3178c6.svg)](https://www.typescriptlang.org/)
 
 **Shreni is an AI builders' dojo — a team of AI agents that turns your ideas into a
@@ -64,7 +64,7 @@ Three convictions set Shreni apart from most agent frameworks:
 - **The agent-automation explorer** who wants to *study a real multi-agent system*,
   not another toy demo. Shreni is a working orchestrator → coder → reviewer → tester
   loop with recovery, watchdogs, quality gates, and an explicit git workflow —
-  readable TypeScript, 800+ tests, Apache-2.0. Fork it, instrument it, learn from it.
+  readable TypeScript, 2,500+ tests, Apache-2.0. Fork it, instrument it, learn from it.
 
 ## How it works
 
@@ -161,7 +161,7 @@ Start the harness and watch it work:
 ```bash
 shreni start                     # orchestrator begins polling for ready tasks
 shreni agents                    # see which agent is active and on what
-shreni phalaka start             # optional: local dashboard on 127.0.0.1
+shreni phalaka status            # the local dashboard (start launches it) on 127.0.0.1
 ```
 
 Sthapathi polls each registered project every 30 seconds (and re-checks
@@ -186,11 +186,19 @@ approval — the change merges to `main`.
 
 ## Status
 
-Shreni is **alpha**: the core loop, recovery/watchdog machinery, and merge policies
-are implemented and tested (800+ unit tests), but the install path is source-only
-and the provider story beyond Claude is experimental. Expect rough edges around
-onboarding and distribution — those are the current focus. Feedback and issues
-welcome.
+Shreni is **alpha**. The core loop, recovery/watchdog machinery, merge policies and
+the Postgres-backed task graph engine (which replaced beads in October 2026) are
+implemented and tested (2,500+ unit tests, plus integration tests against a real
+Postgres). What alpha means today:
+
+- **Source-only install** — clone, build, `npm install -g .`; no published package yet.
+- **Postgres is required** — you run the server; `shreni init` and `shreni db check`
+  set up and diagnose the database.
+- **Claude is the supported provider** — Codex and Gemini adapters are experimental.
+- **Older Kshetras on beads** must move with `shreni migrate` before they run.
+
+Expect rough edges around onboarding and distribution — those are the current focus.
+Feedback and issues welcome.
 
 ## Meet the team (architecture)
 
@@ -450,7 +458,7 @@ gates:                    # all optional — these are the defaults
   prompt is injected with the same resolved commands, so the agent iterates
   against exactly what the gate will enforce.
 - **`block` vs `warn`.** A failing `block` gate rejects the round with a per-gate
-  reason fed back to Silpi; a failing `warn` gate is noted on the bead but does
+  reason fed back to Silpi; a failing `warn` gate is noted on the task but does
   not block. Enforcement happens at the dispatch decision point — stronger than a
   bypassable git hook.
 - **Additive-stricter only.** The hard `build`/`test`/`lint` gates cannot be
@@ -459,14 +467,14 @@ gates:                    # all optional — these are the defaults
 - **`coverage`** records the percentages its command prints (statements /
   branches / functions / lines — istanbul/nyc/c8/jest/vitest text or
   text-summary, coverage.py, `go tool cover -func`, tarpaulin) on every
-  `gate_result`, so per-bead coverage is queryable from the ledger
+  `gate_result`, so per-task coverage is queryable from the ledger
   (`shreni show`). An optional `min:` per metric turns it into a threshold; with
   no `min:` it fails only when the command fails. **Cost:** on most repos the
   coverage command re-runs the whole test suite. If it prints no coverage
   summary, the gate says so every round (it is paying a second suite run for no
   signal) — enable a text reporter, or set `stack.coverageCommand: ""` to skip it.
 - **`diffSize`** is the one loop-native guard (no equivalent in the repo's own
-  tooling): it caps the bead branch's diff against `main` — a runaway-agent
+  tooling): it caps the task branch's (`bead-…`) diff against `main` — a runaway-agent
   tripwire. Defaults are conservative and `warn`-level; raise to `block` if an
   oversized diff must never reach review.
 
@@ -478,7 +486,7 @@ block sets **USD spend ceilings** so a runaway loop can't quietly rack up cost
 
 ```yaml
 budget:                     # both optional; omit the block for uncapped (default)
-  perBeadUsd: 5             # cap one bead's cumulative agent spend
+  perBeadUsd: 5             # cap one task's cumulative agent spend
   perKshetraUsd: 100        # cap the whole Kshetra's lifetime spend
 ```
 
